@@ -107,6 +107,12 @@ jobs:
 
       - name: Converter unit tests
         shell: bash
+        # The runner's default %TEMP% is an 8.3 short path (C:\Users\RUNNER~1\...),
+        # which realpath() expands, so containment checks that compare
+        # canonical paths reject the fixtures. runner.temp is a long path.
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: |
           npx jest tests/main/converter --ci --testPathIgnorePatterns integration --json --outputFile=jest-results.json || true
           node .github/scripts/jest-annotations.js jest-results.json
