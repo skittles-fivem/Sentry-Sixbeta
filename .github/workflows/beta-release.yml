@@ -106,7 +106,10 @@ jobs:
         run: npm ci
 
       - name: Converter unit tests
-        run: npx jest tests/main/converter --ci --testPathIgnorePatterns integration
+        shell: bash
+        run: |
+          npx jest tests/main/converter --ci --testPathIgnorePatterns integration --json --outputFile=jest-results.json || true
+          node .github/scripts/jest-annotations.js jest-results.json
 
       - name: Renderer tests
         run: npm run test:dashcam
