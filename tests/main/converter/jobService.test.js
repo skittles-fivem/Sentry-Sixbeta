@@ -2443,6 +2443,25 @@ describe('parallel conversion workers', () => {
     expect(done.timings.totalMs.encode).toBe(timings.reduce((sum, event) => sum + event.phases.encode, 0));
   });
 
+  test('releases an item\'s staging leases when its worker finishes, even if cleanup failed', async () => {
+    const releaseLeases = jest.fn();
+    const h = harness({
+      items: clips(2),
+      queueLimit: 10,
+      verifyResults: [Object.assign(new Error('decode failed'), { code: 'VERIFY_DECODE_FAILED' })],
+      stagingManager: {
+        releaseLeases,
+        cleanupOwnedArtifacts: jest.fn(async ({ ownedPaths }) => ({ cleaned: false, cleanupPending: Object.keys(ownedPaths) }))
+      }
+    });
+    const done = await h.service.whenIdle(await h.service.start({ ...CONFIG, concurrency: 2 }));
+
+    expect(done.items.map((item) => item.state)).toEqual(expect.arrayContaining(['failed']));
+    const released = releaseLeases.mock.calls.flatMap(([paths]) => paths);
+    expect(released.some((value) => /candidate\.mp4$/.test(value))).toBe(true);
+    expect(releaseLeases.mock.calls.length).toBe(2);
+  });
+
   test('recovery cleans and re-queues interrupted non-lead items before resuming', async () => {
     const h = harness({ items: [] });
     const candidate = (itemId) => `C:\\temp\\recover-parallel-${itemId}-candidate.mp4`;

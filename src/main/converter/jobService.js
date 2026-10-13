@@ -365,6 +365,11 @@ function createConverterJobService(deps) {
   }
 
   function finishItem(runtime, itemId) {
+    const paths = Object.values(ownershipFor(runtime, itemId)?.ownedPaths || {});
+    const item = currentItem(runtime, itemId);
+    if (typeof staging.releaseLeases === 'function') {
+      try { staging.releaseLeases([...paths, ...Object.values(item?.ownedPaths || {})]); } catch (_) { /* best effort */ }
+    }
     runtime.inFlight.delete(itemId);
     runtime.ownerships.delete(itemId);
     runtime.children.delete(itemId);

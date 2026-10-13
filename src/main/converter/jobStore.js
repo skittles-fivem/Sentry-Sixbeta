@@ -9,15 +9,19 @@ const MANIFEST_NAME = 'job.json';
 const TEMPORARY_MANIFEST_NAME = 'job.json.tmp';
 const SAFE_JOB_ID = /^[a-z0-9][a-z0-9_-]{0,127}$/;
 const WINDOWS_RESERVED_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
+// Sized for a full Tesla archive: a real 6,835-clip SMB job (long UNC paths)
+// already used 99% of the former 4 MiB estimate before any item was in flight,
+// so the next ownership update failed the whole job with INVALID_MANIFEST.
+// These remain hard bounds on what is read, parsed and written.
 const MANIFEST_LIMITS = Object.freeze({
-  bytes: 4 * 1024 * 1024,
-  items: 10_000,
+  bytes: 64 * 1024 * 1024,
+  items: 50_000,
   path: 32_768,
   text: 256,
   token: 512,
   depth: 16,
-  nodes: 150_000,
-  stringCodeUnits: 2 * 1024 * 1024
+  nodes: 2_500_000,
+  stringCodeUnits: 32 * 1024 * 1024
 });
 
 const JOB_STATES = Object.freeze([

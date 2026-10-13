@@ -241,6 +241,36 @@ describe('converter job store', () => {
       .rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
   });
 
+  test('holds a full SMB archive with long UNC paths and eight replacements in flight', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    const root = '\\\\TRUENAS\\sub\\Sentry';
+    const artifact = (artifactPath, index) => ({ path: artifactPath, nonce: `nonce-${index}`, state: 'owned',
+      size: 39_000_000, sha256: 'a'.repeat(64), device: '1234567890', inode: String(1_000_000 + index) });
+    const items = Array.from({ length: 6_900 }, (_, index) => {
+      const stamp = `2026-10-01_16-${String(index % 60).padStart(2, '0')}-${String(index % 97).padStart(2, '0')}`;
+      const relativePath = `SavedClips/2026-10-01_17-00-10/${stamp}-left_repeater-${index}.mp4`;
+      const sourcePath = `${root}\\${relativePath.split('/').join('\\')}`;
+      const item = { id: `item-${String(index + 1).padStart(6, '0')}`, state: index < 8 ? 'processing' : 'queued',
+        kind: 'video', group: 'SavedClips', eventId: '2026-10-01_17-00-10', relativePath, sourcePath,
+        sourceBytes: 39_000_000, mtimeMs: 1_759_000_000_000 + index, timestampKey: stamp, camera: 'left_repeater', attempts: 0 };
+      if (index >= 8) return item;
+      const ownedPaths = {
+        stagedSource: `C:\\Users\\someone\\AppData\\Local\\Temp\\sentry-six-converter\\staged-${index}.mp4`,
+        encodedCandidate: `C:\\Users\\someone\\AppData\\Local\\Temp\\sentry-six-converter\\encoded-${index}.mp4`,
+        replacementCandidate: `${root}\\SavedClips\\TEMP-H265-${index}.mp4`,
+        replacementBackup: `${root}\\SavedClips\\BACKUP-${index}.mp4`
+      };
+      return { ...item, attempts: 1, encoder: 'hevc_nvenc', ownedPaths,
+        ownedArtifacts: Object.fromEntries(Object.entries(ownedPaths).map(([key, value]) => [key, artifact(value, index)])) };
+    });
+    await store.save(job('large-smb', {
+      config: validConfig({ sourceRoot: root, destinationRoot: null, outputMode: 'replace', replacementConfirmed: true, concurrency: 8 }),
+      state: 'encoding', activeItemId: 'item-000001', items
+    }));
+    await expect(store.transition('large-smb', { state: 'replacing', replacementPhase: 'original-backed-up' }))
+      .resolves.toMatchObject({ state: 'replacing' });
+  });
+
   test('transition reuses its own last write but re-reads a manifest changed on disk', async () => {
     const store = createJobStore({ rootDir, fs: fs.promises });
     await store.save(job('cached-transition'));
@@ -1060,10 +1090,11 @@ describe('converter job store', () => {
 
   test('rejects an oversized persisted manifest through a bounded file-handle read', async () => {
     expect(MANIFEST_LIMITS).toMatchObject({
-      bytes: 4 * 1024 * 1024,
+      bytes: 64 * 1024 * 1024,
+      items: 50_000,
       depth: 16,
-      nodes: 150_000,
-      stringCodeUnits: 2 * 1024 * 1024
+      nodes: 2_500_000,
+      stringCodeUnits: 32 * 1024 * 1024
     });
     const id = 'oversized-json';
     const jobDir = path.join(rootDir, id);
@@ -1095,7 +1126,9 @@ describe('converter job store', () => {
 
   test('rejects aggregate many-max-path input before stringify or filesystem allocation', async () => {
     const repeatedLongPath = `D:\\${'a'.repeat(32_760)}`;
-    const items = Array.from({ length: 100 }, (_unused, index) => validVideoItem({
+    // Enough maximum-length paths to exceed the aggregate string budget.
+    const count = Math.ceil(MANIFEST_LIMITS.stringCodeUnits / repeatedLongPath.length) + 1;
+    const items = Array.from({ length: count }, (_unused, index) => validVideoItem({
       id: `aggregate-${index}`,
       sourcePath: repeatedLongPath
     }));
@@ -1113,7 +1146,10 @@ describe('converter job store', () => {
 
   test('accounts for JSON escape expansion during iterative preflight instead of building oversized JSON', async () => {
     const escapeHeavyPath = `D:\\${'\u0001'.repeat(32_760)}`;
-    const items = Array.from({ length: 25 }, (_unused, index) => validVideoItem({
+    // Each control character escapes to six JSON bytes; exceed the byte budget
+    // through escape expansion while staying under the raw string budget.
+    const count = Math.ceil(MANIFEST_LIMITS.bytes / (escapeHeavyPath.length * 6)) + 1;
+    const items = Array.from({ length: count }, (_unused, index) => validVideoItem({
       id: `escaped-${index}`,
       sourcePath: escapeHeavyPath
     }));

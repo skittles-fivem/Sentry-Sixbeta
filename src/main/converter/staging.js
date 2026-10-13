@@ -316,6 +316,13 @@ function createFileTransaction(options = {}) {
     releaseLease(activeEncodedPaths, target);
   }
 
+  // Drops in-process leases only; never touches files or ownership records.
+  // The job service calls this when a worker is done with an item, so a
+  // failed item cannot keep its lease and make every later item STAGING_BUSY.
+  function releaseLeases(paths = []) {
+    for (const target of paths) if (typeof target === 'string') releaseOwnedLease(target);
+  }
+
   function forgetOwned(target) {
     ownedIdentities.delete(normalizeComparison(target, pathApi, platform));
     releaseOwnedLease(target);
@@ -2179,6 +2186,7 @@ function createFileTransaction(options = {}) {
 
   return Object.freeze({
     capabilities,
+    releaseLeases,
     captureSource,
     reserveEncodeOutput,
     adoptEncodeOutput,
