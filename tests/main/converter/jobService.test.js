@@ -2462,6 +2462,16 @@ describe('parallel conversion workers', () => {
     expect(releaseLeases.mock.calls.length).toBe(2);
   });
 
+  test('a custom bitrate profile encodes at exactly that bitrate and verifies without a size target', async () => {
+    const h = harness({ items: clips(1), queueLimit: 10 });
+    const done = await h.service.whenIdle(await h.service.start({ ...CONFIG, profileId: 'custom', bitrateKbps: 3250 }));
+
+    expect(done.items[0].state).toBe('completed');
+    const args = h.spawnProcess.mock.calls[0][1];
+    expect(args[args.indexOf('-b:v') + 1]).toBe('3250000');
+    expect(h.verifier.mock.calls[0][0]).toMatchObject({ profileId: 'custom' });
+  });
+
   test('recovery cleans and re-queues interrupted non-lead items before resuming', async () => {
     const h = harness({ items: [] });
     const candidate = (itemId) => `C:\\temp\\recover-parallel-${itemId}-candidate.mp4`;

@@ -3,7 +3,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { PROFILES, targetOutputBytes, isWithinProfile } = require('./contracts');
+const { PROFILES, CUSTOM_PROFILE_ID, targetOutputBytes, isWithinProfile } = require('./contracts');
 
 // A Tesla camera file can be a very short terminal fragment (for example a
 // 1–2 second clip when the vehicle changes state). MP4/SEI/container overhead
@@ -81,6 +81,7 @@ function failure(reason, sourceBytes, outputBytes, details = {}) {
 }
 
 function canonicalProfileId(profileId) {
+  if (profileId === CUSTOM_PROFILE_ID) return CUSTOM_PROFILE_ID;
   const canonical = PROFILE_ALIASES[profileId] || profileId;
   if (!Object.prototype.hasOwnProperty.call(PROFILES, canonical)) throw new RangeError('Unknown profile');
   return canonical;
@@ -834,11 +835,13 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
   if (outputBytes >= sourceBytes) {
     return failure(VERIFICATION_REASONS.NOT_SMALLER, sourceBytes, outputBytes, { savedBytes: sourceBytes - outputBytes });
   }
-  const targetBytes = targetOutputBytes(sourceBytes, profileId);
+  // A custom bitrate has no size target: smaller than the source is enough.
+  const customBitrate = profileId === CUSTOM_PROFILE_ID;
+  const targetBytes = customBitrate ? null : targetOutputBytes(sourceBytes, profileId);
   const shortClipWithSavings = sourceBytes >= 500_000
     && source.sourceTiming.durationUs <= SHORT_CLIP_PROFILE_MAX_US
     && outputBytes < sourceBytes;
-  if (!shortClipWithSavings && !isWithinProfile(sourceBytes, outputBytes, profileId)) {
+  if (!customBitrate && !shortClipWithSavings && !isWithinProfile(sourceBytes, outputBytes, profileId)) {
     return failure(VERIFICATION_REASONS.PROFILE_SIZE, sourceBytes, outputBytes, {
       profileId,
       targetBytes,

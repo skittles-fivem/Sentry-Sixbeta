@@ -157,6 +157,9 @@ function collectElements(root) {
         orderRows,
         codecOptions: all('[data-converter-codec]'),
         profileOptions: all('[data-converter-profile]'),
+        profileSelect: byId('converterProfileSelect'),
+        customBitrate: byId('converterCustomBitrate'),
+        customBitrateRow: byId('converterCustomBitrateRow'),
         concurrency: byId('converterConcurrency'),
         outputOptions: all('[data-converter-output]'),
         replaceOption: byId('converterReplaceOption'),
@@ -309,6 +312,24 @@ function createFootageConverterController(options = {}) {
         try { storage?.setItem?.(CONCURRENCY_STORAGE_KEY, String(value)); } catch (_) { /* preference only */ }
     }
 
+    function selectedProfile() {
+        const value = elements.profileSelect?.value;
+        return ['conservative', 'balanced', 'aggressive', 'custom'].includes(value)
+            ? value : selected(elements.profileOptions, 'converterProfile', 'balanced');
+    }
+
+    // Mbps in the box, kbps on the wire (matches CUSTOM_BITRATE_KBPS in contracts.js).
+    function customBitrateKbps() {
+        const mbps = Number(elements.customBitrate?.value);
+        if (!Number.isFinite(mbps)) return null;
+        const kbps = Math.round(mbps * 1000);
+        return kbps >= 250 && kbps <= 100_000 ? kbps : null;
+    }
+
+    function updateCustomBitrateVisibility() {
+        setHidden(elements.customBitrateRow, selectedProfile() !== 'custom');
+    }
+
     function selectedConcurrency() {
         return normalizeConcurrency(elements.concurrency?.value) ?? storedConcurrency() ?? DEFAULT_CONCURRENCY;
     }
@@ -334,6 +355,11 @@ function createFootageConverterController(options = {}) {
         if (elements.destinationPath) elements.destinationPath.value = config.destinationRoot || '';
         setChecked(elements.codecOptions, 'converterCodec', config.codec);
         setChecked(elements.profileOptions, 'converterProfile', config.profileId);
+        if (elements.profileSelect && config.profileId) elements.profileSelect.value = config.profileId;
+        if (elements.customBitrate && Number.isSafeInteger(config.bitrateKbps)) {
+            elements.customBitrate.value = String(config.bitrateKbps / 1000);
+        }
+        updateCustomBitrateVisibility();
         setChecked(elements.outputOptions, 'converterOutput', config.outputMode);
         const included = new Set(config.includedGroups || []);
         for (const entry of elements.groupOptions) entry.checked = included.has(entry.dataset?.converterGroup);
@@ -492,6 +518,8 @@ function createFootageConverterController(options = {}) {
         setHidden(elements.errorRows, failedItems.length === 0);
         setDisabled(elements.startButton, active);
         setDisabled(elements.concurrency, active);
+        setDisabled(elements.profileSelect, active);
+        setDisabled(elements.customBitrate, active);
         setDisabled(elements.pauseButton, !active || paused || snapshot?.state === 'paused_network');
         setDisabled(elements.resumeButton, !paused);
         setDisabled(elements.cancelButton, !active);
@@ -567,11 +595,14 @@ function createFootageConverterController(options = {}) {
                 { sourceRoot }
             ))) throw apiError('REPLACEMENT_CONFIRMATION_REQUIRED');
         }
+        const profileId = selectedProfile();
+        if (profileId === 'custom' && customBitrateKbps() === null) throw apiError('BITRATE_INVALID');
         return {
             sourceRoot,
             destinationRoot: outputMode === 'replace' ? null : destinationRoot,
             codec: selected(elements.codecOptions, 'converterCodec', 'h265'),
-            profileId: selected(elements.profileOptions, 'converterProfile', 'balanced'),
+            profileId,
+            ...(profileId === 'custom' ? { bitrateKbps: customBitrateKbps() } : {}),
             networkMode: 'auto',
             outputMode,
             includedGroups,
@@ -585,6 +616,7 @@ function createFootageConverterController(options = {}) {
         const labels = {
             SOURCE_REQUIRED: ['errorSourceRequired', 'Choose a source folder before starting.'],
             DESTINATION_REQUIRED: ['errorDestinationRequired', 'Choose a destination folder for separate output.'],
+            BITRATE_INVALID: ['errorBitrateInvalid', 'Enter a bitrate between 0.25 and 100 Mbps.'],
             GROUP_REQUIRED: ['errorGroupRequired', 'Select at least one Tesla clip group.'],
             REPLACEMENT_CONFIRMATION_REQUIRED: ['errorReplacementConfirmation', 'Acknowledge and confirm replacement before starting.'],
             REPLACEMENT_UNAVAILABLE: ['errorReplacementUnavailable', 'Replace originals is not available on this system.']
@@ -643,6 +675,8 @@ function createFootageConverterController(options = {}) {
             item.down?.addEventListener('click', () => moveGroup(item.group, 'down'));
         }
         setConcurrency(storedConcurrency() ?? DEFAULT_CONCURRENCY);
+        elements.profileSelect?.addEventListener?.('change', updateCustomBitrateVisibility);
+        updateCustomBitrateVisibility();
         elements.concurrency?.addEventListener?.('change', () => {
             const value = normalizeConcurrency(elements.concurrency.value);
             if (value !== null) rememberConcurrency(value);

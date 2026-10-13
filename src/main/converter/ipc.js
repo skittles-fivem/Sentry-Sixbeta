@@ -2,7 +2,7 @@
 
 const nodeFs = require('fs');
 const nodePath = require('path');
-const { isValidConcurrency } = require('./contracts');
+const { isValidConcurrency, isValidCustomBitrate } = require('./contracts');
 
 const CHANNELS = Object.freeze([
   'converter:chooseFolder',
@@ -267,11 +267,15 @@ async function validateStartConfig(payload, dependencies, capabilities) {
   ];
   const hasGroupOrder = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'groupOrder');
   const hasConcurrency = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'concurrency');
-  const expectedKeys = [...keys, ...(hasGroupOrder ? ['groupOrder'] : []), ...(hasConcurrency ? ['concurrency'] : [])];
+  const hasBitrate = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'bitrateKbps');
+  const expectedKeys = [...keys, ...(hasGroupOrder ? ['groupOrder'] : []), ...(hasConcurrency ? ['concurrency'] : []),
+    ...(hasBitrate ? ['bitrateKbps'] : [])];
   if (!exactKeys(payload, expectedKeys)) fail('INVALID_REQUEST');
+  // Custom profile: an explicit bitrate is required; size profiles take none.
+  if (payload.profileId === 'custom' ? !isValidCustomBitrate(payload.bitrateKbps) : hasBitrate) fail('INVALID_BITRATE');
   if (hasConcurrency && !isValidConcurrency(payload.concurrency)) fail('INVALID_CONCURRENCY');
   if (!['h265', 'av1'].includes(payload.codec)) fail('INVALID_CODEC');
-  if (!['conservative', 'balanced', 'aggressive'].includes(payload.profileId)) fail('INVALID_PROFILE');
+  if (!['conservative', 'balanced', 'aggressive', 'custom'].includes(payload.profileId)) fail('INVALID_PROFILE');
   if (!['auto', 'staging', 'direct'].includes(payload.networkMode)) fail('INVALID_NETWORK_MODE');
   if (!['separate', 'replace'].includes(payload.outputMode)) fail('INVALID_OUTPUT_MODE');
   if (!Array.isArray(payload.includedGroups) || payload.includedGroups.length === 0

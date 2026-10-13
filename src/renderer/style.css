@@ -8105,3 +8105,45 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     visibility: hidden;
     pointer-events: none;
 }
+
+/* Export dialog: bitrate dropdown with an optional custom value */
+.export-bitrate-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.export-bitrate-label {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.export-bitrate-select,
+.export-bitrate-custom input {
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid var(--input-border, var(--border-subtle));
+    border-radius: 8px;
+    background: var(--input-bg, rgba(0, 0, 0, 0.3));
+    color: var(--text-secondary, inherit);
+    font-size: 12px;
+}
+
+.export-bitrate-custom {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.export-bitrate-custom[hidden] {
+    display: none;
+}
+
+.export-bitrate-custom input {
+    width: 90px;
+}

@@ -343,7 +343,7 @@ async function applyBlurZonesToStreams({ blurZones, blurType, streams, streamTag
 
 // Video Export Implementation
 async function performVideoExport(event, exportId, exportData, ffmpegPath) {
-  const { segments, startTimeMs, endTimeMs, outputPath, cameras, mobileExport, quality, includeDashboard, seiData, layoutData, overlayData = null, useMetric, dashboardStyle = 'standard', dashboardPosition = 'bottom-center', dashboardSize = 'medium', dashboardLabelScale = 1, dashboardValueScale = 1, dashboardDateValueScale = 1, includeTimestamp = false, timestampPosition = 'bottom-center', timestampDateFormat = 'mdy', timestampTimeFormat = '12h', blurZones = [], blurType = 'solid', language = 'en', includeMinimap = false, minimapPosition = 'top-right', minimapSize = 'small', minimapRenderMode = 'ass', minimapDarkMode = false, mapPath = [], mirrorCameras = true, accelPedMode = 'iconbar', enableTimelapse = false, timelapseSpeed = 1 } = exportData;
+  const { segments, startTimeMs, endTimeMs, outputPath, cameras, mobileExport, quality, bitrateKbps: requestedBitrateKbps = null, includeDashboard, seiData, layoutData, overlayData = null, useMetric, dashboardStyle = 'standard', dashboardPosition = 'bottom-center', dashboardSize = 'medium', dashboardLabelScale = 1, dashboardValueScale = 1, dashboardDateValueScale = 1, includeTimestamp = false, timestampPosition = 'bottom-center', timestampDateFormat = 'mdy', timestampTimeFormat = '12h', blurZones = [], blurType = 'solid', language = 'en', includeMinimap = false, minimapPosition = 'top-right', minimapSize = 'small', minimapRenderMode = 'ass', minimapDarkMode = false, mapPath = [], mirrorCameras = true, accelPedMode = 'iconbar', enableTimelapse = false, timelapseSpeed = 1 } = exportData;
   const isAdvancedLayout = !!(layoutData && layoutData.layoutMode === 'advanced');
 
   console.log(`[EXPORT] Received exportData - includeMinimap: ${includeMinimap}, mapPath.length: ${mapPath?.length || 0}, minimapPosition: ${minimapPosition}, minimapSize: ${minimapSize}, renderMode: ${minimapRenderMode}`);
@@ -582,6 +582,14 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
         default:       w = makeEven(nativeW * 0.75); h = makeEven(nativeH * 0.75); crf = 20;
       }
     }
+
+    // Optional fixed bitrate (kbps) chosen in the export dialog; null keeps the
+    // quality preset's constant-quality encode.
+    const bitrateKbps = Number.isSafeInteger(requestedBitrateKbps)
+      && requestedBitrateKbps >= 500 && requestedBitrateKbps <= 200_000 ? requestedBitrateKbps : null;
+    const bitrateArgs = () => ['-b:v', `${bitrateKbps}k`, '-maxrate', `${Math.round(bitrateKbps * 1.5)}k`,
+      '-bufsize', `${bitrateKbps * 2}k`];
+    if (bitrateKbps) console.log(`[EXPORT] Fixed bitrate ${bitrateKbps} kbps`);
 
     // Detect GPU encoder
     const gpu = detectGpuEncoder(ffmpegPath);
@@ -1738,7 +1746,8 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
         if (enc.codec === 'h264_nvenc' || enc.codec === 'hevc_nvenc') {
           // NVIDIA NVENC: CQP mode prevents quality pulsing/glitches
           const cq = Math.max(0, Math.min(51, crf));
-          args.push('-preset', 'p4', '-rc', 'constqp', '-qp', cq.toString());
+          if (bitrateKbps) args.push('-preset', 'p4', '-rc', 'vbr', ...bitrateArgs());
+          else args.push('-preset', 'p4', '-rc', 'constqp', '-qp', cq.toString());
           args.push('-g', (FPS * 2).toString()); // Keyframe every 2 seconds
           args.push('-forced-idr', '1');
         } else if (enc.codec === 'h264_amf' || enc.codec === 'hevc_amf') {
@@ -1748,16 +1757,20 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
           else if (crf >= 24) quality = 'balanced';
 
           args.push('-quality', quality);
-          args.push('-rc', 'cqp');
-          args.push('-qp_i', Math.max(18, Math.min(46, crf)).toString());
-          args.push('-qp_p', Math.max(18, Math.min(46, crf + 2)).toString());
-          args.push('-qp_b', Math.max(18, Math.min(46, crf + 4)).toString());
+          if (bitrateKbps) {
+            args.push('-rc', 'vbr_peak', ...bitrateArgs());
+          } else {
+            args.push('-rc', 'cqp');
+            args.push('-qp_i', Math.max(18, Math.min(46, crf)).toString());
+            args.push('-qp_p', Math.max(18, Math.min(46, crf + 2)).toString());
+            args.push('-qp_b', Math.max(18, Math.min(46, crf + 4)).toString());
+          }
           args.push('-g', (FPS * 2).toString());
         } else if (enc.codec === 'h264_videotoolbox' || enc.codec === 'hevc_videotoolbox') {
           // Apple VideoToolbox: Use bitrate mode for better compatibility
           const baseBitrate = 8000;
           const bitrateMultiplier = Math.max(0.3, 1 - (crf - 18) * 0.03);
-          const targetBitrate = Math.round(baseBitrate * bitrateMultiplier);
+          const targetBitrate = bitrateKbps || Math.round(baseBitrate * bitrateMultiplier);
           args.push('-b:v', `${targetBitrate}k`);
           args.push('-maxrate', `${Math.round(targetBitrate * 1.5)}k`);
           args.push('-bufsize', `${targetBitrate * 2}k`);
@@ -1768,17 +1781,23 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
           // Intel QuickSync: CQP mode
           const qsvQp = Math.max(18, Math.min(46, crf));
           args.push('-preset', 'medium');
-          args.push('-global_quality', qsvQp.toString());
+          if (bitrateKbps) args.push(...bitrateArgs());
+          else args.push('-global_quality', qsvQp.toString());
           args.push('-g', (FPS * 2).toString());
         } else if (enc.codec === 'h264_vaapi' || enc.codec === 'hevc_vaapi') {
           // VAAPI (Linux AMD/Intel): constant-QP rate control
           const vaapiQp = Math.max(18, Math.min(46, crf));
-          args.push('-rc_mode', 'CQP');
-          args.push('-qp', vaapiQp.toString());
+          if (bitrateKbps) {
+            args.push('-rc_mode', 'VBR', ...bitrateArgs());
+          } else {
+            args.push('-rc_mode', 'CQP');
+            args.push('-qp', vaapiQp.toString());
+          }
           args.push('-g', (FPS * 2).toString());
         } else {
           console.log(`[WARN] Using generic settings for unknown GPU encoder: ${enc.codec}`);
-          args.push('-preset', 'fast', '-crf', crf.toString());
+          if (bitrateKbps) args.push('-preset', 'fast', ...bitrateArgs());
+          else args.push('-preset', 'fast', '-crf', crf.toString());
           args.push('-g', (FPS * 2).toString());
         }
         console.log(`[GPU] Using GPU encoder: ${enc.name}`);
@@ -1798,7 +1817,8 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
         const perThreadBytes = totalW * totalH * 7.5;
         const ramCap = Math.max(4, Math.floor((os.freemem() * 0.25) / perThreadBytes));
         const maxThreads = Math.min(coreCap, ramCap, 32);
-        args.push('-c:v', 'libx264', '-preset', mobileExport ? 'faster' : 'fast', '-crf', crf.toString());
+        args.push('-c:v', 'libx264', '-preset', mobileExport ? 'faster' : 'fast',
+          ...(bitrateKbps ? bitrateArgs() : ['-crf', crf.toString()]));
         args.push('-threads', maxThreads.toString());
         args.push('-x264-params', `threads=${maxThreads}:thread-input=1`);
       }

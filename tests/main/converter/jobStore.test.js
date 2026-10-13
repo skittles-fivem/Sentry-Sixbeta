@@ -283,6 +283,17 @@ describe('converter job store', () => {
       .rejects.toMatchObject({ code: 'CORRUPT_MANIFEST' });
   });
 
+  test('persists a custom bitrate profile and rejects inconsistent bitrate settings', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    await store.save(job('custom-bitrate', { config: validConfig({ profileId: 'custom', bitrateKbps: 4200 }) }));
+    await expect(store.load('custom-bitrate')).resolves.toMatchObject({ config: { profileId: 'custom', bitrateKbps: 4200 } });
+    for (const [index, overrides] of [{ profileId: 'custom' }, { profileId: 'custom', bitrateKbps: 100 },
+      { profileId: 'balanced', bitrateKbps: 4200 }].entries()) {
+      await expect(store.save(job(`custom-bad-${index}`, { config: validConfig(overrides) })))
+        .rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
+    }
+  });
+
   test('defaults an absent group order when reading an old manifest', async () => {
     const store = createJobStore({ rootDir, fs: fs.promises });
     const oldManifest = job('old-order');

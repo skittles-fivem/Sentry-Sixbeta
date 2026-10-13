@@ -575,11 +575,17 @@
 
                             <fieldset class="converter-fieldset">
                                 <legend data-i18n="ui.converter.compressionProfile">Compression profile</legend>
-                                <div class="converter-segments converter-segments-three">
-                                    <label><input type="radio" name="converterProfile" data-converter-profile="conservative"><span><strong data-i18n="ui.converter.highQuality">High Quality</strong><small data-i18n="ui.converter.highQualityDetail">Approximately 5% smaller</small></span></label>
-                                    <label><input type="radio" name="converterProfile" data-converter-profile="balanced" checked><span><strong data-i18n="ui.converter.balanced">Balanced</strong><small data-i18n="ui.converter.balancedDetail">Approximately 20% smaller</small></span></label>
-                                    <label><input type="radio" name="converterProfile" data-converter-profile="aggressive"><span><strong data-i18n="ui.converter.smaller">Smaller</strong><small data-i18n="ui.converter.smallerDetail">Approximately 50% smaller</small></span></label>
-                                </div>
+                                <select id="converterProfileSelect" class="converter-select" aria-label="Compression profile" data-i18n="ui.converter.compressionProfile" data-i18n-attr="aria-label">
+                                    <option value="conservative" data-i18n="ui.converter.profileOptionHigh">High Quality — approximately 5% smaller</option>
+                                    <option value="balanced" selected data-i18n="ui.converter.profileOptionBalanced">Balanced — approximately 20% smaller (recommended)</option>
+                                    <option value="aggressive" data-i18n="ui.converter.profileOptionSmaller">Smaller — approximately 50% smaller</option>
+                                    <option value="custom" data-i18n="ui.converter.profileOptionCustom">Custom bitrate…</option>
+                                </select>
+                                <label id="converterCustomBitrateRow" class="converter-field converter-custom-bitrate" for="converterCustomBitrate" hidden>
+                                    <span class="converter-field-label" data-i18n="ui.converter.customBitrateLabel">Video bitrate (Mbps)</span>
+                                    <input id="converterCustomBitrate" class="converter-select" type="number" min="0.25" max="100" step="0.25" value="2.5" inputmode="decimal">
+                                    <small class="converter-disclosure" data-i18n="ui.converter.customBitrateHint">Tesla clips are recorded at roughly 3–6 Mbps. Pick a lower value to save space; a clip whose result is not smaller than its original keeps the original.</small>
+                                </label>
                                 <p class="converter-disclosure" data-i18n="ui.converter.lossyDisclosure">Conversion re-encodes video using lossy compression. Every profile may discard some image detail.</p>
                             </fieldset>
 
@@ -945,6 +951,23 @@
                                                 <span class="option-card-desc">1448×938</span>
                                             </div>
                                         </label>
+                                    </div>
+                                    <div class="export-bitrate-row">
+                                        <label for="exportBitrate" class="export-bitrate-label">Bitrate</label>
+                                        <select id="exportBitrate" class="export-bitrate-select">
+                                            <option value="auto" selected>Automatic (matches quality) — recommended</option>
+                                            <option value="4000">4 Mbps — small file, easy to share</option>
+                                            <option value="8000">8 Mbps — good</option>
+                                            <option value="15000">15 Mbps — high</option>
+                                            <option value="25000">25 Mbps — very high</option>
+                                            <option value="40000">40 Mbps — maximum detail</option>
+                                            <option value="custom">Custom…</option>
+                                        </select>
+                                        <span id="exportBitrateCustomWrap" class="export-bitrate-custom" hidden>
+                                            <input id="exportBitrateCustom" type="number" min="0.5" max="200" step="0.5" value="10"
+                                                inputmode="decimal" aria-label="Custom bitrate in Mbps">
+                                            <span>Mbps</span>
+                                        </span>
                                     </div>
                                     <div id="exportSizeEstimate" class="info-box info-blue" style="margin-top: 10px;">
                                     </div>

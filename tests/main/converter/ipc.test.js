@@ -238,6 +238,27 @@ describe('converter IPC', () => {
     expect(h.service.start).not.toHaveBeenCalled();
   });
 
+  test('accepts a custom bitrate profile and forwards bitrateKbps', async () => {
+    const h = setup();
+    await expect(h.invoke('converter:start', { ...CONFIG, profileId: 'custom', bitrateKbps: 3500 }))
+      .resolves.toMatchObject({ ok: true });
+    expect(h.service.start).toHaveBeenCalledWith(expect.objectContaining({ profileId: 'custom', bitrateKbps: 3500 }));
+  });
+
+  test.each([
+    [{ profileId: 'custom' }],
+    [{ profileId: 'custom', bitrateKbps: 249 }],
+    [{ profileId: 'custom', bitrateKbps: 100_001 }],
+    [{ profileId: 'custom', bitrateKbps: '3000' }],
+    [{ profileId: 'balanced', bitrateKbps: 3000 }]
+  ])('rejects an invalid custom bitrate combination %p', async (overrides) => {
+    const h = setup();
+    await expect(h.invoke('converter:start', { ...CONFIG, ...overrides })).resolves.toEqual({
+      ok: false, error: { code: 'INVALID_BITRATE', retryable: false }
+    });
+    expect(h.service.start).not.toHaveBeenCalled();
+  });
+
   test('rejects an unsafe job ID returned by the service', async () => {
     const h = setup();
     h.service.start.mockResolvedValue('../job');

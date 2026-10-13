@@ -898,8 +898,9 @@ function createConverterJobService(deps) {
     const timeline = await deps.readTimeline({ source: staged.source, item, signal });
     timing.mark('timeline');
     const codec = runtime.manifest.config.codec;
-    const targetBytes = targetOutputBytes(item.sourceBytes, runtime.manifest.config.profileId);
-    let bitrate = calculateInitialBitrate({
+    const customBitrate = runtime.manifest.config.profileId === 'custom';
+    const targetBytes = customBitrate ? null : targetOutputBytes(item.sourceBytes, runtime.manifest.config.profileId);
+    let bitrate = customBitrate ? runtime.manifest.config.bitrateKbps * 1000 : calculateInitialBitrate({
       codec,
       targetBytes,
       durationSeconds: inspected.durationSeconds,
@@ -912,7 +913,7 @@ function createConverterJobService(deps) {
     // variable-frame-rate Tesla clips. Leave a small headroom so the first
     // candidate normally lands inside the profile window; the bounded retry
     // remains available for encoders that still miss.
-    if (selected.hardware === true) bitrate = Math.max(SAFE_VIDEO_BITRATE_FLOORS[codec], Math.floor(bitrate * 0.93));
+    if (selected.hardware === true && !customBitrate) bitrate = Math.max(SAFE_VIDEO_BITRATE_FLOORS[codec], Math.floor(bitrate * 0.93));
     let sizeRetryCount = 0;
     let attempts = currentItem(runtime, item.id)?.attempts || 0;
     let latestOwnership = staged.ownership;

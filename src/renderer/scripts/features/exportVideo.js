@@ -1015,6 +1015,18 @@ export function openExportModal() {
 
     const qualityInputs = document.querySelectorAll('input[name="exportQuality"]');
     qualityInputs.forEach(input => { input.onchange = updateExportSizeEstimate; });
+    const bitrateSelect = $('exportBitrate');
+    const bitrateCustom = $('exportBitrateCustom');
+    if (bitrateSelect) bitrateSelect.onchange = () => { syncExportBitrateControls(); updateExportSizeEstimate(); };
+    if (bitrateCustom) bitrateCustom.oninput = updateExportSizeEstimate;
+    window.electronAPI?.getSetting?.('exportLastBitrate').then((saved) => {
+        if (!saved || typeof saved !== 'object' || !bitrateSelect) return;
+        if ([...bitrateSelect.options].some((option) => option.value === saved.mode)) bitrateSelect.value = saved.mode;
+        if (bitrateCustom && Number.isFinite(saved.customMbps)) bitrateCustom.value = String(saved.customMbps);
+        syncExportBitrateControls();
+        updateExportSizeEstimate();
+    }).catch(() => { });
+    syncExportBitrateControls();
     const cameraInputs = document.querySelectorAll('#exportCameraToggles input[data-camera]');
     cameraInputs.forEach(input => { input.onchange = updateExportSizeEstimate; });
     updateExportSizeEstimate();
@@ -1658,6 +1670,28 @@ export function updateExportRangeDisplay() {
 /**
  * Update estimated file size display
  */
+// Export bitrate: 'auto' keeps the quality preset's constant-quality encode;
+// a preset or custom value (kbps) switches the encoder to bitrate mode.
+const EXPORT_BITRATE_KBPS = Object.freeze({ min: 500, max: 200_000 });
+
+function readExportBitrate() {
+    const mode = $('exportBitrate')?.value || 'auto';
+    if (mode === 'auto') return { mode, kbps: null, valid: true };
+    if (mode === 'custom') {
+        const mbps = Number($('exportBitrateCustom')?.value);
+        const kbps = Number.isFinite(mbps) ? Math.round(mbps * 1000) : NaN;
+        const valid = kbps >= EXPORT_BITRATE_KBPS.min && kbps <= EXPORT_BITRATE_KBPS.max;
+        return { mode, kbps: valid ? kbps : null, valid, mbps };
+    }
+    const kbps = Number(mode);
+    return { mode, kbps: Number.isSafeInteger(kbps) ? kbps : null, valid: Number.isSafeInteger(kbps) };
+}
+
+function syncExportBitrateControls() {
+    const wrap = $('exportBitrateCustomWrap');
+    if (wrap) wrap.hidden = ($('exportBitrate')?.value || 'auto') !== 'custom';
+}
+
 export function updateExportSizeEstimate() {
     const nativeVideo = getNativeVideo?.();
     const state = getState?.();
@@ -1746,7 +1780,9 @@ export function updateExportSizeEstimate() {
         maxQualityWarningEl.classList.toggle('hidden', !isMaxQuality);
     }
     const pixels = gridW * gridH;
-    const mbPerMin = pixels * 0.000018;
+    // A chosen bitrate makes the size exact: kbps → MB per minute.
+    const bitrateChoice = readExportBitrate();
+    const mbPerMin = bitrateChoice.kbps ? (bitrateChoice.kbps * 1000 * 60) / 8 / (1024 * 1024) : pixels * 0.000018;
     const estimatedMB = Math.round(durationMin * mbPerMin);
     const estimatedGB = (estimatedMB / 1024).toFixed(1);
 
@@ -1917,6 +1953,11 @@ export async function startExport() {
 
     const qualityInput = document.querySelector('input[name="exportQuality"]:checked');
     const quality = qualityInput?.value || 'high';
+    const bitrateChoice = readExportBitrate();
+    if (!bitrateChoice.valid) {
+        notify('Enter a custom bitrate between 0.5 and 200 Mbps.', { type: 'warn' });
+        return;
+    }
 
     // Track quality for share restriction enforcement
     exportState.lastExportQuality = quality;
@@ -1928,6 +1969,10 @@ export async function startExport() {
                 await window.electronAPI.setSetting('exportLastBlurZones', exportState.blurZones);
             }
             await window.electronAPI.setSetting('exportLastQuality', quality);
+            await window.electronAPI.setSetting('exportLastBitrate', {
+                mode: bitrateChoice.mode,
+                customMbps: Number(document.getElementById('exportBitrateCustom')?.value) || 10
+            });
         }
     } catch (e) { /* ignore save errors */ }
 
@@ -2407,6 +2452,7 @@ export async function startExport() {
             cameras,
             baseFolderPath,
             quality,
+            ...(bitrateChoice.kbps ? { bitrateKbps: bitrateChoice.kbps } : {}),
             // Only include dashboard if checkbox was checked AND we successfully extracted SEI data
             includeDashboard: includeDashboard && seiData !== null && seiData.length > 0,
             seiData: seiData || [], // Empty array if dashboard disabled - no RAM used

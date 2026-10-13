@@ -39,6 +39,15 @@ function addItemTimings(previous, phases) {
   return { files: (Number.isSafeInteger(previous?.files) ? previous.files : 0) + 1, totalMs };
 }
 
+// A custom profile encodes at a user-chosen bitrate instead of aiming for a
+// size reduction; only "output must be smaller than the source" is enforced.
+const CUSTOM_PROFILE_ID = 'custom';
+const CUSTOM_BITRATE_KBPS = deepFreeze({ min: 250, max: 100_000 });
+
+function isValidCustomBitrate(value) {
+  return Number.isSafeInteger(value) && value >= CUSTOM_BITRATE_KBPS.min && value <= CUSTOM_BITRATE_KBPS.max;
+}
+
 function isValidConcurrency(value) {
   return Number.isSafeInteger(value) && value >= CONCURRENCY.min && value <= CONCURRENCY.max;
 }
@@ -129,4 +138,4 @@ function serializeSummary(counters) {
   };
 }
 
-module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };
+module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, CUSTOM_PROFILE_ID, CUSTOM_BITRATE_KBPS, isValidCustomBitrate, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };

@@ -672,10 +672,13 @@ test('marks converter navigation and disclosure copy for translation and accessi
   assert.match(html, /class="converter-live-state"(?![^>]*aria-live)/);
   assert.match(html, /id="converterStatus"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/);
   assert.match(html, /data-i18n="ui\.converter\.lossyDisclosure"[^>]*>[^<]*(lossy|re-encode)/i);
-  assert.match(html, /data-i18n="ui\.converter\.highQualityDetail"[^>]*>[^<]*approximately 5% smaller/i);
+  assert.match(html, /data-i18n="ui\.converter\.profileOptionHigh"[^>]*>[^<]*approximately 5% smaller/i);
   assert.doesNotMatch(html, /ui\.converter[^\n]*(lossless)/i);
   assert.equal((html.match(/name="converterCodec"[^>]*data-converter-codec=/g) || []).length, 2);
-  assert.equal((html.match(/name="converterProfile"[^>]*data-converter-profile=/g) || []).length, 3);
+  const profileSelect = html.match(/<select id="converterProfileSelect"[\s\S]*?<\/select>/)?.[0] || '';
+  assert.deepEqual([...profileSelect.matchAll(/<option value="([a-z]+)"/g)].map((match) => match[1]),
+    ['conservative', 'balanced', 'aggressive', 'custom']);
+  assert.match(html, /id="converterCustomBitrateRow"[^>]*hidden/);
   assert.doesNotMatch(html, /name="converterNetwork"|ui\.converter\.networkHandling/);
   assert.match(css, /\.converter-segments input:focus-visible \+ span[\s\S]*outline:/);
 });
@@ -941,4 +944,52 @@ test('hides the timing breakdown until a file has been converted', async () => {
   const elements = { ...makeElements(), timings: new FakeElement(), timingRows: new FakeElement() };
   await createFootageConverterController({ api: fakeApi({ current: activeSnapshot() }), elements, storage: memoryStorage() }).init();
   assert.equal(elements.timings.hidden, true);
+});
+
+test('custom bitrate: the dropdown reveals the box and sends bitrateKbps', async () => {
+  const elements = { ...makeElements(), profileSelect: new FakeElement({ value: 'balanced' }),
+    customBitrate: new FakeElement({ value: '2.5' }), customBitrateRow: new FakeElement() };
+  const api = fakeApi();
+  await createFootageConverterController({ api, elements, storage: memoryStorage() }).init();
+  assert.equal(elements.customBitrateRow.hidden, true);
+
+  elements.profileSelect.value = 'custom';
+  await elements.profileSelect.dispatch('change');
+  assert.equal(elements.customBitrateRow.hidden, false);
+  elements.customBitrate.value = '3.75';
+  const config = await startWith(elements, api);
+  assert.equal(config.profileId, 'custom');
+  assert.equal(config.bitrateKbps, 3750);
+});
+
+test('custom bitrate: out-of-range values block the start; size profiles send no bitrate', async () => {
+  for (const value of ['0.1', '101', '', 'abc']) {
+    const elements = { ...makeElements(), profileSelect: new FakeElement({ value: 'custom' }),
+      customBitrate: new FakeElement({ value }), customBitrateRow: new FakeElement() };
+    const api = fakeApi();
+    const notices = [];
+    await createFootageConverterController({ api, elements, storage: memoryStorage(), notify: (text) => notices.push(text) }).init();
+    elements.sourcePath.value = 'D:\\TeslaCam';
+    elements.destinationPath.value = 'E:\\Converted';
+    await elements.startButton.click();
+    assert.equal(api.calls.some(([name]) => name === 'start'), false, `value ${value}`);
+    assert.match(notices.at(-1) || '', /bitrate/i);
+  }
+  const elements = { ...makeElements(), profileSelect: new FakeElement({ value: 'aggressive' }),
+    customBitrate: new FakeElement({ value: '3' }), customBitrateRow: new FakeElement() };
+  const api = fakeApi();
+  await createFootageConverterController({ api, elements, storage: memoryStorage() }).init();
+  const config = await startWith(elements, api);
+  assert.equal(config.profileId, 'aggressive');
+  assert.equal('bitrateKbps' in config, false);
+});
+
+test('custom bitrate: a restored custom job shows its bitrate', async () => {
+  const snapshot = activeSnapshot({ config: { ...activeSnapshot().config, profileId: 'custom', bitrateKbps: 4200 } });
+  const elements = { ...makeElements(), profileSelect: new FakeElement({ value: 'balanced' }),
+    customBitrate: new FakeElement({ value: '2.5' }), customBitrateRow: new FakeElement() };
+  await createFootageConverterController({ api: fakeApi({ current: snapshot }), elements, storage: memoryStorage() }).init();
+  assert.equal(elements.profileSelect.value, 'custom');
+  assert.equal(elements.customBitrate.value, '4.2');
+  assert.equal(elements.customBitrateRow.hidden, false);
 });
