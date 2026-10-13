@@ -439,3 +439,114 @@ function withTeslaFilenameParser(adapters = {}) {
     ...adapters
   };
 }
+
+describe('look-ahead scanning', () => {
+  const CAMERAS = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
+  const teslaParser = {
+    loadTeslaFilenameModule: async () => ({
+      parseTeslaFilename(filename) {
+        const match = /^(\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d)-([a-z_]+)\.mp4$/i.exec(String(filename || ''));
+        return match ? { profileId: 'tesla', timestampKey: match[1], date: match[1].slice(0, 10), camera: match[2] } : null;
+      }
+    })
+  };
+
+  async function teslaTree() {
+    const root = await makeTemporaryRoot('look-ahead');
+    for (const group of ['SavedClips', 'SentryClips']) {
+      for (let event = 0; event < 12; event += 1) {
+        const stamp = `2026-08-${String(10 + event).padStart(2, '0')}_12-00-${String(event).padStart(2, '0')}`;
+        for (const camera of CAMERAS) await writeFile(root, `${group}/${stamp}/${stamp}-${camera}.mp4`);
+        await writeFile(root, `${group}/${stamp}/event.json`, '{}');
+        await writeFile(root, `${group}/${stamp}/thumb.png`, 'png');
+        await writeFile(root, `${group}/${stamp}/notes.txt`, 'not footage');
+        await writeFile(root, `${group}/${stamp}/TEMP-H265-${stamp}-front.mp4`);
+      }
+    }
+    for (let clip = 0; clip < 20; clip += 1) await writeFile(root, `RecentClips/2026-09-01_10-00-${String(clip).padStart(2, '0')}-front.mp4`);
+    return root;
+  }
+
+  async function scanAll(config, adapters) {
+    const items = [];
+    for await (const item of scanTeslaFootage(config, { ...teslaParser, ...adapters })) items.push(item);
+    return items;
+  }
+
+  test.each([4, 16, 64])('yields exactly the sequential result with concurrency %p', async (concurrency) => {
+    const root = await teslaTree();
+    const destinationRoot = path.join(root, 'SavedClips', 'converted');
+    await writeFile(root, 'SavedClips/converted/2026-08-10_12-00-00-front.mp4');
+    const sequential = await scanAll({ sourceRoot: root, destinationRoot }, { concurrency: 1 });
+    expect(sequential.length).toBe(24 * 8 + 20);
+    expect(sequential.some((item) => item.relativePath.startsWith('SavedClips/converted/'))).toBe(false);
+    await expect(scanAll({ sourceRoot: root, destinationRoot }, { concurrency })).resolves.toEqual(sequential);
+  });
+
+  test('never exceeds the in-flight limit', async () => {
+    const root = await teslaTree();
+    let inFlight = 0;
+    let peak = 0;
+    const track = (operation) => async (...args) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        return await operation(...args);
+      } finally { inFlight -= 1; }
+    };
+    const items = await scanAll({ sourceRoot: root }, {
+      concurrency: 6,
+      realpath: track(fs.promises.realpath.bind(fs.promises)),
+      stat: track(fs.promises.stat.bind(fs.promises)),
+      opendir: track(fs.promises.opendir.bind(fs.promises))
+    });
+    expect(items).toHaveLength(24 * 8 + 20);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(6);
+  });
+
+  test('surfaces an entry error only after the entries before it were yielded', async () => {
+    const root = await teslaTree();
+    const failing = path.join(root, 'RecentClips', '2026-09-01_10-00-05-front.mp4');
+    const yielded = [];
+    const unhandled = [];
+    const onUnhandled = (reason) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const scan = scanTeslaFootage({ sourceRoot: path.join(root, 'RecentClips') }, {
+        ...teslaParser,
+        concurrency: 16,
+        stat: async (candidate) => {
+          if (candidate === failing) throw Object.assign(new Error('gone'), { code: 'EIO' });
+          return fs.promises.stat(candidate);
+        }
+      });
+      await expect((async () => { for await (const item of scan) yielded.push(item.relativePath); })())
+        .rejects.toMatchObject({ code: 'EIO' });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
+    expect(yielded).toEqual([0, 1, 2, 3, 4].map((clip) => `2026-09-01_10-00-0${clip}-front.mp4`));
+    expect(unhandled).toEqual([]);
+  });
+
+  test('stops with CANCELLED when aborted mid-scan', async () => {
+    const root = await teslaTree();
+    const controller = new AbortController();
+    let seen = 0;
+    await expect((async () => {
+      for await (const _item of scanTeslaFootage({ sourceRoot: root }, { ...teslaParser, concurrency: 16, signal: controller.signal })) {
+        seen += 1;
+        if (seen === 10) controller.abort();
+      }
+    })()).rejects.toMatchObject({ code: 'CANCELLED' });
+    expect(seen).toBe(10);
+  });
+
+  test.each([0, -1, 1.5, '4'].map((value) => [value]))('rejects invalid concurrency %p', async (concurrency) => {
+    const root = await makeTemporaryRoot('bad-concurrency');
+    await expect(scanAll({ sourceRoot: root }, { concurrency })).rejects.toThrow(TypeError);
+  });
+});

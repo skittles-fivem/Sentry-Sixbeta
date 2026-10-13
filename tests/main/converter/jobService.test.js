@@ -2138,3 +2138,262 @@ describe('converter job orchestration', () => {
     });
   });
 });
+
+describe('parallel conversion workers', () => {
+  const clips = (count) => Array.from({ length: count }, (_, index) => video(`parallel-${index}`));
+  const holds = (count) => Array.from({ length: count }, () => deferred());
+
+  test('runs up to config.concurrency encodes at once and completes every item', async () => {
+    const gates = holds(3);
+    const h = harness({
+      items: clips(6),
+      queueLimit: 10,
+      spawnActions: [...gates.map((gate) => ({ hold: { resolveChild: gate.resolve } })), {}, {}, {}]
+    });
+    const id = await h.service.start({ ...CONFIG, concurrency: 3 });
+    const children = await Promise.all(gates.map((gate) => gate.promise));
+    expect(h.active.count).toBe(3);
+    for (const child of children) child.emit('close', 0, null);
+    const done = await h.service.whenIdle(id);
+
+    expect(h.active.max).toBe(3);
+    expect(done.state).toBe('completed');
+    expect(done.items.map((item) => item.state)).toEqual(Array(6).fill('completed'));
+    expect(done.counters.files).toBe(6);
+  });
+
+  test('a missing or invalid concurrency keeps the single-worker pipeline', async () => {
+    for (const concurrency of [undefined, 0, 9, 2.5]) {
+      const h = harness({ items: clips(3), queueLimit: 10 });
+      const config = concurrency === undefined ? CONFIG : { ...CONFIG, concurrency };
+      await h.service.whenIdle(await h.service.start(config));
+      expect(h.active.max).toBe(1);
+    }
+  });
+
+  test('publishing stays exclusive and job-level recovery state only ever names the committing item', async () => {
+    let publishing = 0;
+    let maxPublishing = 0;
+    const h = harness({
+      items: clips(5),
+      queueLimit: 10,
+      stagingManager: {
+        publishSeparate: jest.fn(async ({ destination, publicationArtifact, persistTransaction }) => {
+          publishing += 1;
+          maxPublishing = Math.max(maxPublishing, publishing);
+          await flush();
+          await persistTransaction({ step: 'separate-complete', ownedPaths: {}, ownedArtifacts: {} });
+          await flush();
+          publishing -= 1;
+          return { finalPath: destination, outputBytes: publicationArtifact.size, ownedPaths: {}, ownedArtifacts: {}, cleanupPending: [] };
+        })
+      }
+    });
+    const states = [];
+    const transition = h.store.transition.bind(h.store);
+    h.store.transition = async (jobId, patch) => {
+      const next = await transition(jobId, patch);
+      states.push({ state: next.state, activeItemId: next.activeItemId });
+      return next;
+    };
+    const done = await h.service.whenIdle(await h.service.start({ ...CONFIG, concurrency: 4 }));
+
+    expect(done.state).toBe('completed');
+    expect(maxPublishing).toBe(1);
+    // Once an item starts copying, every job-level write until it finishes names it.
+    let committing = null;
+    for (const entry of states) {
+      if (committing && entry.state === 'copying') expect(entry.activeItemId).toBe(committing);
+      if (committing && entry.state !== 'copying') {
+        expect(entry).toEqual({ state: 'waiting', activeItemId: null });
+        committing = null;
+      }
+      if (!committing && entry.state === 'copying') committing = entry.activeItemId;
+    }
+  });
+
+  test('cancel terminates every running encoder', async () => {
+    const gates = holds(3);
+    const h = harness({ items: clips(5), queueLimit: 10, spawnActions: gates.map((gate) => ({ hold: { resolveChild: gate.resolve } })) });
+    const id = await h.service.start({ ...CONFIG, concurrency: 3 });
+    const children = await Promise.all(gates.map((gate) => gate.promise));
+    const cancelled = await h.service.cancel(id);
+
+    for (const child of children) expect(child.kill).toHaveBeenCalledTimes(1);
+    expect(cancelled.state).toBe('cancelled');
+    expect(cancelled.items.map((item) => item.state)).toEqual(Array(5).fill('cancelled'));
+  });
+
+  test('pause lets in-flight items finish, reports paused once all workers park, and resume completes', async () => {
+    const gates = holds(2);
+    const h = harness({ items: clips(4), queueLimit: 10, spawnActions: gates.map((gate) => ({ hold: { resolveChild: gate.resolve } })) });
+    const id = await h.service.start({ ...CONFIG, concurrency: 2 });
+    const [first, second] = await Promise.all(gates.map((gate) => gate.promise));
+    await h.service.pause(id);
+    first.emit('close', 0, null);
+    for (let index = 0; index < 20; index += 1) await flush();
+    expect((await h.service.get(id)).state).not.toBe('paused');
+    second.emit('close', 0, null);
+    for (let index = 0; index < 20 && (await h.service.get(id)).state !== 'paused'; index += 1) await flush();
+
+    const paused = await h.service.get(id);
+    expect(paused.state).toBe('paused');
+    expect(paused.items.filter((item) => item.state === 'completed')).toHaveLength(2);
+    expect(h.spawnProcess).toHaveBeenCalledTimes(2);
+    await h.service.resume(id);
+    const done = await h.service.whenIdle(id);
+    expect(done.state).toBe('completed');
+    expect(done.items.every((item) => item.state === 'completed')).toBe(true);
+  });
+
+  test('a failed replacement rollback stops other workers and re-queues their items instead of failing them', async () => {
+    const gate = deferred();
+    const h = harness({
+      items: clips(2),
+      queueLimit: 10,
+      spawnActions: [{}, { hold: { resolveChild: gate.resolve } }],
+      stagingManager: {
+        captureSource: async () => ({ device: '1', inode: '2', size: 1000000, sha256: 'c'.repeat(64) }),
+        replaceOriginal: async ({ source, persistTransaction }) => {
+          const backup = `${source}.backup`;
+          await persistTransaction({ phase: 'rollback-failed', ownedPaths: { replacementBackup: backup },
+            ownedArtifacts: { replacementBackup: { path: backup, nonce: 'fixture', state: 'owned',
+              device: '1', inode: '2', size: 1000000, sha256: 'c'.repeat(64) } } });
+          throw Object.assign(new Error('restore failed'), { code: 'ROLLBACK_FAILED' });
+        }
+      }
+    });
+    const id = await h.service.start({
+      ...CONFIG, destinationRoot: null, outputMode: 'replace', replacementConfirmed: true, concurrency: 2
+    });
+    const held = await gate.promise;
+    const paused = await h.service.whenIdle(id);
+
+    expect(held.kill).toHaveBeenCalled();
+    expect(paused.state).toBe('paused');
+    expect(paused.recovery).toMatchObject({ fromState: 'replacing', action: 'manual-intervention' });
+    const culprit = paused.items.find((item) => item.id === paused.activeItemId);
+    const other = paused.items.find((item) => item.id !== paused.activeItemId);
+    expect(culprit.resultCode).toBe('recovery-required');
+    expect(other.state).toBe('queued');
+    expect((await h.store.load(id)).items.find((item) => item.id === culprit.id).ownedPaths.replacementBackup).toBeDefined();
+  });
+
+  test('a rollback failure while a pause is pending keeps the recovery record and settles the job', async () => {
+    const gates = holds(2);
+    let replacements = 0;
+    const h = harness({
+      items: clips(2),
+      queueLimit: 10,
+      spawnActions: gates.map((gate) => ({ hold: { resolveChild: gate.resolve } })),
+      stagingManager: {
+        captureSource: async () => ({ device: '1', inode: '2', size: 1000000, sha256: 'c'.repeat(64) }),
+        replaceOriginal: async ({ source, publicationArtifact, persistTransaction }) => {
+          replacements += 1;
+          if (replacements === 1) {
+            await persistTransaction({ phase: 'backup-deleted', ownedPaths: {}, ownedArtifacts: {} });
+            return { finalPath: source, outputBytes: publicationArtifact.size, phase: 'backup-deleted', ownedPaths: {}, ownedArtifacts: {}, cleanupPending: [] };
+          }
+          const backup = `${source}.backup`;
+          await persistTransaction({ phase: 'rollback-failed', ownedPaths: { replacementBackup: backup },
+            ownedArtifacts: { replacementBackup: { path: backup, nonce: 'fixture', state: 'owned',
+              device: '1', inode: '2', size: 1000000, sha256: 'c'.repeat(64) } } });
+          throw Object.assign(new Error('restore failed'), { code: 'ROLLBACK_FAILED' });
+        }
+      }
+    });
+    const id = await h.service.start({
+      ...CONFIG, destinationRoot: null, outputMode: 'replace', replacementConfirmed: true, concurrency: 2
+    });
+    const [first, second] = await Promise.all(gates.map((gate) => gate.promise));
+    await h.service.pause(id);
+    first.emit('close', 0, null);
+    for (let index = 0; index < 30; index += 1) await flush();
+    second.emit('close', 0, null);
+    const settled = await h.service.whenIdle(id);
+
+    expect(settled.state).toBe('paused');
+    expect(settled.recovery).toMatchObject({ fromState: 'replacing', action: 'manual-intervention' });
+    expect(settled.items.find((item) => item.id === settled.activeItemId).resultCode).toBe('recovery-required');
+    await expect(h.service.resume(id)).rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
+  });
+
+  test('an item waiting for the publish slot does not publish after a stop', async () => {
+    const releasePublish = deferred();
+    const publishStarted = deferred();
+    const h = harness({
+      items: clips(2),
+      queueLimit: 10,
+      stagingManager: {
+        publishSeparate: jest.fn(async ({ destination, publicationArtifact, persistTransaction }) => {
+          publishStarted.resolve();
+          await releasePublish.promise;
+          await persistTransaction({ step: 'separate-complete', ownedPaths: {}, ownedArtifacts: {} });
+          return { finalPath: destination, outputBytes: publicationArtifact.size, ownedPaths: {}, ownedArtifacts: {}, cleanupPending: [] };
+        })
+      }
+    });
+    const id = await h.service.start({ ...CONFIG, concurrency: 2 });
+    await publishStarted.promise;
+    for (let index = 0; index < 30; index += 1) await flush();
+    const shutdown = h.service.shutdown();
+    releasePublish.resolve();
+    await shutdown;
+
+    expect(h.stagingManager.publishSeparate).toHaveBeenCalledTimes(1);
+    const stopped = await h.service.get(id);
+    expect(stopped.items.filter((item) => item.state === 'completed')).toHaveLength(1);
+    expect(stopped.items.filter((item) => item.state === 'queued')).toHaveLength(1);
+  });
+
+  test('recovery cleans and re-queues interrupted non-lead items before resuming', async () => {
+    const h = harness({ items: [] });
+    const candidate = (itemId) => `C:\\temp\\recover-parallel-${itemId}-candidate.mp4`;
+    const owned = (itemId) => ({
+      ownedPaths: { encodedCandidate: candidate(itemId) },
+      ownedArtifacts: { encodedCandidate: { path: candidate(itemId), nonce: 'nonce', state: 'owned',
+        size: 1, sha256: 'a'.repeat(64), device: '1', inode: itemId } }
+    });
+    await h.store.create({
+      id: 'recover-parallel', config: { ...CONFIG, concurrency: 3 }, counters: emptyCounters(),
+      state: 'encoding', activeItemId: 'item-1', discoveryComplete: true,
+      items: ['item-1', 'item-2', 'item-3'].map((itemId, index) => ({
+        ...video(`recover-parallel-${index}`), id: itemId, state: 'processing', eligibleVideo: true, ...owned(itemId)
+      }))
+    });
+
+    await h.service.recover('recover-parallel', async () => ({ candidateExists: true }));
+    const done = await h.service.whenIdle('recover-parallel');
+
+    const cleaned = h.stagingManager.cleanupOwnedArtifacts.mock.calls.map(([request]) => request.itemId);
+    expect(cleaned).toEqual(expect.arrayContaining(['item-2', 'item-3']));
+    expect(done.state).toBe('completed');
+    expect(done.items.map((item) => item.state)).toEqual(['completed', 'completed', 'completed']);
+  });
+
+  test('batched discovery persists every item before it is enqueued with far fewer manifest writes', async () => {
+    const items = clips(120);
+    const h = harness({ items, queueLimit: 1000, deps: { discoveryBatchSize: 50, discoveryFlushMs: 60_000 } });
+    const sizes = [];
+    const transition = h.store.transition.bind(h.store);
+    h.store.transition = async (jobId, patch) => {
+      if (Array.isArray(patch.items)) sizes.push(patch.items.length);
+      return transition(jobId, patch);
+    };
+    const enqueuedUnpersisted = [];
+    h.inspectVideo.mockImplementation(async (item) => {
+      const persisted = h.store.manifests.get(id)?.items.some((entry) => entry.id === item.id);
+      if (!persisted) enqueuedUnpersisted.push(item.id);
+      return { codec: 'h264', durationSeconds: 10, containerReserveBytes: 1_000, telemetryReserveBytes: 1_000 };
+    });
+    const id = await h.service.start({ ...CONFIG, concurrency: 4 });
+    const done = await h.service.whenIdle(id);
+
+    expect(done.items).toHaveLength(120);
+    expect(done.items.every((item) => item.state === 'completed')).toBe(true);
+    expect(enqueuedUnpersisted).toEqual([]);
+    // The first item flushes at once so work starts immediately; the rest share 50-item writes.
+    const growth = sizes.filter((size, index) => index === 0 || size > sizes[index - 1]);
+    expect(growth.length).toBeLessThanOrEqual(5);
+  });
+});

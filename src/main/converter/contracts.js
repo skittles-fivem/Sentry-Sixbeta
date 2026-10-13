@@ -20,6 +20,14 @@ const OUTPUT_MODES = deepFreeze({ COPY: 'copy', CONVERT: 'convert' });
 const ITEM_STATES = deepFreeze({ queued: 'queued', processing: 'processing', completed: 'completed', failed: 'failed', cancelled: 'cancelled' });
 const TERMINAL_STATES = new Set([ITEM_STATES.completed, ITEM_STATES.failed, ITEM_STATES.cancelled]);
 const GROUPS = ['RecentClips', 'SavedClips', 'SentryClips'];
+// How many items a job may convert at the same time. A job without the field runs
+// exactly like the original single-worker pipeline (`fallback`); the UI offers
+// `recommended` by default.
+const CONCURRENCY = deepFreeze({ min: 1, max: 8, fallback: 1, recommended: 5 });
+
+function isValidConcurrency(value) {
+  return Number.isSafeInteger(value) && value >= CONCURRENCY.min && value <= CONCURRENCY.max;
+}
 
 function profile(name) {
   if (!PROFILES[name]) throw new RangeError(`Unknown conversion profile: ${name}`);
@@ -107,4 +115,4 @@ function serializeSummary(counters) {
   };
 }
 
-module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };
+module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, isValidConcurrency, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };

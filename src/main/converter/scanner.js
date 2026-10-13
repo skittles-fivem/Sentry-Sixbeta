@@ -6,6 +6,11 @@ const path = require('path');
 const GROUPS = Object.freeze(['RecentClips', 'SavedClips', 'SentryClips']);
 const DEFAULT_GROUP_ORDER = Object.freeze(['SavedClips', 'SentryClips', 'RecentClips']);
 const GROUP_BY_LOWER_NAME = new Map(GROUPS.map((group) => [group.toLowerCase(), group]));
+// Filesystem calls the scanner may have in flight at once. Removable drives and
+// network shares answer each realpath/stat/readdir with noticeable latency, so
+// overlapping them is what makes discovery fast. The default (1) is the strictly
+// sequential, fully lazy walk; the converter runtime opts in to look-ahead.
+const DEFAULT_SCAN_CONCURRENCY = 1;
 
 let teslaFilenameModulePromise;
 
@@ -46,7 +51,12 @@ function isSamePath(left, right, platform, pathApi) {
 }
 
 function createAdapters(overrides = {}) {
+  const concurrency = overrides.concurrency === undefined ? DEFAULT_SCAN_CONCURRENCY : overrides.concurrency;
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+    throw new TypeError('concurrency must be a positive safe integer');
+  }
   return {
+    concurrency,
     opendir: overrides.opendir || fs.promises.opendir.bind(fs.promises),
     realpath: overrides.realpath || fs.promises.realpath.bind(fs.promises),
     lstat: overrides.lstat || fs.promises.lstat.bind(fs.promises),
@@ -137,6 +147,25 @@ function classifyEventAsset(filename, group, groupRelativeParts) {
     return 'thumbnail';
   }
   return null;
+}
+
+function createLimiter(limit) {
+  let active = 0;
+  const waiting = [];
+  return async function run(operation) {
+    while (active >= limit) await new Promise((resolve) => waiting.push(resolve));
+    active += 1;
+    try {
+      return await operation();
+    } finally {
+      active -= 1;
+      waiting.shift()?.();
+    }
+  };
+}
+
+function cancelledError() {
+  return Object.assign(new Error('cancelled'), { code: 'CANCELLED' });
 }
 
 async function resolveDestinationRoot(destinationRoot, adapters) {
@@ -298,7 +327,153 @@ async function* scanTeslaFootage(config = {}, adapterOverrides = {}) {
     }
   }
 
-  yield* walk(sourceRoot, [], rootGroup, []);
+  if (adapters.concurrency === 1) {
+    yield* walk(sourceRoot, [], rootGroup, []);
+    return;
+  }
+
+  // Look-ahead variant: identical decisions, checks and output order as walk(),
+  // but the realpath/stat calls for upcoming entries and the listings of
+  // upcoming child directories (only once they passed the containment and
+  // destination checks) run ahead of the consumer, bounded by one scan-wide
+  // limiter and a per-directory window. Results are consumed strictly in order,
+  // so an error for entry k surfaces only after entries before it were yielded.
+  const limit = createLimiter(adapters.concurrency);
+  const window = adapters.concurrency;
+
+  function compareEntries(left, right) {
+    const leftGroup = canonicalGroup(left.name);
+    const rightGroup = canonicalGroup(right.name);
+    if (leftGroup && rightGroup) return groupRank.get(leftGroup) - groupRank.get(rightGroup);
+    if (leftGroup) return -1;
+    if (rightGroup) return 1;
+    if (left.name === right.name) return 0;
+    return left.name < right.name ? -1 : 1;
+  }
+
+  async function listDirectory(directoryPath) {
+    if (adapters.signal?.aborted) throw cancelledError();
+    const directory = await adapters.retryOperation({
+      kind: 'opendir', path: directoryPath, operation: () => adapters.opendir(directoryPath)
+    });
+    const iterator = directory[Symbol.asyncIterator]();
+    try {
+      const entries = [];
+      while (true) {
+        if (adapters.signal?.aborted) throw cancelledError();
+        const next = await adapters.retryOperation({
+          kind: 'read', path: directoryPath, operation: () => iterator.next()
+        });
+        if (next.done) break;
+        entries.push(next.value);
+      }
+      return entries.sort(compareEntries);
+    } finally {
+      if (typeof iterator.return === 'function') await iterator.return();
+      // An iterator that never started does not close its handle on return().
+      if (typeof directory.close === 'function') {
+        try { await directory.close(); } catch (_) { /* already closed by the iterator */ }
+      }
+    }
+  }
+
+  function quiet(promise) {
+    promise.catch(() => undefined);
+    return promise;
+  }
+
+  // Returns null for entries skipped by cheap synchronous checks (no fs calls),
+  // otherwise a promise of null (skipped after checks), a directory to descend
+  // into, or an item to yield.
+  function prepare(entry, directoryPath, relativeParts, group, groupRelativeParts) {
+    if (entry.isFile() && isReplacementArtifact(entry.name)) return null;
+    const childPath = pathApi.join(directoryPath, entry.name);
+    const childRelativeParts = relativeParts.concat(entry.name);
+    if (typeof entry.isSymbolicLink === 'function' && entry.isSymbolicLink()) return null;
+
+    if (entry.isDirectory()) {
+      const childGroup = group || canonicalGroup(entry.name);
+      if (childGroup && !includedGroups.has(childGroup)) return null;
+      return quiet((async () => {
+        const childRealPath = await limit(() => adapters.realpath(childPath));
+        if (!isSameOrDescendant(sourceRealPath, childRealPath, adapters.platform, pathApi)) return null;
+        if (destination && (
+          (destinationAbsoluteInsideSource &&
+            isSameOrDescendant(destination.absolutePath, childPath, adapters.platform, pathApi)) ||
+          (destinationRealInsideSource &&
+            isSameOrDescendant(destination.realPath, childRealPath, adapters.platform, pathApi))
+        )) {
+          return null;
+        }
+        return {
+          directory: true,
+          path: childPath,
+          relativeParts: childRelativeParts,
+          group: childGroup,
+          groupRelativeParts: childGroup ? (group ? groupRelativeParts.concat(entry.name) : []) : [],
+          listing: quiet(limit(() => listDirectory(childPath)))
+        };
+      })());
+    }
+
+    if (!entry.isFile()) return null;
+    const parsedFilename = parseTeslaFilename(entry.name);
+    const assetType = classifyEventAsset(entry.name, group, groupRelativeParts);
+    if (!parsedFilename && !assetType) return null;
+
+    return quiet((async () => {
+      const realFilePath = await limit(() => adapters.realpath(childPath));
+      if (!isSameOrDescendant(sourceRealPath, realFilePath, adapters.platform, pathApi)) return null;
+      const fileStat = await limit(() => adapters.stat(childPath));
+      if (!fileStat.isFile()) return null;
+      const eventId = group && ['SavedClips', 'SentryClips'].includes(group) && groupRelativeParts.length > 0
+        ? groupRelativeParts[0]
+        : null;
+      const item = {
+        kind: parsedFilename ? 'video' : 'asset',
+        group: group || null,
+        eventId,
+        relativePath: toRelativePath(childRelativeParts),
+        sourcePath: childPath,
+        sourceBytes: fileStat.size,
+        mtimeMs: fileStat.mtimeMs
+      };
+      if (parsedFilename) {
+        item.timestampKey = parsedFilename.timestampKey;
+        item.camera = parsedFilename.camera;
+      } else {
+        item.assetType = assetType;
+      }
+      return { item };
+    })());
+  }
+
+  async function* walkAhead(directoryPath, relativeParts, group, groupRelativeParts, listing) {
+    if (adapters.signal?.aborted) throw cancelledError();
+    const entries = await (listing || limit(() => listDirectory(directoryPath)));
+    const tasks = new Array(entries.length);
+    let scheduled = 0;
+    for (let index = 0; index < entries.length; index += 1) {
+      if (adapters.signal?.aborted) throw cancelledError();
+      for (; scheduled < Math.min(entries.length, index + window); scheduled += 1) {
+        tasks[scheduled] = prepare(entries[scheduled], directoryPath, relativeParts, group, groupRelativeParts);
+      }
+      const task = tasks[index];
+      tasks[index] = null;
+      if (!task) continue;
+      const prepared = await task;
+      if (adapters.signal?.aborted) throw cancelledError();
+      if (!prepared) continue;
+      if (prepared.directory) {
+        yield* walkAhead(prepared.path, prepared.relativeParts, prepared.group,
+          prepared.groupRelativeParts, prepared.listing);
+        continue;
+      }
+      yield prepared.item;
+    }
+  }
+
+  yield* walkAhead(sourceRoot, [], rootGroup, []);
 }
 
 module.exports = {

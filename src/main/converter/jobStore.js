@@ -2,7 +2,7 @@
 
 const path = require('path');
 const { randomUUID } = require('crypto');
-const { createEmptyCounters } = require('./contracts');
+const { createEmptyCounters, isValidConcurrency } = require('./contracts');
 
 const MANIFEST_VERSION = 1;
 const MANIFEST_NAME = 'job.json';
@@ -47,7 +47,7 @@ const TOP_FIELDS = new Set([
 ]);
 const CONFIG_FIELDS = new Set([
   'sourceRoot', 'destinationRoot', 'codec', 'profileId', 'networkMode',
-  'outputMode', 'includedGroups', 'groupOrder', 'replacementConfirmed'
+  'outputMode', 'includedGroups', 'groupOrder', 'replacementConfirmed', 'concurrency'
 ]);
 const ITEM_FIELDS = new Set([
   'id', 'state', 'kind', 'group', 'eventId', 'relativePath', 'sourcePath',
@@ -466,6 +466,10 @@ function normalizeConfig(value) {
   result.groupOrder = groupOrder.map((group) => boundedString(group));
   if (new Set(result.groupOrder).size !== GROUPS.length
       || result.groupOrder.some((group) => !GROUPS.includes(group))) throw storeError('INVALID_MANIFEST');
+  if (value.concurrency !== undefined) {
+    if (!isValidConcurrency(value.concurrency)) throw storeError('INVALID_MANIFEST');
+    result.concurrency = value.concurrency;
+  }
   if (result.outputMode === 'separate') {
     if (result.destinationRoot === null || result.replacementConfirmed) throw storeError('INVALID_MANIFEST');
   } else if (result.destinationRoot !== null || !result.replacementConfirmed) throw storeError('INVALID_MANIFEST');
@@ -675,6 +679,12 @@ function createJobStore(options) {
   const rootDir = path.resolve(options.rootDir);
   const fileSystem = options.fs;
   const queues = new Map();
+  // The manifest this store last wrote per job, with the identity of the file it
+  // wrote. transition() reuses it instead of re-reading, re-parsing and
+  // re-validating its own output, but only while the file on disk still has
+  // exactly that identity (dev/ino/size/mtime); any other change, including a
+  // swapped file or directory, falls back to the full validated read.
+  const lastWritten = new Map();
   let quarantineSequence = 0;
 
   function jobPaths(id) {
@@ -767,7 +777,8 @@ function createJobStore(options) {
 
   async function atomicWrite(paths, manifest) {
     let serialized;
-    try { serialized = `${JSON.stringify(manifest, null, 2)}\n`; } catch (_) { throw storeError('MANIFEST_WRITE_FAILED'); }
+    // Compact JSON: every state change rewrites the whole manifest.
+    try { serialized = `${JSON.stringify(manifest)}\n`; } catch (_) { throw storeError('MANIFEST_WRITE_FAILED'); }
     if (Buffer.byteLength(serialized, 'utf8') > MANIFEST_LIMITS.bytes) throw storeError('INVALID_MANIFEST');
     let handle;
     try {
@@ -929,6 +940,7 @@ function createJobStore(options) {
       }
       const canonicalRoot = await fileSystem.realpath(rootDir);
       await assertContainedDirectory(paths.directory, canonicalRoot);
+      lastWritten.delete(id);
       await atomicWrite(paths, safeManifest);
       return cloneManifest(safeManifest);
     });
@@ -943,6 +955,7 @@ function createJobStore(options) {
         if (safeManifest.revision <= existing.revision) throw storeError('STALE_MANIFEST_REVISION');
       }
       const paths = await ensureJobDirectory(safeManifest.id);
+      lastWritten.delete(safeManifest.id);
       await atomicWrite(paths, safeManifest);
       return cloneManifest(safeManifest);
     });
@@ -972,6 +985,33 @@ function createJobStore(options) {
     return manifests;
   }
 
+  async function rememberWritten(id, paths, manifest) {
+    try {
+      const stat = await fileSystem.lstat(paths.manifest);
+      if (stat.isFile() && !stat.isSymbolicLink()) {
+        lastWritten.set(id, { manifest, identity: statIdentity(stat) });
+        return;
+      }
+    } catch (_) { /* fall back to full reads */ }
+    lastWritten.delete(id);
+  }
+
+  async function currentManifest(id) {
+    const cached = lastWritten.get(id);
+    if (cached) {
+      lastWritten.delete(id);
+      try {
+        const stat = await fileSystem.lstat(jobPaths(id).manifest);
+        const identity = statIdentity(stat);
+        if (stat.isFile() && !stat.isSymbolicLink() && sameIdentity(identity, cached.identity)
+            && identity.ctimeMs === cached.identity.ctimeMs) {
+          return cached.manifest;
+        }
+      } catch (_) { /* full read below reports the real state */ }
+    }
+    return readManifest(id);
+  }
+
   async function transition(id, patch) {
     assertSafeJobId(id);
     if (!isPlainObject(patch) || ['id', 'schemaVersion', 'revision'].some((key) => hasOwn(patch, key))) {
@@ -981,11 +1021,12 @@ function createJobStore(options) {
       if (!TOP_FIELDS.has(key)) throw storeError(isSensitiveField(key) ? 'SENSITIVE_MANIFEST_DATA' : 'INVALID_MANIFEST');
     }
     return runExclusive(id, async () => {
-      const current = await readManifest(id);
+      const current = await currentManifest(id);
       if (!current) throw storeError('JOB_NOT_FOUND');
       const next = normalizeManifest({ ...current, ...patch, revision: current.revision + 1 });
       const paths = await ensureJobDirectory(id);
       await atomicWrite(paths, next);
+      await rememberWritten(id, paths, next);
       return cloneManifest(next);
     });
   }
@@ -1064,6 +1105,7 @@ function createJobStore(options) {
       recovery.action = facts.valid ? recoveryAction(current, facts) : 'manual-intervention';
       const recovered = normalizeManifest({ ...current, state: 'paused', revision: current.revision + 1, recovery });
       const paths = await ensureJobDirectory(id);
+      lastWritten.delete(id);
       await atomicWrite(paths, recovered);
       return cloneManifest(recovered);
     });

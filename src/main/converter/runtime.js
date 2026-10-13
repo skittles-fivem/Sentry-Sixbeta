@@ -516,6 +516,7 @@ async function createConverterRuntime(options = {}) {
   const scanner = (config, scanOptions = {}) => scanTeslaFootage(config, {
     signal: scanOptions.signal,
     retryOperation: scanOptions.retryOperation,
+    concurrency: 16,
     path: pathApi,
     platform
   });
@@ -555,6 +556,12 @@ async function createConverterRuntime(options = {}) {
     chooseStagingMode: (request) => chooseStagingMode(request).mode,
     checkStagingSpace: (request) => checkStagingSpace({ ...request, tempRoot, volumeInfo }),
     inspectRecovery,
+    // Persist discovered files in batches and let discovery run ahead of
+    // conversion (item ids are tiny; the manifest itself caps the item count),
+    // instead of one full manifest rewrite per file in lock-step with encoding.
+    discoveryBatchSize: 200,
+    discoveryFlushMs: 250,
+    queueLimit: 10_000,
     ensureDestinationParent: ({ destinationRoot, destination }) => ensureContainedDestinationParent({
       destinationRoot, destination, fs: pfs, pathApi, platform
     })

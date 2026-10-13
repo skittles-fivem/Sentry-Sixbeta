@@ -227,6 +227,32 @@ describe('converter job store', () => {
     await expect(store.load(`order-${index}`)).resolves.toMatchObject({ config: { groupOrder } });
   });
 
+  test('persists parallel conversions and leaves older manifests without the field', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    await store.save(job('parallel-5', { config: validConfig({ concurrency: 5 }) }));
+    await expect(store.load('parallel-5')).resolves.toMatchObject({ config: { concurrency: 5 } });
+    await store.save(job('parallel-absent'));
+    expect((await store.load('parallel-absent')).config).not.toHaveProperty('concurrency');
+  });
+
+  test.each([0, 9, 1.5, '4', null].map((value) => [value]))('rejects invalid persisted parallel conversions %p', async (concurrency) => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    await expect(store.save(job('parallel-bad', { config: validConfig({ concurrency }) })))
+      .rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
+  });
+
+  test('transition reuses its own last write but re-reads a manifest changed on disk', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    await store.save(job('cached-transition'));
+    await store.transition('cached-transition', { summaryDismissed: false });
+    const [manifestFile] = (await fs.promises.readdir(path.join(rootDir, 'cached-transition')))
+      .filter((name) => name === 'job.json');
+    const manifestPath = path.join(rootDir, 'cached-transition', manifestFile);
+    await fs.promises.writeFile(manifestPath, '{not json');
+    await expect(store.transition('cached-transition', { summaryDismissed: true }))
+      .rejects.toMatchObject({ code: 'CORRUPT_MANIFEST' });
+  });
+
   test('defaults an absent group order when reading an old manifest', async () => {
     const store = createJobStore({ rootDir, fs: fs.promises });
     const oldManifest = job('old-order');

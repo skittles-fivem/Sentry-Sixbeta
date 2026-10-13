@@ -293,7 +293,8 @@ test('builds the exact start DTO from selected controls', async () => {
     outputMode: 'separate',
     includedGroups: ['RecentClips', 'SentryClips'],
     groupOrder: ['SavedClips', 'SentryClips', 'RecentClips'],
-    replacementConfirmed: false
+    replacementConfirmed: false,
+    concurrency: 5
   });
 });
 
@@ -372,7 +373,8 @@ test('requires both explicit replacement acknowledgement and confirmation', asyn
     outputMode: 'replace',
     includedGroups: ['RecentClips', 'SavedClips', 'SentryClips'],
     groupOrder: ['SavedClips', 'SentryClips', 'RecentClips'],
-    replacementConfirmed: true
+    replacementConfirmed: true,
+    concurrency: 5
   });
 });
 
@@ -821,4 +823,72 @@ test('moves and selects sidebar tabs with horizontal arrow keys', async () => {
   assert.equal(tabs[1].classList.contains('active'), true);
   assert.equal(tabs[1].getAttribute('tabindex'), '0');
   assert.equal(tabs[0].getAttribute('tabindex'), '-1');
+});
+
+function memoryStorage(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    values,
+    getItem: (key) => (values.has(key) ? values.get(key) : null),
+    setItem: (key, value) => { values.set(key, String(value)); }
+  };
+}
+
+async function startWith(elements, api) {
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  elements.destinationPath.value = 'E:\\Converted';
+  await elements.startButton.click();
+  return api.calls.find(([name]) => name === 'start')[1];
+}
+
+test('parallel conversions default to 5 and the chosen value is remembered and submitted', async () => {
+  const elements = { ...makeElements(), concurrency: new FakeElement({ value: '5' }) };
+  const api = fakeApi();
+  const storage = memoryStorage();
+  const controller = createFootageConverterController({ api, elements, storage });
+  await controller.init();
+  assert.equal(elements.concurrency.value, '5');
+
+  elements.concurrency.value = '3';
+  await elements.concurrency.dispatch('change');
+  assert.equal(storage.values.get('converterConcurrency'), '3');
+  assert.equal((await startWith(elements, api)).concurrency, 3);
+});
+
+test('restores a stored parallel-conversions choice and ignores invalid stored values', async () => {
+  const restored = { ...makeElements(), concurrency: new FakeElement({ value: '5' }) };
+  await createFootageConverterController({ api: fakeApi(), elements: restored, storage: memoryStorage({ converterConcurrency: '7' }) }).init();
+  assert.equal(restored.concurrency.value, '7');
+
+  for (const stored of ['0', '9', '2.5', 'abc']) {
+    const elements = { ...makeElements(), concurrency: new FakeElement({ value: '5' }) };
+    const api = fakeApi();
+    await createFootageConverterController({ api, elements, storage: memoryStorage({ converterConcurrency: stored }) }).init();
+    assert.equal(elements.concurrency.value, '5', `stored ${stored}`);
+    assert.equal((await startWith(elements, api)).concurrency, 5);
+  }
+});
+
+test('storage failures never block starting a job', async () => {
+  const elements = makeElements();
+  const api = fakeApi();
+  const storage = { getItem() { throw new Error('denied'); }, setItem() { throw new Error('denied'); } };
+  await createFootageConverterController({ api, elements, storage }).init();
+  assert.equal((await startWith(elements, api)).concurrency, 5);
+});
+
+test('shows how many files convert at once and locks the setting while a job runs', async () => {
+  const snapshot = activeSnapshot({ config: { ...activeSnapshot().config, concurrency: 4 } });
+  snapshot.items = snapshot.items.map((item) => item.id === 'item-3' ? { ...item, state: 'processing' } : item);
+  const elements = { ...makeElements(), concurrency: new FakeElement({ value: '5' }) };
+  await createFootageConverterController({ api: fakeApi({ current: snapshot }), elements, storage: memoryStorage() }).init();
+  assert.equal(elements.currentFile.textContent, 'Converting 2 files at once');
+  assert.equal(elements.concurrency.value, '4');
+  assert.equal(elements.concurrency.disabled, true);
+});
+
+test('keeps the single-file status line when one file is converting', async () => {
+  const elements = makeElements();
+  await createFootageConverterController({ api: fakeApi({ current: activeSnapshot() }), elements, storage: memoryStorage() }).init();
+  assert.equal(elements.currentFile.textContent, 'SentryClips/event/front.mp4');
 });

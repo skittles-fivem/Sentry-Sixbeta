@@ -6,6 +6,16 @@ const ACTIVE_STATES = new Set([
 const PIPELINE_ORDER = ['discover', 'encode', 'verify', 'save'];
 const GROUPS = ['RecentClips', 'SavedClips', 'SentryClips'];
 const DEFAULT_GROUP_ORDER = ['SavedClips', 'SentryClips', 'RecentClips'];
+// Mirrors CONCURRENCY in src/main/converter/contracts.js (not loadable here).
+const MIN_CONCURRENCY = 1;
+const MAX_CONCURRENCY = 8;
+const DEFAULT_CONCURRENCY = 5;
+const CONCURRENCY_STORAGE_KEY = 'converterConcurrency';
+
+function normalizeConcurrency(value) {
+    const number = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+    return Number.isSafeInteger(number) && number >= MIN_CONCURRENCY && number <= MAX_CONCURRENCY ? number : null;
+}
 
 const STATUS_LABELS = Object.freeze({
     discovering: ['statusDiscovering', 'Discovering footage'],
@@ -121,6 +131,7 @@ function collectElements(root) {
         orderRows,
         codecOptions: all('[data-converter-codec]'),
         profileOptions: all('[data-converter-profile]'),
+        concurrency: byId('converterConcurrency'),
         outputOptions: all('[data-converter-output]'),
         replaceOption: byId('converterReplaceOption'),
         replaceInput: byId('converterOutputReplace'),
@@ -202,6 +213,23 @@ function createFootageConverterController(options = {}) {
     let visible = false;
     let pendingStartEvents = null;
     let groupOrder = [...DEFAULT_GROUP_ORDER];
+    const storage = options.storage !== undefined ? options.storage : globalThis.localStorage;
+
+    function storedConcurrency() {
+        try { return normalizeConcurrency(storage?.getItem?.(CONCURRENCY_STORAGE_KEY)); } catch (_) { return null; }
+    }
+
+    function rememberConcurrency(value) {
+        try { storage?.setItem?.(CONCURRENCY_STORAGE_KEY, String(value)); } catch (_) { /* preference only */ }
+    }
+
+    function selectedConcurrency() {
+        return normalizeConcurrency(elements.concurrency?.value) ?? storedConcurrency() ?? DEFAULT_CONCURRENCY;
+    }
+
+    function setConcurrency(value) {
+        if (elements.concurrency) elements.concurrency.value = String(value);
+    }
 
     function message(key, fallback, params) {
         const fullKey = `ui.converter.${key}`;
@@ -227,6 +255,8 @@ function createFootageConverterController(options = {}) {
             ? [...config.groupOrder]
             : [...DEFAULT_GROUP_ORDER];
         if (elements.replacementConfirmation) elements.replacementConfirmation.checked = config.replacementConfirmed === true;
+        const concurrency = normalizeConcurrency(config.concurrency);
+        if (concurrency !== null) setConcurrency(concurrency);
         updateOutputMode();
     }
 
@@ -340,7 +370,10 @@ function createFootageConverterController(options = {}) {
         setText(elements.status, snapshot
             ? statusLabel ? message(...statusLabel) : message('statusReady', 'Converter ready')
             : message('ready', 'Ready to configure'));
-        setText(elements.currentFile, activeItem?.relativePath || message('noFileActive', 'No file active'));
+        const converting = snapshot?.itemStateCounts?.active ?? items.filter((item) => item.state === 'processing').length;
+        setText(elements.currentFile, active && converting > 1
+            ? message('convertingFiles', 'Converting {count} files at once', { count: converting })
+            : activeItem?.relativePath || message('noFileActive', 'No file active'));
         setText(elements.currentProgress, progress?.outTimeUs !== undefined
             ? message('progressEncoded', '{duration} encoded', { duration: formatDuration(progress.outTimeUs / 1000) })
             : activeItem ? message('progressWorking', 'Working on current file') : '—');
@@ -364,6 +397,7 @@ function createFootageConverterController(options = {}) {
         renderRows(elements.errorRows, failedItems.map((item) => [item.relativePath || item.id, item.failure?.code || 'operation-failed']));
         setHidden(elements.errorRows, failedItems.length === 0);
         setDisabled(elements.startButton, active);
+        setDisabled(elements.concurrency, active);
         setDisabled(elements.pauseButton, !active || paused || snapshot?.state === 'paused_network');
         setDisabled(elements.resumeButton, !paused);
         setDisabled(elements.cancelButton, !active);
@@ -448,7 +482,8 @@ function createFootageConverterController(options = {}) {
             outputMode,
             includedGroups,
             groupOrder: [...groupOrder],
-            replacementConfirmed: outputMode === 'replace'
+            replacementConfirmed: outputMode === 'replace',
+            concurrency: selectedConcurrency()
         };
     }
 
@@ -513,6 +548,11 @@ function createFootageConverterController(options = {}) {
             item.up?.addEventListener('click', () => moveGroup(item.group, 'up'));
             item.down?.addEventListener('click', () => moveGroup(item.group, 'down'));
         }
+        setConcurrency(storedConcurrency() ?? DEFAULT_CONCURRENCY);
+        elements.concurrency?.addEventListener?.('change', () => {
+            const value = normalizeConcurrency(elements.concurrency.value);
+            if (value !== null) rememberConcurrency(value);
+        });
         elements.startButton?.addEventListener('click', start);
         elements.pauseButton?.addEventListener('click', () => command('pauseConverter'));
         elements.resumeButton?.addEventListener('click', () => command('resumeConverter'));

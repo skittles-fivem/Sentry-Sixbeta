@@ -213,6 +213,31 @@ describe('converter IPC', () => {
     });
   });
 
+  test.each([1, 5, 8])('accepts and forwards parallel conversions %p', async (concurrency) => {
+    const h = setup();
+    await expect(h.invoke('converter:start', { ...CONFIG, concurrency })).resolves.toMatchObject({ ok: true });
+    expect(h.service.start).toHaveBeenCalledWith(expect.objectContaining({ concurrency }));
+  });
+
+  test('keeps parallel conversions optional and does not invent a value', async () => {
+    const h = setup();
+    await expect(h.invoke('converter:start', CONFIG)).resolves.toMatchObject({ ok: true });
+    expect(h.service.start.mock.calls[0][0]).not.toHaveProperty('concurrency');
+  });
+
+  test.each([
+    [0, 'INVALID_CONCURRENCY'], [9, 'INVALID_CONCURRENCY'], [-1, 'INVALID_CONCURRENCY'],
+    ['5', 'INVALID_CONCURRENCY'], [null, 'INVALID_CONCURRENCY'], [true, 'INVALID_CONCURRENCY'],
+    // Non-integer numbers never pass the generic payload bounds.
+    [2.5, 'INVALID_REQUEST']
+  ])('rejects invalid parallel conversions %p', async (concurrency, code) => {
+    const h = setup();
+    await expect(h.invoke('converter:start', { ...CONFIG, concurrency })).resolves.toEqual({
+      ok: false, error: { code, retryable: false }
+    });
+    expect(h.service.start).not.toHaveBeenCalled();
+  });
+
   test('rejects an unsafe job ID returned by the service', async () => {
     const h = setup();
     h.service.start.mockResolvedValue('../job');
@@ -463,7 +488,8 @@ describe('converter IPC', () => {
       queued: 992,
       completed: 2,
       skipped: 0,
-      failed: 5
+      failed: 5,
+      active: 1
     });
     expect(snapshot.cleanupPendingCount).toBe(1);
     expect(snapshot.items.length).toBeLessThanOrEqual(256);

@@ -1,6 +1,8 @@
 'use strict';
 
 const {
+  CONCURRENCY,
+  isValidConcurrency,
   createEmptyCounters,
   addCompletedFile,
   serializeSummary,
@@ -205,6 +207,15 @@ function createConverterJobService(deps) {
   }
   const ffmpegPath = deps.ffmpegPath || 'ffmpeg';
   const queueLimit = deps.queueLimit || 4;
+  // Discovery persists newly found items in batches. 1 keeps the original
+  // persist-each-item-before-enqueue cadence; larger values avoid rewriting the
+  // whole manifest once per discovered file.
+  const discoveryBatchSize = deps.discoveryBatchSize || 1;
+  const discoveryFlushMs = deps.discoveryFlushMs ?? 250;
+  if (!Number.isSafeInteger(discoveryBatchSize) || discoveryBatchSize < 1
+      || !Number.isSafeInteger(discoveryFlushMs) || discoveryFlushMs < 0) {
+    throw new RangeError('discovery batching must use positive bounded integers');
+  }
   const jobs = new Map();
   const listeners = new Set();
   let shuttingDown = false;
@@ -217,11 +228,18 @@ function createConverterJobService(deps) {
   }
 
   function emit(runtime, type, fields = {}) {
+    if (listeners.size === 0) return;
+    // Snapshots are already detached, deep-frozen copies; cloning them again
+    // per event was a full extra pass over every manifest item.
+    const detached = {};
+    for (const [key, value] of Object.entries(fields)) {
+      detached[key] = value && typeof value === 'object' && Object.isFrozen(value) ? value : clone(value);
+    }
     const event = deepFreeze({
       type,
       jobId: runtime.manifest.id,
       revision: runtime.manifest.revision,
-      ...clone(fields)
+      ...detached
     });
     for (const listener of [...listeners]) {
       try { listener(event); } catch (_) { /* listener isolation */ }
@@ -243,10 +261,17 @@ function createConverterJobService(deps) {
       cancelRequested: false,
       stopRequested: false,
       pauseWaiters: [],
-      activeChild: null,
-      childTerminationRequested: false,
-      activeItemId: null,
-      activeOwnership: null,
+      // Per-item worker state. With concurrency 1 there is at most one entry,
+      // which reproduces the original single-worker pipeline exactly.
+      children: new Map(),
+      ownerships: new Map(),
+      inFlight: new Set(),
+      leadItemId: null,
+      commitHolder: null,
+      commitWaiters: [],
+      liveWorkers: 0,
+      parkedWorkers: 0,
+      pausePersisted: false,
       abortController: new AbortController(),
       runPromise: null,
       runKind: null,
@@ -262,7 +287,7 @@ function createConverterJobService(deps) {
     const operation = runtime.persistChain.catch(() => undefined).then(async () => {
       const patch = typeof buildPatch === 'function' ? buildPatch(runtime.manifest) : buildPatch;
       runtime.manifest = await store.transition(runtime.manifest.id, patch);
-      emit(runtime, 'snapshot', { snapshot: publicSnapshot(runtime.manifest) });
+      if (listeners.size > 0) emit(runtime, 'snapshot', { snapshot: publicSnapshot(runtime.manifest) });
       return runtime.manifest;
     });
     runtime.persistChain = operation;
@@ -271,9 +296,88 @@ function createConverterJobService(deps) {
 
   function itemPatch(runtime, itemId, changes, jobChanges = {}) {
     return update(runtime, (current) => ({
-      ...jobChanges,
+      ...(isLead(runtime, itemId) ? jobChanges : {}),
       items: current.items.map((item) => item.id === itemId ? mergeItem(item, changes) : item)
     }));
+  }
+
+  function ownershipFor(runtime, itemId) {
+    return runtime.ownerships.get(itemId) || null;
+  }
+
+  function setOwnership(runtime, itemId, value) {
+    if (value) runtime.ownerships.set(itemId, value);
+    else runtime.ownerships.delete(itemId);
+  }
+
+  function concurrencyOf(manifest) {
+    const value = manifest?.config?.concurrency;
+    return isValidConcurrency(value) ? value : CONCURRENCY.fallback;
+  }
+
+  // The job-level recovery fields (state, activeItemId, ownedPaths,
+  // ownedArtifacts, publicationArtifact, replacementPhase, recovery) describe a
+  // single item, because crash recovery reconciles exactly one active item. With
+  // several workers only the "lead" item may write them:
+  //   - the commit holder (publishing/replacing is exclusive, see acquireCommit),
+  //   - otherwise the oldest in-flight item, or any item when it runs alone.
+  // Every other in-flight item persists its ownership on the item itself and is
+  // cleaned up and re-queued by recovery (see releaseInterruptedItems).
+  function isLead(runtime, itemId) {
+    if (runtime.recoveryRequired) return itemId === runtime.recoveryItemId;
+    if (runtime.commitHolder) return runtime.commitHolder === itemId;
+    if (runtime.inFlight.size <= 1) return true;
+    return runtime.leadItemId === itemId;
+  }
+
+  function leadItemId(runtime) {
+    return runtime.commitHolder || runtime.leadItemId || null;
+  }
+
+  function beginItem(runtime, item) {
+    runtime.inFlight.add(item.id);
+    if (!runtime.leadItemId || !runtime.inFlight.has(runtime.leadItemId)) runtime.leadItemId = item.id;
+    setOwnership(runtime, item.id, ownershipOf(item));
+  }
+
+  function finishItem(runtime, itemId) {
+    runtime.inFlight.delete(itemId);
+    runtime.ownerships.delete(itemId);
+    runtime.children.delete(itemId);
+    releaseCommit(runtime, itemId);
+    if (runtime.leadItemId === itemId) runtime.leadItemId = runtime.inFlight.values().next().value || null;
+  }
+
+  // Publishing (copying) and in-place replacement run one item at a time so the
+  // job-level recovery state always describes the item that is mid-transaction.
+  // The holder keeps the slot until its outcome, success or failure, is
+  // persisted (released in finishItem).
+  async function acquireCommit(runtime, itemId) {
+    let waited = false;
+    while (runtime.commitHolder && runtime.commitHolder !== itemId) {
+      waited = true;
+      await new Promise((resolve) => runtime.commitWaiters.push(resolve));
+    }
+    if ((runtime.recoveryRequired && runtime.recoveryItemId !== itemId)
+        || (waited && (runtime.cancelRequested || runtime.stopRequested))) {
+      runtime.commitWaiters.shift()?.();
+      throw serviceError('CANCELLED');
+    }
+    runtime.commitHolder = itemId;
+  }
+
+  function releaseCommit(runtime, itemId) {
+    if (runtime.commitHolder !== itemId) return;
+    runtime.commitHolder = null;
+    runtime.commitWaiters.shift()?.();
+  }
+
+  function terminateChildren(runtime) {
+    for (const entry of runtime.children.values()) {
+      if (entry.terminationRequested) continue;
+      entry.terminationRequested = true;
+      entry.child.kill('SIGTERM');
+    }
   }
 
   function mergeItem(item, changes) {
@@ -300,6 +404,9 @@ function createConverterJobService(deps) {
         const itemChanges = { ...item, ...combined };
         if (!combined.publicationArtifact) delete itemChanges.publicationArtifact;
         if (snapshot.phase && REPLACEMENT_PHASES.has(snapshot.phase)) itemChanges.replacementPhase = snapshot.phase;
+        if (!isLead(runtime, itemId)) {
+          return { items: current.items.map((entry) => entry.id === itemId ? itemChanges : entry) };
+        }
         return {
           ...jobChanges,
           ownedPaths: combined.ownedPaths,
@@ -308,7 +415,7 @@ function createConverterJobService(deps) {
           items: current.items.map((entry) => entry.id === itemId ? itemChanges : entry)
         };
       });
-      runtime.activeOwnership = combined;
+      setOwnership(runtime, itemId, combined);
     };
   }
 
@@ -328,20 +435,34 @@ function createConverterJobService(deps) {
 
   async function produce(runtime) {
     runtime.scannerStarted = true;
+    const identity = (item) => `${item.relativePath}\u0000${item.sourcePath}`;
+    const known = new Set(runtime.manifest.items.map(identity));
+    let pending = [];
+    let lastFlush = -Infinity;
+    // Items are always persisted before they are enqueued; batching only changes
+    // how many share one manifest write.
+    const flush = async () => {
+      if (pending.length === 0) return;
+      const batch = pending;
+      pending = [];
+      await update(runtime, (current) => ({ items: [...current.items, ...batch] }));
+      if (discoveryBatchSize > 1) lastFlush = clock.now();
+      for (const item of batch) await runtime.queue.push(item.id);
+    };
     try {
       for await (const discovered of scanner(runtime.manifest.config, {
         signal: runtime.abortController.signal,
         retryOperation: ({ path: affectedPath, operation }) => retryAffectedOperation(runtime, affectedPath, operation)
       })) {
         if (runtime.cancelRequested || runtime.stopRequested) break;
-        const alreadyPersisted = runtime.manifest.items.some((item) => item.relativePath === discovered.relativePath
-          && item.sourcePath === discovered.sourcePath);
-        if (alreadyPersisted) continue;
-        const item = createQueueItem(runtime, discovered);
-        await update(runtime, (current) => ({ items: [...current.items, item] }));
-        await runtime.queue.push(item.id);
+        const key = identity(discovered);
+        if (known.has(key)) continue;
+        known.add(key);
+        pending.push(createQueueItem(runtime, discovered));
+        if (pending.length >= discoveryBatchSize || clock.now() - lastFlush >= discoveryFlushMs) await flush();
       }
       if (!runtime.cancelRequested && !runtime.stopRequested) {
+        await flush();
         await update(runtime, { discoveryComplete: true });
       }
       runtime.producerDone = true;
@@ -364,16 +485,37 @@ function createConverterJobService(deps) {
     }
   }
 
-  async function waitWhilePaused(runtime) {
-    if (!runtime.pauseRequested || runtime.cancelRequested) return;
+  // A pause lets in-flight items finish; the job reports "paused" once every
+  // live worker has parked (with one worker that is immediately, as before).
+  async function persistPauseWhenParked(runtime) {
+    if (!runtime.pauseRequested || runtime.cancelRequested || runtime.pausePersisted) return;
+    // A halted job (failed rollback, stop, fatal worker error) owns its own
+    // job-level state; a pause must never overwrite it.
+    if (runtime.recoveryRequired || runtime.stopRequested || runtime.halted) return;
+    if (runtime.liveWorkers === 0 || runtime.parkedWorkers < runtime.liveWorkers) return;
+    runtime.pausePersisted = true;
     await update(runtime, { state: 'paused', activeItemId: null });
     emit(runtime, 'paused');
-    await new Promise((resolve) => runtime.pauseWaiters.push(resolve));
+  }
+
+  async function waitWhilePaused(runtime) {
+    if (!runtime.pauseRequested || runtime.cancelRequested) return;
+    runtime.parkedWorkers += 1;
+    try {
+      const parked = new Promise((resolve) => runtime.pauseWaiters.push(resolve));
+      await persistPauseWhenParked(runtime);
+      await parked;
+    } finally {
+      runtime.parkedWorkers -= 1;
+    }
   }
 
   async function waitForNetwork(runtime, target, options = {}) {
-    const persist = options.persist !== false;
-    const item = currentItem(runtime, runtime.activeItemId || runtime.manifest.activeItemId);
+    // Only one wait persists the job-level paused_network state; concurrent
+    // workers waiting on the same outage just poll their own path.
+    const persist = options.persist !== false && !runtime.networkPauseOwner
+      && (!options.itemId || isLead(runtime, options.itemId));
+    const item = currentItem(runtime, options.itemId || leadItemId(runtime) || runtime.manifest.activeItemId);
     const observedState = options.resumeState || runtime.manifest.state;
     const resumeState = observedState === 'discovering' && item ? 'waiting' : observedState;
     const phase = resumeState === 'replacing'
@@ -384,14 +526,26 @@ function createConverterJobService(deps) {
       ? 'source'
       : item && pathApi.resolve(outputPath(runtime.manifest.config, item)).toLowerCase() === normalizedTarget
         ? 'destination' : 'discovery');
+    const ownerToken = persist ? {} : null;
+    if (persist) runtime.networkPauseOwner = ownerToken;
+    // Leadership is re-checked when each write is applied: another item may
+    // have entered the exclusive publish/replace phase meanwhile, and its
+    // job-level state must not be overwritten.
+    const stillLead = () => !options.itemId || isLead(runtime, options.itemId);
+    let persisted = false;
+    try {
     if (persist) {
-      await update(runtime, {
-        state: 'paused_network',
-        activeItemId: item?.id || null,
-        recovery: {
-          fromState: 'paused_network', action: 'resume-network', pathRole, resumeState,
-          ...(phase ? { phase } : {})
-        }
+      await update(runtime, () => {
+        if (!stillLead()) return {};
+        persisted = true;
+        return {
+          state: 'paused_network',
+          activeItemId: item?.id || null,
+          recovery: {
+            fromState: 'paused_network', action: 'resume-network', pathRole, resumeState,
+            ...(phase ? { phase } : {})
+          }
+        };
       });
     }
     emit(runtime, 'paused_network', { status: 'waiting' });
@@ -405,12 +559,12 @@ function createConverterJobService(deps) {
       } catch (_) { available = false; }
       if (runtime.cancelRequested || runtime.stopRequested) throw serviceError('CANCELLED');
       if (available) {
-        if (persist) {
-          await update(runtime, {
+        if (persisted) {
+          await update(runtime, () => (stillLead() ? {
             state: resumeState,
             recovery: null,
             ...(resumeState === 'replacing' ? { replacementPhase: phase } : {})
-          });
+          } : {}));
         }
         emit(runtime, 'network_reconnected', { status: 'resuming' });
         return;
@@ -423,6 +577,9 @@ function createConverterJobService(deps) {
       delay = Math.min(backoff.maximumMs, delay * 2);
     }
     throw serviceError('CANCELLED');
+    } finally {
+      if (ownerToken && runtime.networkPauseOwner === ownerToken) runtime.networkPauseOwner = null;
+    }
   }
 
   function isRetryableNetwork(error, target) {
@@ -444,9 +601,9 @@ function createConverterJobService(deps) {
     while (true) {
       try { return await operation(); } catch (error) {
         if (!isRetryableNetwork(error, target)) throw error;
-        const reconciled = await reconcileItemOwnership(runtime, itemId, runtime.activeOwnership);
+        const reconciled = await reconcileItemOwnership(runtime, itemId, ownershipFor(runtime, itemId));
         if (!reconciled) throw Object.assign(new Error('cleanup pending'), { code: 'OWNED_CLEANUP_FAILED' });
-        await waitForNetwork(runtime, networkProbePath, { pathRole: 'destination' });
+        await waitForNetwork(runtime, networkProbePath, { pathRole: 'destination', itemId });
       }
     }
   }
@@ -472,7 +629,7 @@ function createConverterJobService(deps) {
       : pathApi.resolve(config.destinationRoot, ...item.relativePath.split('/'));
   }
 
-  async function runChild(runtime, source, target, codec, encoder, bitrate) {
+  async function runChild(runtime, itemId, source, target, codec, encoder, bitrate) {
     const args = [
       '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
       '-i', source,
@@ -494,8 +651,13 @@ function createConverterJobService(deps) {
     if (!child || typeof child.once !== 'function' || !child.stdout?.on || typeof child.kill !== 'function') {
       return { ok: false, code: 'encoder-start-failed' };
     }
-    runtime.activeChild = child;
-    runtime.childTerminationRequested = false;
+    const entry = { child, terminationRequested: false };
+    runtime.children.set(itemId, entry);
+    // A cancel/stop issued while this item was starting must still stop it.
+    if (runtime.cancelRequested || runtime.stopRequested || runtime.recoveryRequired) {
+      entry.terminationRequested = true;
+      child.kill('SIGTERM');
+    }
     child.stderr?.on?.('data', () => {});
     let buffered = '';
     const progress = {};
@@ -513,7 +675,8 @@ function createConverterJobService(deps) {
           if (Number.isSafeInteger(parsed) && parsed >= 0) progress.outTimeUs = parsed;
         } else if (key === 'progress' && (value === 'continue' || value === 'end')) {
           progress.phase = value;
-          emit(runtime, 'progress', { progress: { ...progress } });
+          // The UI shows one live progress line: the lead item's.
+          if (isLead(runtime, itemId)) emit(runtime, 'progress', { progress: { ...progress } });
         }
       }
     });
@@ -522,16 +685,14 @@ function createConverterJobService(deps) {
       const finish = (result) => {
         if (settled) return;
         settled = true;
-        if (runtime.activeChild === child) {
-          runtime.activeChild = null;
-          runtime.childTerminationRequested = false;
-        }
+        if (runtime.children.get(itemId) === entry) runtime.children.delete(itemId);
         resolve(result);
       };
       child.once('error', () => finish({ ok: false, code: 'encoder-start-failed' }));
       child.once('close', (code, signal) => {
-        if (runtime.cancelRequested || runtime.stopRequested || signal) finish({ ok: false, code: 'cancelled' });
-        else finish(code === 0 ? { ok: true } : { ok: false, code: 'encoder-failed' });
+        if (runtime.cancelRequested || runtime.stopRequested || runtime.recoveryRequired || signal) {
+          finish({ ok: false, code: 'cancelled' });
+        } else finish(code === 0 ? { ok: true } : { ok: false, code: 'encoder-failed' });
       });
     });
   }
@@ -557,9 +718,9 @@ function createConverterJobService(deps) {
         persistTransaction: transactionPersistence(runtime, itemId)
       });
       if (result.cleaned === true) {
-        runtime.activeOwnership = composeOwnership(runtime.activeOwnership || ownership, {}, Object.keys(ownership.ownedPaths));
+        setOwnership(runtime, itemId, composeOwnership(ownershipFor(runtime, itemId) || ownership, {}, Object.keys(ownership.ownedPaths)));
       } else {
-        runtime.activeOwnership = composeOwnership(runtime.activeOwnership, result);
+        setOwnership(runtime, itemId, composeOwnership(ownershipFor(runtime, itemId), result));
       }
       return result;
     } catch (error) {
@@ -569,13 +730,13 @@ function createConverterJobService(deps) {
 
   async function reconcileItemOwnership(runtime, itemId, ownership) {
     if (!ownership || Object.keys(ownership.ownedPaths || {}).length === 0) return true;
-    runtime.activeOwnership = ownershipOf(ownership);
-    const cleanup = await cleanupOwnership(runtime, itemId, runtime.activeOwnership);
+    setOwnership(runtime, itemId, ownershipOf(ownership));
+    const cleanup = await cleanupOwnership(runtime, itemId, ownershipFor(runtime, itemId));
     if (cleanup.cleaned === true) {
       await itemPatch(runtime, itemId, {
         ownedPaths: {}, ownedArtifacts: {}, publicationArtifact: undefined, replacementPhase: undefined
       });
-      runtime.activeOwnership = ownershipOf(currentItem(runtime, itemId));
+      setOwnership(runtime, itemId, ownershipOf(currentItem(runtime, itemId)));
       return true;
     }
     const retained = composeOwnership(ownership, cleanup);
@@ -600,6 +761,7 @@ function createConverterJobService(deps) {
       return;
     }
     const destination = outputPath(runtime.manifest.config, item);
+    await acquireCommit(runtime, item.id);
     await itemPatch(runtime, item.id, { state: 'processing', eligibleVideo: false }, {
       state: 'copying', activeItemId: item.id
     });
@@ -735,8 +897,8 @@ function createConverterJobService(deps) {
         persistTransaction: transactionPersistence(runtime, item.id)
       });
       latestOwnership = reserved;
-      runtime.activeOwnership = composeOwnership(runtime.activeOwnership, reserved);
-      const encoded = await runChild(runtime, staged.source, reserved.path, codec, selected, bitrate);
+      setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), reserved));
+      const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected, bitrate);
       if (!encoded.ok) {
         let failedOwnership = reserved;
         try {
@@ -749,11 +911,11 @@ function createConverterJobService(deps) {
             persistTransaction: transactionPersistence(runtime, item.id)
           });
           latestOwnership = failedOwnership;
-          runtime.activeOwnership = composeOwnership(runtime.activeOwnership, failedOwnership);
+          setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), failedOwnership));
         } catch (_) { /* an absent output remains a safe missing-intent cleanup */ }
         const cleanup = await cleanupOwnership(runtime, item.id, failedOwnership);
         if (cleanup.cleaned === false) {
-          runtime.activeOwnership = composeOwnership(runtime.activeOwnership, failedOwnership);
+          setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), failedOwnership));
           throw Object.assign(new Error('cleanup pending'), { code: 'OWNED_CLEANUP_FAILED' });
         }
         if (encoded.code === 'cancelled') throw serviceError('CANCELLED');
@@ -773,7 +935,7 @@ function createConverterJobService(deps) {
         persistTransaction: transactionPersistence(runtime, item.id)
       });
       latestOwnership = adopted;
-      runtime.activeOwnership = composeOwnership(runtime.activeOwnership, adopted);
+      setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), adopted));
       await itemPatch(runtime, item.id, {}, { state: 'writing-telemetry', activeItemId: item.id });
       try {
         await deps.writers[codec]({
@@ -793,7 +955,7 @@ function createConverterJobService(deps) {
             persistTransaction: transactionPersistence(runtime, item.id)
           });
           latestOwnership = adopted;
-          runtime.activeOwnership = composeOwnership(runtime.activeOwnership, adopted);
+          setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), adopted));
         } catch (_) { /* retain the last proven identity for ownership-safe cleanup */ }
         throw error;
       }
@@ -806,7 +968,7 @@ function createConverterJobService(deps) {
         persistTransaction: transactionPersistence(runtime, item.id)
       });
       latestOwnership = adopted;
-      runtime.activeOwnership = composeOwnership(runtime.activeOwnership, adopted);
+      setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), adopted));
       await itemPatch(runtime, item.id, {}, { state: 'verifying', activeItemId: item.id });
       const verification = await deps.verifier({
         source: staged.source,
@@ -828,7 +990,7 @@ function createConverterJobService(deps) {
         });
         const cleanup = await cleanupOwnership(runtime, item.id, adopted);
         if (cleanup.cleaned === false) {
-          runtime.activeOwnership = composeOwnership(runtime.activeOwnership, adopted);
+          setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), adopted));
           // Cleanup is secondary: preserve the reason this candidate was rejected.
           throw Object.assign(new Error('verification failed; cleanup pending'), {
             code: verification?.reason || 'VERIFICATION_FAILED',
@@ -855,6 +1017,7 @@ function createConverterJobService(deps) {
         signal: runtime.abortController.signal,
         persistTransaction: transactionPersistence(runtime, item.id)
       };
+      await acquireCommit(runtime, item.id);
       await itemPatch(runtime, item.id, {}, {
         state: 'copying',
         activeItemId: item.id
@@ -948,7 +1111,7 @@ function createConverterJobService(deps) {
     throw serviceError('CANCELLED');
     } catch (error) {
       const cleanup = await cleanupOwnership(runtime, item.id, staged.ownership);
-      if (cleanup.cleaned === false) runtime.activeOwnership = composeOwnership(runtime.activeOwnership, staged.ownership);
+      if (cleanup.cleaned === false) setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), staged.ownership));
       throw error;
     }
   }
@@ -960,11 +1123,11 @@ function createConverterJobService(deps) {
       } catch (error) {
         const affectedPath = typeof error.path === 'string' ? error.path : item.sourcePath;
         if (!isRetryableNetwork(error, affectedPath)) throw error;
-        if (Object.keys(runtime.activeOwnership?.ownedPaths || {}).length > 0) {
-          const reconciled = await reconcileItemOwnership(runtime, item.id, runtime.activeOwnership);
+        if (Object.keys(ownershipFor(runtime, item.id)?.ownedPaths || {}).length > 0) {
+          const reconciled = await reconcileItemOwnership(runtime, item.id, ownershipFor(runtime, item.id));
           if (!reconciled) throw Object.assign(new Error('cleanup pending'), { code: 'OWNED_CLEANUP_FAILED' });
         }
-        await waitForNetwork(runtime, error.networkProbePath || affectedPath, { pathRole: error.pathRole });
+        await waitForNetwork(runtime, error.networkProbePath || affectedPath, { pathRole: error.pathRole, itemId: item.id });
       }
     }
     throw serviceError('CANCELLED');
@@ -973,11 +1136,19 @@ function createConverterJobService(deps) {
   async function failItem(runtime, itemId, error) {
     const retryable = error?.retryable === true || isRetryableNetwork(error, currentItem(runtime, itemId)?.sourcePath);
     const code = stableFailure(error);
-    const ownership = runtime.activeOwnership;
+    const ownership = ownershipFor(runtime, itemId);
     if (ownership?.ownedPaths?.replacementBackup || error?.code === 'ROLLBACK_FAILED') {
-      runtime.recoveryRequired = true;
+      if (!runtime.recoveryRequired) {
+        runtime.recoveryRequired = true;
+        runtime.recoveryItemId = itemId;
+      }
       runtime.queue.close();
       runtime.abortController.abort();
+      // Other workers stop and re-queue their items; they never touch the
+      // job-level state this item now owns (see isLead). Workers parked on a
+      // pause must wake up and exit too, or the job would never settle.
+      terminateChildren(runtime);
+      for (const resolve of runtime.pauseWaiters.splice(0)) resolve();
       const phase = runtime.manifest.replacementPhase || 'rollback-failed';
       await itemPatch(runtime, itemId, { state: 'processing', resultCode: 'recovery-required', failure: undefined }, {
         state: 'paused', activeItemId: itemId, replacementPhase: phase,
@@ -987,8 +1158,9 @@ function createConverterJobService(deps) {
       return;
     }
     const cleanup = await cleanupOwnership(runtime, itemId, ownership);
-    if (cleanup.cleaned === true) runtime.activeOwnership = ownershipOf(runtime.activeOwnership);
-    const stopped = runtime.stopRequested && !runtime.cancelRequested;
+    if (cleanup.cleaned === true) setOwnership(runtime, itemId, ownershipOf(ownershipFor(runtime, itemId)));
+    const haltedByRecovery = runtime.recoveryRequired && runtime.recoveryItemId !== itemId;
+    const stopped = (runtime.stopRequested || haltedByRecovery) && !runtime.cancelRequested;
     const terminallyCancelled = runtime.cancelRequested;
     await itemPatch(runtime, itemId, {
       state: stopped ? 'queued' : (terminallyCancelled ? 'cancelled' : 'failed'),
@@ -1006,33 +1178,56 @@ function createConverterJobService(deps) {
     });
   }
 
-  async function consume(runtime) {
-    while (!runtime.cancelRequested && !runtime.stopRequested && !runtime.recoveryRequired) {
-      await waitWhilePaused(runtime);
-      if (runtime.cancelRequested || runtime.stopRequested) break;
-      const next = await runtime.queue.shift();
-      if (next.done) break;
-      const item = currentItem(runtime, next.value);
-      if (!item || item.state !== 'queued') continue;
-      runtime.activeItemId = item.id;
-      runtime.activeOwnership = ownershipOf(item);
-      try {
-        if (item.kind === 'asset') await processAsset(runtime, item);
-        else await processVideo(runtime, item);
-      } catch (error) {
-        await failItem(runtime, item.id, error);
-      } finally {
-        runtime.activeItemId = null;
-        runtime.activeOwnership = null;
+  async function work(runtime) {
+    runtime.liveWorkers += 1;
+    try {
+      while (!runtime.cancelRequested && !runtime.stopRequested && !runtime.recoveryRequired) {
+        await waitWhilePaused(runtime);
+        if (runtime.cancelRequested || runtime.stopRequested) break;
+        const next = await runtime.queue.shift();
+        if (next.done) break;
+        const item = currentItem(runtime, next.value);
+        if (!item || item.state !== 'queued') continue;
+        beginItem(runtime, item);
+        try {
+          if (item.kind === 'asset') await processAsset(runtime, item);
+          else await processVideo(runtime, item);
+        } catch (error) {
+          await failItem(runtime, item.id, error);
+        } finally {
+          finishItem(runtime, item.id);
+        }
       }
+    } catch (error) {
+      // A worker that cannot record an outcome fails the job; let the others
+      // finish their current item and stop taking new ones.
+      runtime.halted = true;
+      runtime.queue.close();
+      for (const resolve of runtime.pauseWaiters.splice(0)) resolve();
+      throw error;
+    } finally {
+      runtime.liveWorkers -= 1;
+      // The remaining workers may all be parked on a pause already.
+      await persistPauseWhenParked(runtime).catch(() => undefined);
     }
+  }
+
+  async function consume(runtime) {
+    const workers = [];
+    for (let index = 0; index < concurrencyOf(runtime.manifest); index += 1) workers.push(work(runtime));
+    const results = await Promise.allSettled(workers);
+    const rejected = results.find((result) => result.status === 'rejected');
+    if (rejected) throw rejected.reason;
   }
 
   async function finalize(runtime) {
     await runtime.persistChain.catch(() => undefined);
     if (runtime.recoveryRequired || runtime.manifest.recovery?.action === 'manual-intervention') return;
     if (runtime.cancelRequested) {
-      if (runtime.manifest.state !== 'cancelled') {
+      // Discovery persists items ahead of the workers, so a cancelled job can
+      // hold queued items even after a worker already marked the job cancelled.
+      if (runtime.manifest.state !== 'cancelled'
+          || runtime.manifest.items.some((item) => item.state === 'queued' || item.state === 'processing')) {
         await update(runtime, (current) => ({
           state: 'cancelled',
           activeItemId: null,
@@ -1213,6 +1408,7 @@ function createConverterJobService(deps) {
     if (runtime.manifest.state !== 'paused' && !runtime.pauseRequested) throw serviceError('JOB_NOT_PAUSED');
     if (runtime.manifest.activeItemId && runtime.manifest.recovery) throw serviceError('RECOVERY_REQUIRED');
     runtime.pauseRequested = false;
+    runtime.pausePersisted = false;
     await update(runtime, { state: 'waiting', recovery: null });
     for (const resolve of runtime.pauseWaiters.splice(0)) resolve();
     if (!runtime.runPromise) {
@@ -1234,10 +1430,7 @@ function createConverterJobService(deps) {
     runtime.abortController.abort();
     runtime.queue.close();
     for (const resolve of runtime.pauseWaiters.splice(0)) resolve();
-    if (runtime.activeChild && !runtime.childTerminationRequested) {
-      runtime.childTerminationRequested = true;
-      runtime.activeChild.kill('SIGTERM');
-    }
+    terminateChildren(runtime);
     if (runtime.runPromise) await runtime.runPromise;
     else await finalize(runtime);
     return publicSnapshot(runtime.manifest);
@@ -1277,8 +1470,31 @@ function createConverterJobService(deps) {
     return publicSnapshot(runtime.manifest);
   }
 
+  // With several workers, items other than the job-level active item may have
+  // been mid-encode when the app stopped. They never entered the exclusive
+  // publish/replace phase, so their owned artifacts are temporary encode
+  // outputs: clean them up and queue the items again.
+  async function releaseInterruptedItems(runtime, keepItemId) {
+    const interrupted = runtime.manifest.items.filter((entry) => entry.state === 'processing' && entry.id !== keepItemId);
+    for (const item of interrupted) {
+      if (Object.keys(item.ownedPaths || {}).length === 0) continue;
+      if (!await reconcileItemOwnership(runtime, item.id, item)) return false;
+    }
+    if (interrupted.length === 0) return true;
+    const ids = new Set(interrupted.map((entry) => entry.id));
+    await update(runtime, (current) => ({
+      items: current.items.map((entry) => ids.has(entry.id) && entry.state === 'processing'
+        ? mergeItem(entry, { state: 'queued', failure: undefined, resultCode: undefined }) : entry)
+    }));
+    return true;
+  }
+
   async function performRecovery(runtime, id, inspectWithSignal, recovered) {
     let recovery = recovered.recovery;
+    if (concurrencyOf(recovered) > 1 && recovery?.action !== 'manual-intervention'
+        && !await releaseInterruptedItems(runtime, recovered.activeItemId)) {
+      return publicSnapshot(runtime.manifest);
+    }
     if (recovery?.action === 'resume-network') {
       const interrupted = currentItem(runtime, recovered.activeItemId);
       const target = recovery.pathRole === 'destination' && interrupted
@@ -1292,8 +1508,8 @@ function createConverterJobService(deps) {
         recovery = recovered.recovery;
       } else {
         if (interrupted && Object.keys(interrupted.ownedPaths || {}).length > 0) {
-          runtime.activeOwnership = ownershipOf(interrupted);
-          if (!await reconcileItemOwnership(runtime, interrupted.id, runtime.activeOwnership)) {
+          setOwnership(runtime, interrupted.id, ownershipOf(interrupted));
+          if (!await reconcileItemOwnership(runtime, interrupted.id, ownershipFor(runtime, interrupted.id))) {
             return publicSnapshot(runtime.manifest);
           }
         }
@@ -1652,15 +1868,12 @@ function createConverterJobService(deps) {
       runtime.stopPhase = runtime.manifest.state === 'paused_network'
         ? runtime.manifest.recovery?.resumeState
         : runtime.manifest.state === 'paused' ? runtime.manifest.recovery?.fromState : runtime.manifest.state;
-      runtime.stopItemId = runtime.manifest.activeItemId || runtime.activeItemId;
+      runtime.stopItemId = runtime.manifest.activeItemId || leadItemId(runtime);
       runtime.stopRequested = true;
       runtime.abortController.abort();
       runtime.queue.close();
       for (const resolve of runtime.pauseWaiters.splice(0)) resolve();
-      if (runtime.activeChild && !runtime.childTerminationRequested) {
-        runtime.childTerminationRequested = true;
-        runtime.activeChild.kill('SIGTERM');
-      }
+      terminateChildren(runtime);
       if (runtime.runPromise) await runtime.runPromise;
       else await finalize(runtime);
     }));

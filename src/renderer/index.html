@@ -583,6 +583,21 @@
                                 <p class="converter-disclosure" data-i18n="ui.converter.lossyDisclosure">Conversion re-encodes video using lossy compression. Every profile may discard some image detail.</p>
                             </fieldset>
 
+                            <fieldset class="converter-fieldset">
+                                <legend data-i18n="ui.converter.parallelConversions">Parallel conversions</legend>
+                                <select id="converterConcurrency" class="converter-select" aria-describedby="converterConcurrencyHint" aria-label="Parallel conversions" data-i18n="ui.converter.parallelConversions" data-i18n-attr="aria-label">
+                                    <option value="1">1</option>
+                                    <option value="2">2</option>
+                                    <option value="3">3</option>
+                                    <option value="4">4</option>
+                                    <option value="5" selected>5</option>
+                                    <option value="6">6</option>
+                                    <option value="7">7</option>
+                                    <option value="8">8</option>
+                                </select>
+                                <p id="converterConcurrencyHint" class="converter-disclosure" data-i18n="ui.converter.parallelConversionsHint">How many clips are converted at the same time. Hardware encoders may limit simultaneous sessions; software encoding uses more CPU and memory.</p>
+                            </fieldset>
+
                             <fieldset class="converter-fieldset converter-output-fieldset">
                                 <legend data-i18n="ui.converter.output">Output</legend>
                                 <div class="converter-output-options">

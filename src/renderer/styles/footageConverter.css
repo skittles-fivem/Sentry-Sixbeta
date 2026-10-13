@@ -269,6 +269,28 @@ body.converter-mode #driveList {
     background: var(--input-bg);
 }
 
+.converter-select {
+    width: 100%;
+    height: 39px;
+    padding: 0 12px;
+    border: 1px solid var(--input-border);
+    border-radius: 10px;
+    color: var(--text-secondary);
+    background: var(--input-bg);
+    font-family: var(--font-sans);
+    font-size: 12px;
+}
+
+.converter-select:focus-visible {
+    outline: 0;
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+.converter-select:disabled {
+    opacity: 0.6;
+}
+
 .converter-path-control:focus-within {
     border-color: var(--accent-color);
     box-shadow: 0 0 0 3px var(--accent-bg);

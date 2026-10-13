@@ -2,6 +2,7 @@
 
 const nodeFs = require('fs');
 const nodePath = require('path');
+const { isValidConcurrency } = require('./contracts');
 
 const CHANNELS = Object.freeze([
   'converter:chooseFolder',
@@ -116,6 +117,9 @@ function sanitizeSnapshot(snapshot) {
     state,
     snapshot.items.filter((item) => item?.state === state).length
   ]));
+  // In-flight items. Published as "active" because keys matching
+  // PRIVATE_SNAPSHOT_KEY (e.g. "processing") are stripped below.
+  itemStateCounts.active = snapshot.items.filter((item) => item?.state === 'processing').length;
   const cleanupPendingCount = snapshot.items.filter((item) => String(item?.resultCode || '').includes('cleanup-pending')).length;
   const activeIndex = snapshot.items.findIndex((item) => item?.id === snapshot.activeItemId);
   const failedIndexes = snapshot.items
@@ -262,7 +266,10 @@ async function validateStartConfig(payload, dependencies, capabilities) {
     'outputMode', 'includedGroups', 'replacementConfirmed'
   ];
   const hasGroupOrder = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'groupOrder');
-  if (!exactKeys(payload, hasGroupOrder ? [...keys, 'groupOrder'] : keys)) fail('INVALID_REQUEST');
+  const hasConcurrency = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'concurrency');
+  const expectedKeys = [...keys, ...(hasGroupOrder ? ['groupOrder'] : []), ...(hasConcurrency ? ['concurrency'] : [])];
+  if (!exactKeys(payload, expectedKeys)) fail('INVALID_REQUEST');
+  if (hasConcurrency && !isValidConcurrency(payload.concurrency)) fail('INVALID_CONCURRENCY');
   if (!['h265', 'av1'].includes(payload.codec)) fail('INVALID_CODEC');
   if (!['conservative', 'balanced', 'aggressive'].includes(payload.profileId)) fail('INVALID_PROFILE');
   if (!['auto', 'staging', 'direct'].includes(payload.networkMode)) fail('INVALID_NETWORK_MODE');
