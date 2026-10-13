@@ -69,12 +69,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="v${VERSION}"
+          # Notes cover only what changed since the previous beta release.
+          PREV_TAG=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 30 --json tagName,isPrerelease \
+            --jq '[.[] | select(.isPrerelease and (.tagName | test("-beta\\.")))][0].tagName // empty')
+          RANGE=""
+          if [ -n "$PREV_TAG" ]; then
+            git fetch --quiet --depth=200 origin "+refs/tags/${PREV_TAG}:refs/tags/${PREV_TAG}" "+${GITHUB_SHA}" || true
+            git fetch --quiet --deepen=200 origin || true
+            if PREV_SHA=$(git rev-list -n 1 "$PREV_TAG" 2>/dev/null) && git merge-base --is-ancestor "$PREV_SHA" HEAD; then
+              RANGE="${PREV_SHA}..HEAD"
+            fi
+          fi
           {
             echo "Automated beta build from \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA::7}."
             echo
-            echo "Recent changes:"
-            git log -8 --pretty='- %s (%h)'
+            if [ -n "$RANGE" ]; then
+              echo "Changes since ${PREV_TAG}:"
+              echo
+              git log --reverse --no-merges --pretty='### %s (%h)%n%n%b%n' "$RANGE" \
+                | { grep -v -E '^(Co-Authored-By|Claude-Session):' || true; }
+            else
+              echo "Changes in this build:"
+              echo
+              git log -1 --pretty='### %s (%h)%n%n%b%n' | { grep -v -E '^(Co-Authored-By|Claude-Session):' || true; }
+            fi
           } > release-notes.md
+          cat release-notes.md
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
