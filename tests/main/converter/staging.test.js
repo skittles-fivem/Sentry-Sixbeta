@@ -2744,3 +2744,42 @@ describe('Task 10 fix round 3 promotion and recovery contracts', () => {
     });
   });
 });
+
+describe('parallel staging leases', () => {
+  test('allows up to maxActiveLeases staged sources and encode outputs at once, then reports STAGING_BUSY', async () => {
+    const { root, tx } = await transaction('parallel-leases', { maxActiveLeases: 3 });
+    const sources = await Promise.all([1, 2, 3, 4].map((index) =>
+      write(path.join(root, 'network', `clip-${index}.mp4`), Buffer.from(`source ${index}`))));
+
+    const staged = await Promise.all(sources.slice(0, 3).map((source, index) =>
+      tx.stageSource({ source, jobId: 'job-1', itemId: `item-${index + 1}` })));
+    await expect(tx.stageSource({ source: sources[3], jobId: 'job-1', itemId: 'item-4' }))
+      .rejects.toMatchObject({ code: 'STAGING_BUSY' });
+
+    const reserved = await Promise.all([1, 2, 3].map((index) =>
+      tx.reserveEncodeOutput({ jobId: 'job-1', itemId: `item-${index}` })));
+    await expect(tx.reserveEncodeOutput({ jobId: 'job-1', itemId: 'item-4' }))
+      .rejects.toMatchObject({ code: 'STAGING_BUSY' });
+    for (const output of reserved) await fs.promises.writeFile(output.path, Buffer.from(`encoded ${output.path}`));
+    const adopted = await Promise.all(reserved.map((output, index) => tx.adoptEncodeOutput({
+      jobId: 'job-1', itemId: `item-${index + 1}`, ownedPaths: output.ownedPaths, ownedArtifacts: output.ownedArtifacts
+    })));
+    expect(adopted.map((output) => output.outputBytes)).toEqual(reserved.map((output) => `encoded ${output.path}`.length));
+
+    // Cleaning one item up frees exactly its leases.
+    await tx.cleanupOwnedArtifacts({ jobId: 'job-1', itemId: 'item-1',
+      ownedPaths: { ...staged[0].ownedPaths, ...adopted[0].ownedPaths },
+      ownedArtifacts: { ...staged[0].ownedArtifacts, ...adopted[0].ownedArtifacts } });
+    await expect(tx.stageSource({ source: sources[3], jobId: 'job-1', itemId: 'item-4' })).resolves.toMatchObject({
+      stagedSource: expect.any(String)
+    });
+    await expect(tx.reserveEncodeOutput({ jobId: 'job-1', itemId: 'item-4' })).resolves.toMatchObject({ path: expect.any(String) });
+  });
+
+  test.each([[0], [-1], [1.5], ['2']])('rejects an invalid maxActiveLeases %p', (maxActiveLeases) => {
+    let thrown;
+    try { createFileTransaction({ validatePublicationArtifact: async () => true, tempRoot: os.tmpdir(), maxActiveLeases }); }
+    catch (error) { thrown = error; }
+    expect(thrown).toMatchObject({ code: 'INVALID_TRANSACTION_INPUT' });
+  });
+});

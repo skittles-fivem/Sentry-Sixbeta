@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const nodeFs = require('fs');
 const nodePath = require('path');
 
+const { CONCURRENCY } = require('./contracts');
 const { createJobStore } = require('./jobStore');
 const { createFilesystemTransactionAdapters } = require('./filesystemTransactions');
 const { scanTeslaFootage } = require('./scanner');
@@ -472,6 +473,8 @@ async function createConverterRuntime(options = {}) {
   const removeOwned = options.removeOwned || filesystemTransactions.removeOwned;
   const renameExclusive = options.renameExclusive || filesystemTransactions.renameExclusive;
   const stagingManager = factories.createFileTransaction({
+    // One staged source and one encode output per parallel conversion.
+    maxActiveLeases: CONCURRENCY.max,
     fs: fileSystem,
     pathApi,
     platform,

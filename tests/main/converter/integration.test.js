@@ -301,6 +301,51 @@ describeRealEncoders(`real pipeline (${encoderGate.reason || 'required CPU encod
     await runtime.shutdown();
   });
 
+  test.each([['direct'], ['staging']])('converts several clips in parallel through the real runtime (%s source)', async (networkMode) => {
+    const caseRoot = path.join(root, `parallel-${networkMode}`);
+    const sourceFolder = path.join(caseRoot, 'source', 'RecentClips');
+    const destinationRoot = path.join(caseRoot, 'destination');
+    const userDataPath = path.join(caseRoot, 'user-data');
+    await Promise.all([fs.promises.mkdir(sourceFolder, { recursive: true }),
+      fs.promises.mkdir(destinationRoot, { recursive: true }), fs.promises.mkdir(userDataPath, { recursive: true })]);
+    const names = [0, 1, 2, 3].map((index) => `2026-08-30_12-00-0${index}-front.mp4`);
+    await Promise.all(names.map((name, index) => createTeslaH264Fixture({ ffmpegPath: tools.ffmpegPath,
+      outputPath: path.join(sourceFolder, name), telemetryPattern: telemetryPattern(index % 2 ? 'driving' : 'parked-to-driving', 16 * 12),
+      durationSeconds: 16, spatialNoise: 16 })));
+    let encoding = 0;
+    let peakEncoding = 0;
+    const trackingSpawn = (command, args, options) => {
+      const child = spawn(command, args, options);
+      if (args.includes('-progress')) {
+        encoding += 1;
+        peakEncoding = Math.max(peakEncoding, encoding);
+        child.once('close', () => { encoding -= 1; });
+      }
+      return child;
+    };
+    const runtime = await createConverterRuntime({
+      userDataPath, tempPath: caseRoot, ffmpegPath: tools.ffmpegPath, ffprobePath: tools.ffprobePath,
+      spawn: trackingSpawn, processTimeoutMs: 120_000,
+      removeOwned: ownedFileRemover(), renameExclusive: noReplacePromoter(),
+      factories: { createEncoderPlanner(options) {
+        const real = createEncoderPlanner(options);
+        return { select: real.selectCpuFallback, selectCpuFallback: real.selectCpuFallback };
+      } }
+    });
+    const jobId = await runtime.service.start({ sourceRoot: path.join(caseRoot, 'source'), destinationRoot,
+      codec: 'h265', profileId: 'balanced', networkMode, outputMode: 'separate', replacementConfirmed: false,
+      includedGroups: ['RecentClips'], concurrency: 4 });
+    const job = await runtime.service.whenIdle(jobId);
+
+    expect(job.items.map((item) => [item.state, item.resultCode, item.failure?.code])).toEqual(
+      names.map(() => ['completed', 'converted', undefined]));
+    expect(peakEncoding).toBeGreaterThan(1);
+    for (const name of names) {
+      expect((await fs.promises.stat(path.join(destinationRoot, 'RecentClips', name))).size).toBeGreaterThan(0);
+    }
+    await runtime.shutdown();
+  });
+
   test('copies event assets, skips real H265/AV1 inputs, and resumes after a simulated share reconnect', async () => {
     const caseRoot = path.join(root, 'assets-skips-reconnect');
     const sourceRoot = path.join(caseRoot, 'source');

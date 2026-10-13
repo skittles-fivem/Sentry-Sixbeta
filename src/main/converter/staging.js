@@ -223,8 +223,18 @@ function createFileTransaction(options = {}) {
   });
   const chunkSize = validSafeInteger(options.chunkSize, { positive: true }) ? options.chunkSize : 1024 * 1024;
   const ownedIdentities = new Map();
-  let activeStagedPath = null;
-  let activeEncodedPath = null;
+  // In-process leases on staged sources and encode outputs. The default of one
+  // lease each keeps the original one-file-at-a-time contract (STAGING_BUSY);
+  // the converter runtime raises it to its parallel-conversion limit.
+  const maxActiveLeases = options.maxActiveLeases === undefined ? 1 : options.maxActiveLeases;
+  if (!Number.isSafeInteger(maxActiveLeases) || maxActiveLeases < 1) throw transactionError('INVALID_TRANSACTION_INPUT');
+  const activeStagedPaths = [];
+  const activeEncodedPaths = [];
+  const leased = (leases, target) => leases.some((entry) => samePath(entry, target, pathApi, platform));
+  const releaseLease = (leases, target) => {
+    const index = leases.findIndex((entry) => samePath(entry, target, pathApi, platform));
+    if (index >= 0) leases.splice(index, 1);
+  };
 
   async function lstatOrNull(target) {
     try {
@@ -302,8 +312,8 @@ function createFileTransaction(options = {}) {
   }
 
   function releaseOwnedLease(target) {
-    if (activeStagedPath && samePath(activeStagedPath, target, pathApi, platform)) activeStagedPath = null;
-    if (activeEncodedPath && samePath(activeEncodedPath, target, pathApi, platform)) activeEncodedPath = null;
+    releaseLease(activeStagedPaths, target);
+    releaseLease(activeEncodedPaths, target);
   }
 
   function forgetOwned(target) {
@@ -938,7 +948,7 @@ function createFileTransaction(options = {}) {
     const itemId = validateId(operation.itemId);
     const source = validateAbsolutePath(operation.source, pathApi);
     abortIfRequested(operation.signal);
-    if (activeStagedPath) throw transactionError('STAGING_BUSY');
+    if (activeStagedPaths.length >= maxActiveLeases) throw transactionError('STAGING_BUSY');
     const expectedSource = operation.expectedSource ? validateSourceAuthority(operation.expectedSource) : null;
     const resumeState = operation.resume;
     const nonce = resumeState?.ownedArtifacts?.stagedSource?.nonce || newNonce();
@@ -946,7 +956,7 @@ function createFileTransaction(options = {}) {
     if (resumeState && !samePath(resumeState.ownedPaths?.stagedSource, destination, pathApi, platform)) {
       throw transactionError('UNSAFE_OWNED_PATH');
     }
-    activeStagedPath = destination;
+    activeStagedPaths.push(destination);
     const ownedPaths = resumeState ? { ...resumeState.ownedPaths } : { stagedSource: destination };
     const ownedArtifacts = resumeState ? { ...resumeState.ownedArtifacts } : {
       stagedSource: artifactMetadata(destination, nonce, 'intent')
@@ -1009,7 +1019,7 @@ function createFileTransaction(options = {}) {
       abortIfRequested(operation.signal);
       return { stagedSource: destination, ownedPaths, ownedArtifacts, sourceBytes: copied.size, expectedSource: copied.expectedSource };
     } catch (error) {
-      activeStagedPath = null;
+      releaseLease(activeStagedPaths, destination);
       if (await lstatOrNull(destination).catch(() => null)) {
         ownedArtifacts.stagedSource.state = 'cleanup-pending';
         try {
@@ -1032,7 +1042,7 @@ function createFileTransaction(options = {}) {
   async function reserveEncodeOutput(operation = {}) {
     const jobId = validateId(operation.jobId);
     const itemId = validateId(operation.itemId);
-    if (activeEncodedPath) throw transactionError('STAGING_BUSY');
+    if (activeEncodedPaths.length >= maxActiveLeases) throw transactionError('STAGING_BUSY');
     const nonce = newNonce();
     const target = encodedPath(jobId, itemId, nonce, operation.extension || '.mp4');
     const canonicalRoot = await canonicalExisting(tempRoot);
@@ -1045,7 +1055,7 @@ function createFileTransaction(options = {}) {
     await persist(operation, transactionSnapshot({
       step: 'encoded-candidate-intent', ownedPaths, ownedArtifacts
     }));
-    activeEncodedPath = target;
+    activeEncodedPaths.push(target);
     return { path: target, nonce, ownedPaths, ownedArtifacts };
   }
 
@@ -1057,7 +1067,7 @@ function createFileTransaction(options = {}) {
     const metadata = ownedArtifacts.encodedCandidate;
     const target = validateAbsolutePath(ownedPaths.encodedCandidate, pathApi);
     if (!metadata || !['intent', 'owned'].includes(metadata.state) || metadata.path !== target || !metadata.nonce
-        || (activeEncodedPath && !samePath(activeEncodedPath, target, pathApi, platform))) {
+        || (!leased(activeEncodedPaths, target) && activeEncodedPaths.length >= maxActiveLeases)) {
       throw transactionError('UNSAFE_OWNED_PATH');
     }
     const expected = encodedPath(jobId, itemId, metadata.nonce, pathApi.extname(target));
@@ -1070,7 +1080,7 @@ function createFileTransaction(options = {}) {
       target, metadata.nonce, 'owned', observed.stat, observed.sha256, observed.size
     );
     operation.ownedArtifacts.encodedCandidate = { ...ownedArtifacts.encodedCandidate };
-    activeEncodedPath = target;
+    if (!leased(activeEncodedPaths, target)) activeEncodedPaths.push(target);
     await rememberOwned(target);
     await persist(operation, transactionSnapshot({
       step: 'encoded-candidate-owned', ownedPaths, ownedArtifacts
