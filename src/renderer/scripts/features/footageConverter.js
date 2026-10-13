@@ -59,6 +59,32 @@ function formatDuration(milliseconds) {
         : `${String(minutes).padStart(2, '0')}:${String(remaining).padStart(2, '0')}`;
 }
 
+// "1h 05m", "12m 30s", "45s".
+function formatRemaining(milliseconds) {
+    const seconds = Math.max(0, Math.round((Number(milliseconds) || 0) / 1000));
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const rest = seconds % 60;
+    if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+    if (minutes > 0) return `${minutes}m ${String(rest).padStart(2, '0')}s`;
+    return `${rest}s`;
+}
+
+const TIMING_LABELS = Object.freeze({
+    inspect: ['timingInspect', 'Probe file'],
+    source: ['timingSource', 'Read source'],
+    timeline: ['timingTimeline', 'Read telemetry'],
+    encode: ['timingEncode', 'Encode'],
+    metadata: ['timingMetadata', 'Write telemetry'],
+    verify: ['timingVerify', 'Verify'],
+    saveWait: ['timingSaveWait', 'Wait to save'],
+    save: ['timingSave', 'Save / replace'],
+    cleanup: ['timingCleanup', 'Clean up']
+});
+// Throughput is measured over this trailing window of finished-file samples.
+const SPEED_WINDOW_MS = 3 * 60 * 1000;
+const SPEED_MIN_SPAN_MS = 10 * 1000;
+
 function apiError(code) {
     return Object.assign(new Error(code || 'OPERATION_FAILED'), { code: code || 'OPERATION_FAILED' });
 }
@@ -157,6 +183,10 @@ function collectElements(root) {
         countFailed: byId('converterCountFailed'),
         countWaiting: byId('converterCountWaiting'),
         processedBytes: byId('converterProcessedBytes'),
+        speed: byId('converterSpeed'),
+        eta: byId('converterEta'),
+        timings: byId('converterTimings'),
+        timingRows: byId('converterTimingRows'),
         reconnectBanner: byId('converterReconnectBanner'),
         cleanupBanner: byId('converterCleanupBanner'),
         errorRows: byId('converterErrorRows'),
@@ -214,6 +244,62 @@ function createFootageConverterController(options = {}) {
     let pendingStartEvents = null;
     let groupOrder = [...DEFAULT_GROUP_ORDER];
     const storage = options.storage !== undefined ? options.storage : globalThis.localStorage;
+    const now = typeof options.now === 'function' ? options.now : () => Date.now();
+    let speedSamples = [];
+    let speedJobId = null;
+
+    // Files finished per minute over the recent window (falls back to the whole
+    // run while the window is still short), plus the time left at that pace.
+    function throughput(done, remaining) {
+        const time = now();
+        if (snapshot?.id !== speedJobId) {
+            speedJobId = snapshot?.id ?? null;
+            speedSamples = [];
+        }
+        if (!speedSamples.length || speedSamples[speedSamples.length - 1].done !== done) speedSamples.push({ time, done });
+        while (speedSamples.length > 2 && time - speedSamples[1].time > SPEED_WINDOW_MS) speedSamples.shift();
+        const first = speedSamples[0];
+        let perMinute = null;
+        if (speedSamples.length > 1 && time - first.time >= SPEED_MIN_SPAN_MS && done > first.done) {
+            perMinute = (done - first.done) / ((time - first.time) / 60000);
+        } else if (snapshot?.createdAt && done > 0 && time - snapshot.createdAt >= SPEED_MIN_SPAN_MS) {
+            perMinute = done / ((time - snapshot.createdAt) / 60000);
+        }
+        if (!perMinute || !Number.isFinite(perMinute)) return { perMinute: null, remainingMs: null };
+        return { perMinute, remainingMs: remaining > 0 ? (remaining / perMinute) * 60000 : 0 };
+    }
+
+    function renderTimings() {
+        const timings = snapshot?.timings;
+        const files = timings?.files;
+        const rows = Number.isSafeInteger(files) && files > 0
+            ? Object.entries(timings.totalMs || {})
+                .filter(([phase, total]) => TIMING_LABELS[phase] && Number(total) > 0)
+                .map(([phase, total]) => [phase, Number(total) / files])
+                .sort((left, right) => right[1] - left[1])
+            : [];
+        setHidden(elements.timings, rows.length === 0);
+        if (!elements.timingRows || rows.length === 0) return;
+        const largest = rows[0][1];
+        const documentRef = elements.timingRows.ownerDocument || globalThis.document;
+        elements.timingRows.replaceChildren(...rows.map(([phase, average]) => {
+            const row = documentRef.createElement('li');
+            row.className = 'converter-timing-row';
+            const label = documentRef.createElement('span');
+            label.textContent = message(...TIMING_LABELS[phase]);
+            const bar = documentRef.createElement('span');
+            bar.className = 'converter-timing-bar';
+            const fill = documentRef.createElement('span');
+            if (fill.style) fill.style.width = `${Math.max(2, Math.round((average / largest) * 100))}%`;
+            bar.append?.(fill);
+            const value = documentRef.createElement('span');
+            value.className = 'converter-timing-value';
+            value.textContent = `${(average / 1000).toFixed(1)}s`;
+            row.append?.(label, bar, value);
+            row.setAttribute?.('data-phase', phase);
+            return row;
+        }));
+    }
 
     function storedConcurrency() {
         try { return normalizeConcurrency(storage?.getItem?.(CONCURRENCY_STORAGE_KEY)); } catch (_) { return null; }
@@ -386,6 +472,14 @@ function createFootageConverterController(options = {}) {
         setText(elements.countFailed, stateCount('failed'));
         setText(elements.countWaiting, stateCount('queued'));
         setText(elements.processedBytes, renderBytes(counters.sourceVideoBytes || 0));
+        const finished = stateCount('completed') + stateCount('skipped') + stateCount('failed');
+        const remaining = stateCount('queued') + converting;
+        const pace = active && !paused ? throughput(finished, remaining) : { perMinute: null, remainingMs: null };
+        setText(elements.speed, pace.perMinute === null ? '—'
+            : message('speedValue', '{rate} files/min', { rate: pace.perMinute.toFixed(pace.perMinute < 10 ? 1 : 0) }));
+        setText(elements.eta, pace.remainingMs === null || snapshot?.discoveryComplete === false && remaining === 0 ? '—'
+            : formatRemaining(pace.remainingMs));
+        renderTimings();
         setHidden(elements.reconnectBanner, snapshot?.state !== 'paused_network');
         setHidden(elements.cleanupBanner, cleanupPendingCount === 0);
         if (cleanupPendingCount) {

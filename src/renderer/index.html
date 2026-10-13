@@ -661,7 +661,14 @@
                                 <div><dt data-i18n="ui.converter.failed">Failed</dt><dd id="converterCountFailed">0</dd></div>
                                 <div><dt data-i18n="ui.converter.waiting">Waiting</dt><dd id="converterCountWaiting">0</dd></div>
                                 <div class="converter-counter-wide"><dt data-i18n="ui.converter.processedBytes">Video processed so far</dt><dd id="converterProcessedBytes">0 B</dd></div>
+                                <div><dt data-i18n="ui.converter.speed">Speed</dt><dd id="converterSpeed">—</dd></div>
+                                <div><dt data-i18n="ui.converter.timeRemaining">Time remaining</dt><dd id="converterEta">—</dd></div>
                             </dl>
+
+                            <section id="converterTimings" class="converter-timings" aria-labelledby="converterTimingsTitle" hidden>
+                                <h4 id="converterTimingsTitle" data-i18n="ui.converter.timingTitle">Where the time goes (average per converted file)</h4>
+                                <ul id="converterTimingRows" class="converter-timing-rows"></ul>
+                            </section>
 
                             <div id="converterErrorRows" class="converter-error-rows" aria-live="polite" hidden></div>
 

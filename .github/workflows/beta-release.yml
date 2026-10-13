@@ -1,0 +1,112 @@
+name: Beta Release
+
+# Every push to the ai-testing branch builds the Windows installer and publishes
+# it as a GitHub pre-release ("beta") on this repository. A release created with
+# the workflow token does not trigger build-release.yml, so this workflow builds
+# and uploads on its own.
+
+on:
+  push:
+    branches: [ai-testing]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: beta-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows-beta:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 20
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Stamp beta version
+        # Only the CI copy of package.json changes; nothing is committed.
+        run: |
+          BASE_VERSION=$(node -p "require('./package.json').version.split('-')[0]")
+          VERSION="${BASE_VERSION}-beta.${GITHUB_RUN_NUMBER}"
+          npm pkg set version="$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Building $VERSION"
+
+      - name: Build Windows installer
+        run: npm run build:win
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-beta-${{ env.VERSION }}
+          retention-days: 30
+          path: |
+            release/SentryStudioSetup*.exe
+            release/SentryStudioSetup*.exe.blockmap
+            release/latest.yml
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${VERSION}"
+          {
+            echo "Automated beta build from \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA::7}."
+            echo
+            echo "Recent changes:"
+            git log -8 --pretty='- %s (%h)'
+          } > release-notes.md
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Sentry Studio ${VERSION} (beta)" \
+            --notes-file release-notes.md \
+            release/SentryStudioSetup*.exe \
+            release/SentryStudioSetup*.exe.blockmap \
+            release/latest.yml
+
+  converter-tests:
+    # Informational: reports converter test results on Windows without
+    # blocking the beta build.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Converter unit tests
+        run: npx jest tests/main/converter --ci --testPathIgnorePatterns integration
+
+      - name: Renderer tests
+        run: npm run test:dashcam

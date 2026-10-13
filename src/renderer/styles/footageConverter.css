@@ -887,3 +887,56 @@ body.converter-mode #driveList {
         animation: none;
     }
 }
+
+.converter-timings {
+    margin-top: 14px;
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+}
+
+.converter-timings h4 {
+    margin: 0 0 8px;
+    color: var(--text-faint);
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.converter-timing-rows {
+    display: grid;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.converter-timing-row {
+    display: grid;
+    grid-template-columns: minmax(96px, 1fr) minmax(0, 2fr) auto;
+    align-items: center;
+    gap: 10px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.converter-timing-bar {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--input-bg);
+    overflow: hidden;
+}
+
+.converter-timing-bar span {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+    background: var(--accent-color);
+}
+
+.converter-timing-value {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-color);
+}

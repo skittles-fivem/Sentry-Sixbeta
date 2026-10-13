@@ -2,7 +2,7 @@
 
 const path = require('path');
 const { randomUUID } = require('crypto');
-const { createEmptyCounters, isValidConcurrency } = require('./contracts');
+const { createEmptyCounters, isValidConcurrency, TIMING_PHASES } = require('./contracts');
 
 const MANIFEST_VERSION = 1;
 const MANIFEST_NAME = 'job.json';
@@ -43,7 +43,7 @@ const DIRECTORY_SYNC_UNSUPPORTED = new Set(['EISDIR', 'EINVAL', 'EPERM', 'EACCES
 const TOP_FIELDS = new Set([
   'schemaVersion', 'id', 'state', 'revision', 'config', 'items', 'counters',
   'summary', 'summaryDismissed', 'discoveryComplete', 'createdAt', 'updatedAt', 'activeItemId', 'ownedPaths',
-  'ownedArtifacts', 'publicationArtifact', 'replacementPhase', 'recovery', 'failure'
+  'ownedArtifacts', 'publicationArtifact', 'replacementPhase', 'recovery', 'failure', 'timings'
 ]);
 const CONFIG_FIELDS = new Set([
   'sourceRoot', 'destinationRoot', 'codec', 'profileId', 'networkMode',
@@ -593,6 +593,16 @@ function normalizeRecovery(value, manifest) {
   return result;
 }
 
+function normalizeTimings(value) {
+  if (!isPlainObject(value)) throw storeError('INVALID_MANIFEST');
+  rejectUnknownFields(value, new Set(['files', 'totalMs']));
+  if (!isPlainObject(value.totalMs)) throw storeError('INVALID_MANIFEST');
+  rejectUnknownFields(value.totalMs, new Set(TIMING_PHASES));
+  const totalMs = {};
+  for (const phase of TIMING_PHASES) totalMs[phase] = value.totalMs[phase] === undefined ? 0 : safeInteger(value.totalMs[phase]);
+  return { files: safeInteger(value.files), totalMs };
+}
+
 function normalizeManifest(value) {
   preflightManifest(value);
   rejectUnknownFields(value, TOP_FIELDS);
@@ -630,6 +640,7 @@ function normalizeManifest(value) {
     return entry;
   });
   optional(result, value, 'failure', normalizeFailure);
+  optional(result, value, 'timings', normalizeTimings);
   if (value.recovery !== undefined && value.recovery !== null) result.recovery = normalizeRecovery(value.recovery, result);
 
   if (result.activeItemId && !result.items.some((item) => item.id === result.activeItemId)) throw storeError('INVALID_MANIFEST');
@@ -1081,16 +1092,26 @@ function createJobStore(options) {
     return 'manual-intervention';
   }
 
-  async function recover(id, inspectPaths) {
+  // reinspectReplacement: a job parked for manual intervention mid-replacement
+  // is re-evaluated against the same replacement truth tables from the files on
+  // disk, so an unambiguous state (original intact, or replacement finished) can
+  // be resolved instead of blocking the job forever. Ambiguous facts still yield
+  // manual-intervention.
+  async function recover(id, inspectPaths, { reinspectReplacement = false } = {}) {
     assertSafeJobId(id);
     if (typeof inspectPaths !== 'function') throw new TypeError('inspectPaths must be a function');
     return runExclusive(id, async () => {
-      const current = await readManifest(id);
-      if (!current) throw storeError('JOB_NOT_FOUND');
-      if (TERMINAL_JOB_STATES.has(current.state)
-          || ((current.state === 'paused' || current.state === 'paused_network') && current.recovery)) {
-        return cloneManifest(current);
+      const stored = await readManifest(id);
+      if (!stored) throw storeError('JOB_NOT_FOUND');
+      const phase = stored.replacementPhase || stored.recovery?.phase;
+      const reinspect = reinspectReplacement === true && stored.state === 'paused'
+        && stored.recovery?.fromState === 'replacing' && Boolean(stored.activeItemId)
+        && Boolean(phase && REPLACEMENT_TRUTH_TABLES[phase]);
+      if (!reinspect && (TERMINAL_JOB_STATES.has(stored.state)
+          || ((stored.state === 'paused' || stored.state === 'paused_network') && stored.recovery))) {
+        return cloneManifest(stored);
       }
+      const current = reinspect ? { ...stored, state: 'replacing', replacementPhase: phase, recovery: null } : stored;
       let facts;
       try {
         const inspected = await inspectPaths(cloneManifest(current));
@@ -1103,7 +1124,8 @@ function createJobStore(options) {
       };
       if (current.state === 'replacing') recovery.phase = current.replacementPhase;
       recovery.action = facts.valid ? recoveryAction(current, facts) : 'manual-intervention';
-      const recovered = normalizeManifest({ ...current, state: 'paused', revision: current.revision + 1, recovery });
+      const recovered = normalizeManifest({ ...stored, state: 'paused', revision: stored.revision + 1, recovery,
+        ...(reinspect ? { replacementPhase: phase } : {}) });
       const paths = await ensureJobDirectory(id);
       lastWritten.delete(id);
       await atomicWrite(paths, recovered);

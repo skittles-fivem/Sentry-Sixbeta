@@ -2346,6 +2346,103 @@ describe('parallel conversion workers', () => {
     expect(stopped.items.filter((item) => item.state === 'queued')).toHaveLength(1);
   });
 
+  test('cancel during an in-flight replacement rolls it back and cancels the job without RECOVERY_REQUIRED', async () => {
+    const replaceStarted = deferred();
+    const h = harness({
+      items: clips(3),
+      queueLimit: 10,
+      stagingManager: {
+        captureSource: async () => ({ device: '1', inode: '2', size: 1000000, sha256: 'c'.repeat(64) }),
+        // Mirrors staging.replaceOriginal: an abort mid-transaction restores the
+        // original from its backup and reports the rolled-back phase.
+        replaceOriginal: jest.fn(async ({ persistTransaction, signal }) => {
+          replaceStarted.resolve();
+          if (!signal.aborted) await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+          await persistTransaction({ phase: 'backup-restored', ownedPaths: {}, ownedArtifacts: {} });
+          throw Object.assign(new Error('cancelled'), { code: 'CANCELLED' });
+        })
+      }
+    });
+    const id = await h.service.start({
+      ...CONFIG, destinationRoot: null, outputMode: 'replace', replacementConfirmed: true, concurrency: 2
+    });
+    await replaceStarted.promise;
+    const cancelled = await h.service.cancel(id);
+
+    expect(cancelled.state).toBe('cancelled');
+    expect(cancelled.recovery || null).toBeNull();
+    expect(cancelled.items.every((item) => item.state === 'cancelled')).toBe(true);
+    await expect(h.service.cancel(id)).resolves.toMatchObject({ state: 'cancelled' });
+  });
+
+  describe('cancelling a job parked mid-replacement', () => {
+    async function parkedJob(facts, recoverReplacement) {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sentry-six-parked-replacement-'));
+      temporaryRoots.push(root);
+      const store = createJobStore({ rootDir: root, fs: fs.promises });
+      const inspectRecovery = jest.fn(async () => facts);
+      const h = harness({ store, items: [], deps: { inspectRecovery },
+        stagingManager: { recoverReplacement: jest.fn(recoverReplacement) } });
+      await store.create({
+        id: 'parked-replace', counters: emptyCounters(), discoveryComplete: true,
+        config: { ...CONFIG, destinationRoot: null, outputMode: 'replace', replacementConfirmed: true, concurrency: 2 },
+        state: 'paused', activeItemId: 'item-1', replacementPhase: 'rollback-failed',
+        recovery: { fromState: 'replacing', phase: 'rollback-failed', action: 'manual-intervention' },
+        items: [
+          { ...video('parked-replace'), id: 'item-1', state: 'processing', eligibleVideo: true, resultCode: 'recovery-required',
+            expectedSource: { size: 1000000, sha256: 'c'.repeat(64), device: '1', inode: '2' },
+            replacementPhase: 'rollback-failed', ownedPaths: {}, ownedArtifacts: {} },
+          { ...video('parked-other'), id: 'item-2', state: 'queued', attempts: 0 }
+        ]
+      });
+      return { h, store, inspectRecovery };
+    }
+
+    test('resolves an unambiguous original-intact state and cancels', async () => {
+      const { h, inspectRecovery } = await parkedJob(
+        { candidateExists: false, sourceExists: true, backupExists: false, finalValid: false },
+        async () => ({ phase: 'backup-restored', ownedPaths: {}, ownedArtifacts: {}, cleanupPending: [] })
+      );
+      const cancelled = await h.service.cancel('parked-replace');
+
+      expect(inspectRecovery).toHaveBeenCalled();
+      expect(h.stagingManager.recoverReplacement).toHaveBeenCalledWith(expect.objectContaining({ action: 'rollback-complete' }));
+      expect(cancelled.state).toBe('cancelled');
+      expect(cancelled.items.map((item) => item.state)).toEqual(['cancelled', 'cancelled']);
+      expect(h.spawnProcess).not.toHaveBeenCalled();
+    });
+
+    test('keeps RECOVERY_REQUIRED when the files on disk are ambiguous', async () => {
+      const { h, store } = await parkedJob(
+        { candidateExists: true, sourceExists: true, backupExists: true, finalValid: false },
+        async () => { throw new Error('must not be called'); }
+      );
+      await expect(h.service.cancel('parked-replace')).rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
+      expect(h.stagingManager.recoverReplacement).not.toHaveBeenCalled();
+      const stored = await store.load('parked-replace');
+      expect(stored).toMatchObject({ state: 'paused', recovery: { fromState: 'replacing', action: 'manual-intervention' } });
+      expect(stored.items[0].state).toBe('processing');
+    });
+  });
+
+  test('records where each converted file spent its time and keeps per-job totals', async () => {
+    let tick = 0;
+    const h = harness({ items: clips(3), queueLimit: 10, deps: { timingNow: () => { tick += 100; return tick; } } });
+    const id = await h.service.start({ ...CONFIG, concurrency: 2 });
+    const done = await h.service.whenIdle(id);
+
+    const timings = h.events.filter((event) => event.type === 'item_timing');
+    expect(timings).toHaveLength(3);
+    for (const event of timings) {
+      expect(event).toMatchObject({ jobId: id, relativePath: expect.stringMatching(/^RecentClips\//), encoder: 'hevc_nvenc' });
+      expect(event.phases.encode).toBeGreaterThan(0);
+      expect(event.phases.verify).toBeGreaterThan(0);
+      expect(event.totalMs).toBeGreaterThanOrEqual(Object.values(event.phases).reduce((sum, ms) => sum + ms, 0));
+    }
+    expect(done.timings.files).toBe(3);
+    expect(done.timings.totalMs.encode).toBe(timings.reduce((sum, event) => sum + event.phases.encode, 0));
+  });
+
   test('recovery cleans and re-queues interrupted non-lead items before resuming', async () => {
     const h = harness({ items: [] });
     const candidate = (itemId) => `C:\\temp\\recover-parallel-${itemId}-candidate.mp4`;

@@ -1219,6 +1219,58 @@ describe('converter job store', () => {
     }
   );
 
+  test('persists per-job phase timings and rejects malformed ones', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    const timings = { files: 2, totalMs: { encode: 20_000, verify: 4_000 } };
+    await store.save(job('timed', { timings }));
+    const loaded = await store.load('timed');
+    expect(loaded.timings).toEqual({ files: 2, totalMs: {
+      inspect: 0, source: 0, timeline: 0, encode: 20_000, metadata: 0, verify: 4_000, saveWait: 0, save: 0, cleanup: 0
+    } });
+    for (const bad of [{ files: 1, totalMs: { encode: -1 } }, { files: 1, totalMs: { mystery: 1 } }, { files: 1 }, 'fast']) {
+      await expect(store.save(job('timed-bad', { timings: bad }))).rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
+    }
+  });
+
+  describe('re-inspecting a job parked mid-replacement', () => {
+    const parked = (id) => job(id, {
+      ...activeJob('replacing', { replacementPhase: 'rollback-failed' }),
+      state: 'paused',
+      recovery: { fromState: 'replacing', phase: 'rollback-failed', action: 'manual-intervention' }
+    });
+    const intact = { candidateExists: false, sourceExists: true, backupExists: false, finalValid: false };
+
+    test('leaves a parked job untouched unless re-inspection is requested', async () => {
+      const store = createJobStore({ rootDir, fs: fs.promises });
+      await store.save(parked('parked-default'));
+      const inspect = jest.fn(async () => intact);
+      const recovered = await store.recover('parked-default', inspect);
+      expect(inspect).not.toHaveBeenCalled();
+      expect(recovered.recovery.action).toBe('manual-intervention');
+    });
+
+    test('maps unambiguous facts through the replacement truth table', async () => {
+      const store = createJobStore({ rootDir, fs: fs.promises });
+      await store.save(parked('parked-intact'));
+      const inspect = jest.fn(async () => intact);
+      const recovered = await store.recover('parked-intact', inspect, { reinspectReplacement: true });
+      expect(inspect.mock.calls[0][0]).toMatchObject({ state: 'replacing', replacementPhase: 'rollback-failed' });
+      expect(recovered).toMatchObject({
+        state: 'paused', replacementPhase: 'rollback-failed',
+        recovery: { fromState: 'replacing', phase: 'rollback-failed', action: 'rollback-complete' }
+      });
+    });
+
+    test('still requires manual intervention for ambiguous facts', async () => {
+      const store = createJobStore({ rootDir, fs: fs.promises });
+      await store.save(parked('parked-ambiguous'));
+      const recovered = await store.recover('parked-ambiguous', async () => ({
+        candidateExists: false, sourceExists: true, backupExists: true, finalValid: false
+      }), { reinspectReplacement: true });
+      expect(recovered.recovery.action).toBe('manual-intervention');
+    });
+  });
+
   test.each(['copying', 'replacing'])(
     'fails %s recovery closed when inspection returns unknown facts',
     async (state) => {

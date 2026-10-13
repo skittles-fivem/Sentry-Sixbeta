@@ -343,7 +343,12 @@ describeRealEncoders(`real pipeline (${encoderGate.reason || 'required CPU encod
     for (const name of names) {
       expect((await fs.promises.stat(path.join(destinationRoot, 'RecentClips', name))).size).toBeGreaterThan(0);
     }
+    expect(job.timings.files).toBe(4);
     await runtime.shutdown();
+    const log = await fs.promises.readFile(path.join(userDataPath, 'converter-logs', `${jobId}.log`), 'utf8');
+    const lines = log.trim().split('\n');
+    expect(lines).toHaveLength(4);
+    for (const line of lines) expect(line).toMatch(/RecentClips\/2026-08-30_12-00-0\d-front\.mp4 total=[\d.]+s .*encode=[\d.]+s .*verify=[\d.]+s/);
   });
 
   test('copies event assets, skips real H265/AV1 inputs, and resumes after a simulated share reconnect', async () => {

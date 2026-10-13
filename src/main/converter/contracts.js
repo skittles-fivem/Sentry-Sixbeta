@@ -25,6 +25,20 @@ const GROUPS = ['RecentClips', 'SavedClips', 'SentryClips'];
 // `recommended` by default.
 const CONCURRENCY = deepFreeze({ min: 1, max: 8, fallback: 1, recommended: 5 });
 
+// Where a converted file's wall-clock time goes. Names avoid substrings the
+// IPC snapshot sanitizer treats as private (e.g. "telemetry", "process").
+const TIMING_PHASES = Object.freeze(['inspect', 'source', 'timeline', 'encode', 'metadata', 'verify', 'saveWait', 'save', 'cleanup']);
+
+// Adds one converted file's phase durations (ms) to a job's running totals.
+function addItemTimings(previous, phases) {
+  const totalMs = {};
+  for (const phase of TIMING_PHASES) {
+    const added = Math.max(0, Math.round(Number(phases?.[phase]) || 0));
+    totalMs[phase] = (Number.isSafeInteger(previous?.totalMs?.[phase]) ? previous.totalMs[phase] : 0) + added;
+  }
+  return { files: (Number.isSafeInteger(previous?.files) ? previous.files : 0) + 1, totalMs };
+}
+
 function isValidConcurrency(value) {
   return Number.isSafeInteger(value) && value >= CONCURRENCY.min && value <= CONCURRENCY.max;
 }
@@ -115,4 +129,4 @@ function serializeSummary(counters) {
   };
 }
 
-module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, isValidConcurrency, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };
+module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };

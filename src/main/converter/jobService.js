@@ -2,6 +2,8 @@
 
 const {
   CONCURRENCY,
+  TIMING_PHASES,
+  addItemTimings,
   isValidConcurrency,
   createEmptyCounters,
   addCompletedFile,
@@ -206,6 +208,28 @@ function createConverterJobService(deps) {
     throw new RangeError('network backoff must use positive bounded integers');
   }
   const ffmpegPath = deps.ffmpegPath || 'ffmpeg';
+  // Monotonic clock for per-phase timings (kept separate from deps.clock, which
+  // stamps manifests).
+  const timingNow = deps.timingNow || (() => performance.now());
+
+  // Attributes elapsed time to phases: mark(phase) charges everything since the
+  // previous mark to that phase (retries accumulate).
+  function createItemTiming() {
+    const phases = Object.fromEntries(TIMING_PHASES.map((phase) => [phase, 0]));
+    const started = timingNow();
+    let last = started;
+    return {
+      mark(phase) {
+        const now = timingNow();
+        phases[phase] += Math.max(0, now - last);
+        last = now;
+      },
+      result() {
+        const rounded = Object.fromEntries(Object.entries(phases).map(([phase, ms]) => [phase, Math.round(ms)]));
+        return { phases: rounded, totalMs: Math.round(timingNow() - started) };
+      }
+    };
+  }
   const queueLimit = deps.queueLimit || 4;
   // Discovery persists newly found items in batches. 1 keeps the original
   // persist-each-item-before-enqueue cadence; larger values avoid rewriting the
@@ -850,7 +874,9 @@ function createConverterJobService(deps) {
 
   async function processVideoOnce(runtime, item) {
     const signal = runtime.abortController.signal;
+    const timing = createItemTiming();
     const inspected = await deps.inspectVideo(item, item.sourcePath, signal);
+    timing.mark('inspect');
     if (inspected.codec === 'h265' || inspected.codec === 'av1') {
       await itemPatch(runtime, item.id, {
         state: 'skipped', eligibleVideo: false, resultCode: 'already-converted'
@@ -862,8 +888,10 @@ function createConverterJobService(deps) {
       state: 'waiting', activeItemId: item.id
     });
     const staged = await videoSource(runtime, item);
+    timing.mark('source');
     try {
     const timeline = await deps.readTimeline({ source: staged.source, item, signal });
+    timing.mark('timeline');
     const codec = runtime.manifest.config.codec;
     const targetBytes = targetOutputBytes(item.sourceBytes, runtime.manifest.config.profileId);
     let bitrate = calculateInitialBitrate({
@@ -899,6 +927,7 @@ function createConverterJobService(deps) {
       latestOwnership = reserved;
       setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), reserved));
       const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected, bitrate);
+      timing.mark('encode');
       if (!encoded.ok) {
         let failedOwnership = reserved;
         try {
@@ -969,6 +998,7 @@ function createConverterJobService(deps) {
       });
       latestOwnership = adopted;
       setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), adopted));
+      timing.mark('metadata');
       await itemPatch(runtime, item.id, {}, { state: 'verifying', activeItemId: item.id });
       const verification = await deps.verifier({
         source: staged.source,
@@ -978,6 +1008,7 @@ function createConverterJobService(deps) {
         sourceTimeline: timeline,
         signal: runtime.abortController.signal
       });
+      timing.mark('verify');
       if (!verification?.ok) {
         const retry = decideSizeRetry({
           retryCount: sizeRetryCount,
@@ -1018,6 +1049,7 @@ function createConverterJobService(deps) {
         persistTransaction: transactionPersistence(runtime, item.id)
       };
       await acquireCommit(runtime, item.id);
+      timing.mark('saveWait');
       await itemPatch(runtime, item.id, {}, {
         state: 'copying',
         activeItemId: item.id
@@ -1055,6 +1087,7 @@ function createConverterJobService(deps) {
         }
         published = error.validFinal;
       }
+      timing.mark('save');
       const publicationCleanup = await cleanupOwnership(runtime, item.id, {
         ...published,
         publicationArtifact
@@ -1090,6 +1123,8 @@ function createConverterJobService(deps) {
         ownedArtifacts: residualOwnership.ownedArtifacts
       };
       if (residualOwnership.ownedPaths.publicationSnapshot) completed.publicationArtifact = publicationArtifact;
+      timing.mark('cleanup');
+      const itemTiming = timing.result();
       await update(runtime, (current) => {
         const finished = { ...current.items.find((entry) => entry.id === item.id), ...completed };
         if (!residualOwnership.ownedPaths.publicationSnapshot) delete finished.publicationArtifact;
@@ -1102,8 +1137,13 @@ function createConverterJobService(deps) {
           publicationArtifact: null,
           replacementPhase: null,
           items: current.items.map((entry) => entry.id === item.id ? finished : entry),
-          counters: addCompletedFile(current.counters, finished)
+          counters: addCompletedFile(current.counters, finished),
+          timings: addItemTimings(current.timings, itemTiming.phases)
         };
+      });
+      emit(runtime, 'item_timing', {
+        itemId: item.id, relativePath: item.relativePath, encoder: selected.codec,
+        sourceBytes: item.sourceBytes, outputBytes: verification.outputBytes, attempts, ...itemTiming
       });
       return;
     }
@@ -1308,6 +1348,7 @@ function createConverterJobService(deps) {
   }
 
   function launch(runtime, { discover = true, itemIds = [] } = {}) {
+    if (runtime.suppressLaunch) return Promise.resolve();
     if (runtime.runPromise && runtime.runKind !== 'recovery') return runtime.runPromise;
     const launchedFromRecovery = runtime.runKind === 'recovery';
     const producer = Promise.resolve().then(async () => {
@@ -1422,9 +1463,34 @@ function createConverterJobService(deps) {
     return publicSnapshot(runtime.manifest);
   }
 
+  // A job parked mid-replacement (for example by an interrupted replace) can
+  // only be cancelled once that original is safe. Re-inspect the files with the
+  // replacement truth tables; if they show an unambiguous state, finish or roll
+  // back that one item through the normal recovery path, then cancel. Ambiguous
+  // states keep RECOVERY_REQUIRED.
+  async function resolveReplacementBeforeCancel(runtime, id) {
+    if (runtime.runPromise || typeof deps.inspectRecovery !== 'function') throw serviceError('RECOVERY_REQUIRED');
+    const signal = runtime.abortController.signal;
+    const inspectWithSignal = (manifest) => abortableRead(() => deps.inspectRecovery(manifest, { signal }), signal);
+    // The recovery path normally relaunches the queue; for a cancel it must
+    // only settle the interrupted item, and the cancel then finalizes the rest.
+    runtime.suppressLaunch = true;
+    try {
+      const recovered = await store.recover(id, inspectWithSignal, { reinspectReplacement: true });
+      runtime.manifest = recovered;
+      if (recovered.recovery?.fromState !== 'replacing' || recovered.recovery.action === 'manual-intervention') {
+        throw serviceError('RECOVERY_REQUIRED');
+      }
+      await performRecovery(runtime, id, inspectWithSignal, recovered);
+      if (runtime.manifest.recovery?.fromState === 'replacing') throw serviceError('RECOVERY_REQUIRED');
+    } finally {
+      runtime.suppressLaunch = false;
+    }
+  }
+
   async function cancel(id) {
     const runtime = await ensureRuntime(id);
-    if (runtime.manifest.recovery?.fromState === 'replacing') throw serviceError('RECOVERY_REQUIRED');
+    if (runtime.manifest.recovery?.fromState === 'replacing') await resolveReplacementBeforeCancel(runtime, id);
     if (runtime.manifest.state === 'cancelled') return publicSnapshot(runtime.manifest);
     runtime.cancelRequested = true;
     runtime.abortController.abort();

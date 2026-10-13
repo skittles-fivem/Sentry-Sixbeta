@@ -892,3 +892,53 @@ test('keeps the single-file status line when one file is converting', async () =
   await createFootageConverterController({ api: fakeApi({ current: activeSnapshot() }), elements, storage: memoryStorage() }).init();
   assert.equal(elements.currentFile.textContent, 'SentryClips/event/front.mp4');
 });
+
+test('shows files per minute and time remaining from finished files over time', async () => {
+  let clock = 1_000_000;
+  const base = activeSnapshot({ createdAt: clock, revision: 10 });
+  const elements = { ...makeElements(), speed: new FakeElement(), eta: new FakeElement() };
+  const api = fakeApi({ current: base });
+  await createFootageConverterController({ api, elements, storage: memoryStorage(), now: () => clock }).init();
+  // Fewer than 10 s of history: no estimate yet.
+  assert.equal(elements.speed.textContent, '—');
+
+  const withCounts = (completed, queued, revision) => ({
+    ...base, revision,
+    itemCount: completed + queued + 3,
+    itemStateCounts: { queued, completed, skipped: 1, failed: 1, active: 1 }
+  });
+  clock += 60_000;
+  api.emit({ jobId: 'job-1', revision: 11, snapshot: withCounts(10, 100, 11) });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  clock += 60_000;
+  api.emit({ jobId: 'job-1', revision: 12, snapshot: withCounts(20, 90, 12) });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // 3 files were already finished in the first sample: (22 - 3) / 2 min.
+  assert.equal(elements.speed.textContent, '9.5 files/min');
+  // 90 queued + 1 converting at 9.5 files/min = 574.7 s.
+  assert.equal(elements.eta.textContent, '9m 35s');
+});
+
+test('lists where the time goes, largest average first', async () => {
+  const snapshot = activeSnapshot({
+    timings: { files: 4, totalMs: { inspect: 400, source: 0, timeline: 2_000, encode: 48_000, metadata: 1_200,
+      verify: 16_000, saveWait: 4_000, save: 2_800, cleanup: 400 } }
+  });
+  const elements = { ...makeElements(), timings: new FakeElement(), timingRows: new FakeElement() };
+  elements.timings.hidden = true;
+  await createFootageConverterController({ api: fakeApi({ current: snapshot }), elements, storage: memoryStorage() }).init();
+
+  assert.equal(elements.timings.hidden, false);
+  const rows = elements.timingRows.children.map((row) => row.getAttribute('data-phase'));
+  assert.deepEqual(rows, ['encode', 'verify', 'saveWait', 'save', 'timeline', 'metadata', 'inspect', 'cleanup']);
+  const encode = elements.timingRows.children[0].children;
+  assert.equal(encode[0].textContent, 'Encode');
+  assert.equal(encode[2].textContent, '12.0s');
+});
+
+test('hides the timing breakdown until a file has been converted', async () => {
+  const elements = { ...makeElements(), timings: new FakeElement(), timingRows: new FakeElement() };
+  await createFootageConverterController({ api: fakeApi({ current: activeSnapshot() }), elements, storage: memoryStorage() }).init();
+  assert.equal(elements.timings.hidden, true);
+});

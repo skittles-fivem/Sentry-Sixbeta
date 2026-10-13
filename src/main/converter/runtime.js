@@ -570,6 +570,24 @@ async function createConverterRuntime(options = {}) {
     })
   });
 
+  // Per-file timing log: one line per converted file showing where its
+  // wall-clock time went (<userData>/converter-logs/<jobId>.log). Best effort:
+  // logging never affects a conversion.
+  const timingLogRoot = pathApi.join(options.userDataPath, 'converter-logs');
+  let timingLogChain = Promise.resolve();
+  const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
+  if (typeof service.subscribe === 'function') service.subscribe((event) => {
+    if (event?.type !== 'item_timing' || typeof event.jobId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(event.jobId)) return;
+    const phases = Object.entries(event.phases || {}).filter(([, ms]) => ms > 0)
+      .map(([phase, ms]) => `${phase}=${seconds(ms)}`).join(' ');
+    const line = `${new Date().toISOString()} ${event.relativePath} total=${seconds(event.totalMs || 0)} ${phases}`
+      + ` encoder=${event.encoder} attempts=${event.attempts} bytes=${event.sourceBytes}->${event.outputBytes}\n`;
+    timingLogChain = timingLogChain
+      .then(() => pfs.mkdir(timingLogRoot, { recursive: true }))
+      .then(() => pfs.appendFile(pathApi.join(timingLogRoot, `${event.jobId}.log`), line))
+      .catch(() => undefined);
+  });
+
   const canRemoveOwned = removeOwned?.atomicOwnershipCheck === true && typeof removeOwned.remove === 'function';
   const canPromote = renameExclusive?.atomicNoReplace === true && typeof renameExclusive.promote === 'function';
   const stagingCapabilities = stagingManager.capabilities || {
