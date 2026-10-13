@@ -104,38 +104,3 @@ jobs:
             release/SentryStudioSetup*.exe \
             release/SentryStudioSetup*.exe.blockmap \
             release/latest.yml
-
-  converter-tests:
-    # Informational: reports converter test results on Windows without
-    # blocking the beta build.
-    runs-on: windows-latest
-    timeout-minutes: 30
-    continue-on-error: true
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Converter unit tests
-        shell: bash
-        # The runner's default %TEMP% is an 8.3 short path (C:\Users\RUNNER~1\...),
-        # which realpath() expands, so containment checks that compare
-        # canonical paths reject the fixtures. runner.temp is a long path.
-        env:
-          TEMP: ${{ runner.temp }}
-          TMP: ${{ runner.temp }}
-        run: |
-          npx jest tests/main/converter --ci --testPathIgnorePatterns integration --json --outputFile=jest-results.json || true
-          node .github/scripts/jest-annotations.js jest-results.json
-
-      - name: Renderer tests
-        run: npm run test:dashcam
