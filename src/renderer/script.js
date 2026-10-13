@@ -1,4 +1,5 @@
 import { MULTI_LAYOUTS, DEFAULT_MULTI_LAYOUT } from './scripts/lib/multiLayouts.js';
+import { createGridResizer, getTeslaHardware, setTeslaHardware, teslaLayoutId } from './scripts/ui/playbackLayout.js';
 import { CLIPS_MODE_KEY, MULTI_LAYOUT_KEY, MULTI_ENABLED_KEY, SENTRY_CAMERA_HIGHLIGHT_KEY, SAVED_CAMERA_HIGHLIGHT_KEY } from './scripts/lib/storageKeys.js';
 import { createClipsPanelMode } from './scripts/ui/panelMode.js';
 import { filePathToUrl, formatError, describeMediaError } from './scripts/lib/utils.js';
@@ -143,6 +144,8 @@ const mapToggle = $('mapToggle');
 const speedSelect = $('speedSelect');
 const multiLayoutSelect = $('multiLayoutSelect');
 const multiCamGrid = $('multiCamGrid');
+const hardwareToggle = $('hardwareToggle');
+let gridResizer = null;
 // Video elements for 6-camera grid (slots: tl, tc, tr, bl, bc, br)
 const videoTL = $('videoTL');
 const videoTC = $('videoTC');
@@ -1077,8 +1080,19 @@ let useMetric = false; // Will be loaded from settings
     updateDashboardVisibility();
     updateMapVisibility();
 
-    // Multi-cam layout preset - force six_default
-    multi.layoutId = 'six_default';
+    // Multi-cam layout preset: Tesla HW4 (six cameras) or HW3 (four, no pillars)
+    multi.layoutId = teslaLayoutId();
+    if (multiCamGrid) multiCamGrid.setAttribute('data-columns', MULTI_LAYOUTS[multi.layoutId]?.columns || 3);
+    gridResizer?.apply();
+    updateHardwareToggle();
+    hardwareToggle?.querySelectorAll('[data-hardware]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const mode = setTeslaHardware(button.dataset.hardware);
+            updateHardwareToggle();
+            if ((library.profileId || 'tesla') === 'tesla') setMultiLayout(teslaLayoutId(mode), { persist: false });
+            button.blur();
+        });
+    });
     if (multiLayoutSelect) {
         multiLayoutSelect.value = multi.layoutId;
         multiLayoutSelect.onchange = () => {
@@ -1312,6 +1326,9 @@ function setMultiLayout(layoutId, {
     if (multiCamGrid && layout) {
         multiCamGrid.setAttribute('data-columns', layout.columns || 3);
     }
+    gridResizer?.apply();
+    updateTileLabels();
+    updateCompactDashboardPosition();
 
     if (reloadActive &&
         multi.enabled &&
@@ -1356,10 +1373,11 @@ function applyDashcamProfile(profileId = 'tesla', sourceKind = 'tesla') {
     multi.masterCamera = 'front';
     selection.selectedCamera = 'front';
 
-    setMultiLayout(profile.layoutId, {
+    setMultiLayout(profile.id === 'tesla' ? teslaLayoutId() : profile.layoutId, {
         persist: false,
         reloadActive: false
     });
+    if (hardwareToggle) hardwareToggle.hidden = profile.id !== 'tesla';
 
     // A profile switch must not leak Tesla SEI/GPS state into footage that
     // cannot provide it.
@@ -5218,6 +5236,22 @@ initWelcomeScreen();
 if (!window.electronAPI?.isMas) {
     initAutoUpdate();
 }
+
+function updateHardwareToggle() {
+    const mode = getTeslaHardware();
+    hardwareToggle?.querySelectorAll('[data-hardware]').forEach((button) => {
+        const active = button.dataset.hardware === mode;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+    });
+}
+
+// Resizable multi-camera grid (sizes remembered per layout)
+gridResizer = createGridResizer({
+    grid: multiCamGrid,
+    getLayoutId: () => multi.layoutId || DEFAULT_MULTI_LAYOUT,
+    getColumns: () => multiCamGrid?.getAttribute('data-columns') || 3
+});
 
 // Camera Rearrangement
 initCameraRearrange({

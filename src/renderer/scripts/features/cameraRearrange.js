@@ -44,11 +44,20 @@ export function initCameraRearrange(deps) {
  * Get the current custom camera order
  */
 export function getCustomCameraOrder() {
-    return customCameraOrders[getActiveProfileId()] || null;
+    return customCameraOrders[getOrderKey()] || null;
 }
 
 function getActiveProfileId() {
     return getState?.()?.library?.profileId || 'tesla';
+}
+
+// Saved drag orders are per profile, and the 4-camera HW3 layout keeps its own
+// so arranging one hardware layout never scrambles the other.
+function getOrderKey() {
+    const profileId = getActiveProfileId();
+    const layoutId = getMulti?.()?.layoutId;
+    return layoutId && layoutId !== DEFAULT_MULTI_LAYOUT && profileId === 'tesla'
+        ? `${profileId}:${layoutId}` : profileId;
 }
 
 /**
@@ -90,7 +99,7 @@ export function resetCameraOrder() {
     const state = getState?.();
     const nativeVideo = getNativeVideo?.();
     
-    delete customCameraOrders[getActiveProfileId()];
+    delete customCameraOrders[getOrderKey()];
     saveCustomCameraOrder();
     updateTileLabels();
     updateEventCameraHighlight?.();
@@ -240,7 +249,7 @@ export function initCameraDragAndDrop() {
                 effectiveSlots.forEach(s => {
                     customCameraOrder[s.slot] = s.camera;
                 });
-                customCameraOrders[getActiveProfileId()] = customCameraOrder;
+                customCameraOrders[getOrderKey()] = customCameraOrder;
             }
             
             const sourceCamera = customCameraOrder[draggedSlot];
