@@ -191,6 +191,20 @@ function createConverterJobService(deps) {
   const scanner = deps.scanner;
   const planner = deps.planner;
   const staging = deps.stagingManager;
+  // GPU decoding is an optimisation only. An encoder whose GPU decode proved
+  // unusable is not offered it again; verify stops after repeated fallbacks.
+  const encodeDecodeBroken = new Set();
+  const verifyDecodeFallbacks = new Map();
+  const VERIFY_DECODE_FALLBACK_LIMIT = 3;
+  function decodeAccelFor(encoder, purpose) {
+    if (encoder?.hardware !== true || typeof deps.decodeAccel !== 'function') return null;
+    if (purpose === 'encode' && encodeDecodeBroken.has(encoder.codec)) return null;
+    if (purpose === 'verify' && (verifyDecodeFallbacks.get(encoder.codec) || 0) >= VERIFY_DECODE_FALLBACK_LIMIT) return null;
+    try {
+      const args = deps.decodeAccel(encoder.codec);
+      return Array.isArray(args) && args.length > 0 ? args : null;
+    } catch (_) { return null; }
+  }
   const pathApi = deps.pathApi || require('path');
   const clock = deps.clock || { now: Date.now, sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) };
   const network = deps.network || {
@@ -659,9 +673,10 @@ function createConverterJobService(deps) {
       : pathApi.resolve(config.destinationRoot, ...item.relativePath.split('/'));
   }
 
-  async function runChild(runtime, itemId, source, target, codec, encoder, bitrate) {
+  async function runChild(runtime, itemId, source, target, codec, encoder, bitrate, decodeAccel = null) {
     const args = [
       '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
+      ...(decodeAccel || []),
       '-i', source,
       ...buildEncodeArgs({ codec, encoder: encoder.codec, bitrate }),
       '-an', '-sn', '-dn',
@@ -927,6 +942,8 @@ function createConverterJobService(deps) {
     let sizeRetryCount = 0;
     let attempts = currentItem(runtime, item.id)?.attempts || 0;
     let latestOwnership = staged.ownership;
+    let encodeAccel = decodeAccelFor(selected, 'encode');
+    let encodeAccelFailedFor = null;
 
     while (!runtime.cancelRequested && !runtime.stopRequested) {
       attempts += 1;
@@ -942,8 +959,9 @@ function createConverterJobService(deps) {
       });
       latestOwnership = reserved;
       setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), reserved));
-      const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected, bitrate);
+      const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected, bitrate, encodeAccel);
       timing.mark('encode');
+      const usedEncodeAccel = encodeAccel;
       if (!encoded.ok) {
         let failedOwnership = reserved;
         try {
@@ -964,6 +982,12 @@ function createConverterJobService(deps) {
           throw Object.assign(new Error('cleanup pending'), { code: 'OWNED_CLEANUP_FAILED' });
         }
         if (encoded.code === 'cancelled') throw serviceError('CANCELLED');
+        // Retry the same GPU encoder with CPU decoding before giving up on it.
+        if (usedEncodeAccel) {
+          encodeAccel = null;
+          encodeAccelFailedFor = selected.codec;
+          continue;
+        }
         if (selected.hardware === true && !usedCpuFallback) {
           selected = await planner.selectCpuFallback(codec);
           usedCpuFallback = true;
@@ -971,6 +995,8 @@ function createConverterJobService(deps) {
         }
         throw Object.assign(new Error('encode failed'), { code: 'ENCODER_FAILED' });
       }
+      // CPU decoding fixed what GPU decoding broke: stop offering it.
+      if (!usedEncodeAccel && encodeAccelFailedFor === selected.codec) encodeDecodeBroken.add(selected.codec);
       let adopted = await staging.adoptEncodeOutput({
         jobId: runtime.manifest.id,
         itemId: item.id,
@@ -1016,13 +1042,19 @@ function createConverterJobService(deps) {
       setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), adopted));
       timing.mark('metadata');
       await itemPatch(runtime, item.id, {}, { state: 'verifying', activeItemId: item.id });
+      const verifyAccel = decodeAccelFor(selected, 'verify');
+      const verifiedEncoder = selected.codec;
       const verification = await deps.verifier({
         source: staged.source,
         candidate: adopted.path,
         codec,
         profileId: runtime.manifest.config.profileId,
         sourceTimeline: timeline,
-        signal: runtime.abortController.signal
+        signal: runtime.abortController.signal,
+        ...(verifyAccel ? {
+          decodeAccel: verifyAccel,
+          onDecodeAccelFallback: () => verifyDecodeFallbacks.set(verifiedEncoder, (verifyDecodeFallbacks.get(verifiedEncoder) || 0) + 1)
+        } : {})
       });
       timing.mark('verify');
       if (!verification?.ok) {

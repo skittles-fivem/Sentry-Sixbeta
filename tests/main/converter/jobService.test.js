@@ -584,6 +584,67 @@ describe('converter job orchestration', () => {
     expect(h.stagingManager.adoptEncodeOutput).toHaveBeenCalledTimes(4);
   });
 
+  describe('GPU decoding', () => {
+    const accel = (encoder) => (encoder.endsWith('_nvenc') ? ['-hwaccel', 'cuda'] : null);
+    const hasAccel = (args) => args.includes('-hwaccel');
+
+    test('decodes the source on the GPU and passes the GPU decoder to verify', async () => {
+      const h = harness({ deps: { decodeAccel: accel } });
+      const id = await h.service.start(CONFIG);
+      await h.service.whenIdle(id);
+      const args = h.spawnProcess.mock.calls[0][1];
+      expect(args.slice(args.indexOf('-hwaccel'), args.indexOf('-hwaccel') + 2)).toEqual(['-hwaccel', 'cuda']);
+      expect(args.indexOf('-hwaccel')).toBeLessThan(args.indexOf('-i'));
+      expect(h.verifier.mock.calls[0][0]).toMatchObject({ decodeAccel: ['-hwaccel', 'cuda'] });
+      expect((await h.service.get(id)).items[0]).toMatchObject({ state: 'completed', encoder: 'hevc_nvenc' });
+    });
+
+    test('retries the same GPU encoder with CPU decoding before falling back to a CPU encoder', async () => {
+      const h = harness({ deps: { decodeAccel: accel }, spawnActions: [{ status: 1 }, { status: 0 }] });
+      const id = await h.service.start(CONFIG);
+      await h.service.whenIdle(id);
+      expect(h.spawnProcess.mock.calls.map(([, args]) => hasAccel(args))).toEqual([true, false]);
+      expect(h.planner.selectCpuFallback).not.toHaveBeenCalled();
+      expect((await h.service.get(id)).items[0]).toMatchObject({ state: 'completed', encoder: 'hevc_nvenc' });
+    });
+
+    test('stops offering GPU decoding for an encoder once CPU decoding fixed it', async () => {
+      const h = harness({
+        deps: { decodeAccel: accel },
+        spawnActions: [{ status: 1 }, { status: 0 }, { status: 0 }],
+        scannedFiles: undefined
+      });
+      const id = await h.service.start(CONFIG);
+      await h.service.whenIdle(id);
+      const second = await h.service.start(CONFIG);
+      await h.service.whenIdle(second);
+      expect(h.spawnProcess.mock.calls.map(([, args]) => hasAccel(args))).toEqual([true, false, false]);
+    });
+
+    test('CPU encoders never get GPU decoding', async () => {
+      const h = harness({ deps: { decodeAccel: accel }, spawnActions: [{ status: 1 }, { status: 1 }, { status: 0 }] });
+      const id = await h.service.start(CONFIG);
+      await h.service.whenIdle(id);
+      expect(h.spawnProcess.mock.calls.map(([, args]) => hasAccel(args))).toEqual([true, false, false]);
+      expect((await h.service.get(id)).items[0]).toMatchObject({ state: 'completed', encoder: 'libx265' });
+      expect(h.verifier.mock.calls[0][0].decodeAccel).toBeUndefined();
+    });
+
+    test('verify stops using the GPU after repeated fallbacks', async () => {
+      const h = harness({ deps: { decodeAccel: accel } });
+      h.verifier.mockImplementation(async ({ candidate, onDecodeAccelFallback }) => {
+        onDecodeAccelFallback?.();
+        return { ok: true, reason: null, retryable: false, sourceBytes: 1_000_000, outputBytes: 800_000, details: {},
+          publicationArtifact: { path: `${candidate}.snapshot`, token: 'token', sha256: 'b'.repeat(64), size: 800_000 } };
+      });
+      for (let run = 0; run < 4; run += 1) {
+        const id = await h.service.start(CONFIG);
+        await h.service.whenIdle(id);
+      }
+      expect(h.verifier.mock.calls.map(([options]) => Array.isArray(options.decodeAccel))).toEqual([true, true, true, false]);
+    });
+  });
+
   test('uses planner preference then its proven CPU fallback after a hardware process failure', async () => {
     const h = harness({ spawnActions: [{ status: 1 }, { status: 0 }] });
     const id = await h.service.start(CONFIG);

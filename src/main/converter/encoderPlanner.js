@@ -97,6 +97,24 @@ function buildEncodeArgs({ codec, encoder, bitrate, vaapiDevice = '/dev/dri/rend
   return args;
 }
 
+/**
+ * Input arguments that decode on the same GPU family as a hardware encoder.
+ * Decoded frames are copied back to system memory, so the encode arguments
+ * stay identical with or without them. CPU encoders get no GPU decode.
+ */
+function decodeAccelArgs(encoder, { platform = process.platform, vaapiDevice = '/dev/dri/renderD128' } = {}) {
+  if (typeof encoder !== 'string') return null;
+  const vaapi = ['-hwaccel', 'vaapi', '-hwaccel_device', vaapiDevice];
+  if (encoder.endsWith('_nvenc')) return ['-hwaccel', 'cuda'];
+  if (encoder.endsWith('_videotoolbox')) return ['-hwaccel', 'videotoolbox'];
+  if (encoder.endsWith('_vaapi')) return vaapi;
+  if (encoder.endsWith('_qsv') || encoder.endsWith('_amf')) {
+    if (platform === 'win32') return ['-hwaccel', 'd3d11va'];
+    if (platform === 'linux') return vaapi;
+  }
+  return null;
+}
+
 function failedProof(candidate, reason, details) {
   return { ...candidate, usable: false, reason, details: details || null };
 }
@@ -295,6 +313,7 @@ function decideSizeRetry({
 
 module.exports = {
   SAFE_VIDEO_BITRATE_FLOORS,
+  decodeAccelArgs,
   RETRY_REASONS,
   buildEncodeArgs,
   probeCandidate,

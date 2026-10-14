@@ -53,7 +53,7 @@ const EXPECTED_VIDEO = Object.freeze({
 });
 
 const FFPROBE_ENTRIES = [
-  'stream=index,codec_type,codec_name,codec_tag_string,width,height,duration,nb_frames,nb_read_frames,avg_frame_rate,r_frame_rate',
+  'stream=index,codec_type,codec_name,codec_tag_string,width,height,duration,nb_frames,nb_read_packets,avg_frame_rate,r_frame_rate',
   'format=duration'
 ].join(':');
 
@@ -99,6 +99,13 @@ function validateOptions(options) {
   if (options.stat !== undefined && typeof options.stat !== 'function') throw new TypeError('stat must be a function');
   if (options.readFile !== undefined && typeof options.readFile !== 'function') throw new TypeError('readFile must be a function');
   if (options.createSnapshot !== undefined && typeof options.createSnapshot !== 'function') throw new TypeError('createSnapshot must be a function');
+  if (options.decodeAccel !== undefined && (!Array.isArray(options.decodeAccel) || options.decodeAccel.length > 8
+      || !options.decodeAccel.every((arg) => typeof arg === 'string' && arg.length > 0 && arg.length < 256))) {
+    throw new TypeError('decodeAccel must be a short argument list');
+  }
+  if (options.onDecodeAccelFallback !== undefined && typeof options.onDecodeAccelFallback !== 'function') {
+    throw new TypeError('onDecodeAccelFallback must be a function');
+  }
   return canonicalProfileId(options.profileId);
 }
 
@@ -187,7 +194,9 @@ function parseProbeMetadata(stdout) {
     if (typeof stream.codec_tag_string !== 'string' || !/^[a-zA-Z0-9_.-]{1,64}$/.test(stream.codec_tag_string)) throw new TypeError('Invalid tag');
     const durationValue = stream.duration === undefined ? document.format?.duration : stream.duration;
     const durationUs = parseDurationUs(durationValue);
-    const frameCount = parsePositiveInteger(stream.nb_read_frames, 'frame count');
+    // Packets are counted by demuxing only; the single full decode below
+    // separately proves every packet decodes and reports the exact frame count.
+    const frameCount = parsePositiveInteger(stream.nb_read_packets, 'frame count');
     if (stream.nb_frames !== undefined && stream.nb_frames !== 'N/A') {
       const declaredFrameCount = parsePositiveInteger(stream.nb_frames, 'declared frame count');
       if (declaredFrameCount !== frameCount) throw new TypeError('Conflicting frame counts');
@@ -215,7 +224,7 @@ function ffprobeArgs(target) {
   return [
     '-v', 'error',
     '-select_streams', 'v:0',
-    '-count_frames',
+    '-count_packets',
     '-show_entries', FFPROBE_ENTRIES,
     '-of', 'json',
     target
@@ -243,24 +252,44 @@ async function probeTarget(options, target, label) {
   }
 }
 
-function decodeArgs(candidate) {
+function decodeArgs(candidate, accel = []) {
   return [
     '-nostdin', '-hide_banner', '-loglevel', 'error', '-xerror', '-err_detect', 'explode',
+    ...accel,
     '-i', candidate,
     '-map', '0:v:0', '-an', '-sn', '-dn',
+    '-fps_mode', 'passthrough',
+    '-progress', 'pipe:1', '-nostats',
     '-f', 'null', '-'
   ];
 }
 
-async function runCompleteDecode(options, candidate) {
+// stdout carries only FFmpeg's machine-readable progress report; anything else
+// is unexpected output. The final report must say the decode reached the end.
+function decodedFrameCount(stdout) {
+  if (stdout.length > 1_000_000) return { error: { kind: 'stdout-output' } };
+  let frames = null;
+  let ended = false;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.length === 0) continue;
+    const match = /^([a-z0-9_]+)=([^\r\n]*)$/.exec(line);
+    if (!match) return { error: { kind: 'stdout-output' } };
+    if (match[1] === 'frame') frames = /^\d+$/.test(match[2].trim()) ? Number(match[2].trim()) : NaN;
+    if (match[1] === 'progress') ended = match[2] === 'end';
+  }
+  if (!ended || !Number.isSafeInteger(frames) || frames <= 0) return { error: { kind: 'incomplete-decode' } };
+  return { frames };
+}
+
+async function runDecodeOnce(options, candidate, accel) {
   let result;
   try {
-    result = await Promise.resolve(options.runFullDecode(options.ffmpegPath ?? 'ffmpeg', decodeArgs(candidate), {
+    result = await Promise.resolve(options.runFullDecode(options.ffmpegPath ?? 'ffmpeg', decodeArgs(candidate, accel), {
       windowsHide: true,
       shell: false
     }));
   } catch (_error) {
-    return { kind: 'runner-threw' };
+    return { error: { kind: 'runner-threw' } };
   }
   try {
     // The null muxer reports harmless duplicate-PTS warnings for Tesla VFR
@@ -268,10 +297,26 @@ async function runCompleteDecode(options, candidate) {
     // all other stderr, including real decoder errors.
     const tolerated = /^\[null[^\r\n]*\] Application provided invalid, non monotonically increasing dts to muxer in stream 0: \d+ >= \d+\r?\n?/gm;
     const normalized = result.status === 0 ? { ...result, stderr: result.stderr.replace(tolerated, '') } : result;
-    return processResultError(normalized, true);
+    const error = processResultError(normalized, false);
+    if (error) return { error };
+    return decodedFrameCount(normalized.stdout);
   } catch (_error) {
-    return { kind: 'invalid-runner-result' };
+    return { error: { kind: 'invalid-runner-result' } };
   }
+}
+
+// One complete decode of the candidate. A GPU decode is tried first when the
+// caller offers one; any GPU failure is re-checked on the CPU, so only a CPU
+// decode can reject a candidate and a GPU quirk never fails a good file.
+async function runCompleteDecode(options, candidate) {
+  const accel = Array.isArray(options.decodeAccel) ? options.decodeAccel : [];
+  if (accel.length > 0) {
+    const gpu = await runDecodeOnce(options, candidate, accel);
+    if (!gpu.error) return gpu;
+    if (options.signal?.aborted) return gpu;
+    try { options.onDecodeAccelFallback?.(); } catch (_) { /* advisory only */ }
+  }
+  return runDecodeOnce(options, candidate, []);
 }
 
 function safeOffset(value) {
@@ -724,8 +769,8 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
     });
   }
 
-  const decodeError = await runCompleteDecode(options, snapshot.path);
-  if (decodeError) return failure(VERIFICATION_REASONS.DECODE_FAILED, sourceBytes, outputBytes, decodeError);
+  const decoded = await runCompleteDecode(options, snapshot.path);
+  if (decoded.error) return failure(VERIFICATION_REASONS.DECODE_FAILED, sourceBytes, outputBytes, decoded.error);
 
   let candidateSnapshotBytes;
   try {
@@ -745,6 +790,13 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
     return failure(VERIFICATION_REASONS.FRAME_COUNT_MISMATCH, sourceBytes, outputBytes, {
       kind: 'probe-container',
       probeFrames: candidateProbe.metadata.frameCount,
+      containerSamples: outputTiming.samples.length
+    });
+  }
+  if (decoded.frames !== outputTiming.samples.length) {
+    return failure(VERIFICATION_REASONS.FRAME_COUNT_MISMATCH, sourceBytes, outputBytes, {
+      kind: 'decode-container',
+      decodedFrames: decoded.frames,
       containerSamples: outputTiming.samples.length
     });
   }

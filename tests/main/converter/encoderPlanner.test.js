@@ -359,3 +359,19 @@ describe('bitrate and retry planning', () => {
       failureReason: 'telemetry-mismatch' })).toEqual({ retry: false, bitrate: null });
   });
 });
+
+describe('decodeAccelArgs', () => {
+  const { decodeAccelArgs } = require('../../../src/main/converter/encoderPlanner');
+  test.each([
+    ['hevc_nvenc', 'win32', ['-hwaccel', 'cuda']],
+    ['av1_nvenc', 'linux', ['-hwaccel', 'cuda']],
+    ['hevc_videotoolbox', 'darwin', ['-hwaccel', 'videotoolbox']],
+    ['av1_qsv', 'win32', ['-hwaccel', 'd3d11va']],
+    ['hevc_amf', 'win32', ['-hwaccel', 'd3d11va']],
+    ['hevc_vaapi', 'linux', ['-hwaccel', 'vaapi', '-hwaccel_device', '/dev/dri/renderD128']],
+    ['libx265', 'win32', null],
+    ['libsvtav1', 'linux', null]
+  ])('%s on %s', (encoder, platform, expected) => {
+    expect(decodeAccelArgs(encoder, { platform })).toEqual(expected);
+  });
+});

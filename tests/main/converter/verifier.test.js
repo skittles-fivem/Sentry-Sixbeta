@@ -148,12 +148,16 @@ function probeDocument({
       height,
       duration,
       nb_frames: String(frameCount),
-      nb_read_frames: String(frameCount),
+      nb_read_packets: String(frameCount),
       avg_frame_rate: averageRate,
       r_frame_rate: realRate
     }],
     format: { duration }
   };
+}
+
+function progressReport(frames) {
+  return `frame=0\nfps=0.00\nprogress=continue\nframe=${frames}\nfps=120.0\nout_time_us=1000\nprogress=end\n`;
 }
 
 function profileSourceBytes(outputBytes, profileId) {
@@ -185,7 +189,8 @@ function harness({
   sourceProbe = {},
   candidateProbe = {},
   ffprobeResult,
-  decodeResult = { status: 0, stdout: '', stderr: '' },
+  decodeResult,
+  decodedFrames,
   stat,
   readFile,
   createSnapshot,
@@ -229,9 +234,11 @@ function harness({
       stderr: ''
     };
   });
-  const runFullDecode = jest.fn(async (...args) => (
-    typeof decodeResult === 'function' ? decodeResult(...args) : decodeResult
-  ));
+  const okDecode = { status: 0, stdout: progressReport(decodedFrames ?? candidateEvents.length), stderr: '' };
+  const runFullDecode = jest.fn(async (...args) => {
+    if (decodeResult === undefined) return okDecode;
+    return typeof decodeResult === 'function' ? decodeResult(...args) : decodeResult;
+  });
   const statAdapter = stat || jest.fn(async (target) => ({
     size: target === SOURCE ? sourceBytes : candidateBytes.length,
     isFile: () => true
@@ -486,7 +493,7 @@ describe('verifyCandidate artifact and process boundaries', () => {
       expect(Array.isArray(args)).toBe(true);
       expect(options).toEqual(expect.objectContaining({ shell: false, windowsHide: true }));
       expect(args).toEqual(expect.arrayContaining([
-        '-select_streams', 'v:0', '-count_frames', '-of', 'json'
+        '-select_streams', 'v:0', '-count_packets', '-of', 'json'
       ]));
       expect(args.at(-1)).toBe(SNAPSHOT);
     }
@@ -495,10 +502,68 @@ describe('verifyCandidate artifact and process boundaries', () => {
       '-nostdin', '-hide_banner', '-loglevel', 'error', '-xerror', '-err_detect', 'explode',
       '-i', SNAPSHOT,
       '-map', '0:v:0', '-an', '-sn', '-dn',
+      '-fps_mode', 'passthrough',
+      '-progress', 'pipe:1', '-nostats',
       '-f', 'null', '-'
     ], expect.objectContaining({ shell: false, windowsHide: true }));
     const decodeArgs = testHarness.runFullDecode.mock.calls[0][1];
     expect(decodeArgs).not.toEqual(expect.arrayContaining(['-t', '-frames:v', '-read_intervals']));
+  });
+
+  test('rejects when the decoded frame count differs from the container', async () => {
+    const result = await verifyCandidate(harness({ decodedFrames: 2 }).options);
+    expectFailure(result, 'frame-count-mismatch');
+    expect(result.details).toEqual(expect.objectContaining({ kind: 'decode-container', decodedFrames: 2 }));
+  });
+
+  test.each([
+    ['no end marker', 'frame=3\nprogress=continue\n', 'incomplete-decode'],
+    ['no frame count', 'progress=end\n', 'incomplete-decode'],
+    ['stray output', 'frame=3\nhello world\nprogress=end\n', 'stdout-output']
+  ])('rejects a decode report with %s', async (_label, stdout, kind) => {
+    const result = await verifyCandidate(harness({ decodeResult: { status: 0, stdout, stderr: '' } }).options);
+    expectFailure(result, 'decode-failed');
+    expect(result.details).toEqual(expect.objectContaining({ kind }));
+  });
+
+  test('decodes once on the GPU when offered and it succeeds', async () => {
+    const testHarness = harness();
+    const onDecodeAccelFallback = jest.fn();
+    const result = await verifyCandidate({ ...testHarness.options, decodeAccel: ['-hwaccel', 'cuda'], onDecodeAccelFallback });
+    expect(result.ok).toBe(true);
+    expect(testHarness.runFullDecode).toHaveBeenCalledTimes(1);
+    const args = testHarness.runFullDecode.mock.calls[0][1];
+    expect(args.indexOf('-hwaccel')).toBeLessThan(args.indexOf('-i'));
+    expect(onDecodeAccelFallback).not.toHaveBeenCalled();
+  });
+
+  test('re-checks on the CPU when the GPU decode fails, so a GPU quirk cannot reject a good file', async () => {
+    const decodes = [];
+    const testHarness = harness({
+      decodeResult: (_command, args) => {
+        decodes.push(args.includes('-hwaccel') ? 'gpu' : 'cpu');
+        return args.includes('-hwaccel')
+          ? { status: 0, stdout: progressReport(3), stderr: 'Device creation failed' }
+          : { status: 0, stdout: progressReport(3), stderr: '' };
+      }
+    });
+    const onDecodeAccelFallback = jest.fn();
+    const result = await verifyCandidate({ ...testHarness.options, decodeAccel: ['-hwaccel', 'cuda'], onDecodeAccelFallback });
+    expect(result.ok).toBe(true);
+    expect(decodes).toEqual(['gpu', 'cpu']);
+    expect(onDecodeAccelFallback).toHaveBeenCalledTimes(1);
+  });
+
+  test('a corrupt file still fails when both GPU and CPU decodes reject it', async () => {
+    const testHarness = harness({ decodeResult: { status: 1, stdout: '', stderr: 'corrupt' } });
+    const result = await verifyCandidate({ ...testHarness.options, decodeAccel: ['-hwaccel', 'cuda'] });
+    expectFailure(result, 'decode-failed');
+    expect(testHarness.runFullDecode).toHaveBeenCalledTimes(2);
+  });
+
+  test('rejects an invalid GPU decode option', async () => {
+    const result = await verifyCandidate({ ...harness().options, decodeAccel: '-hwaccel cuda' });
+    expectFailure(result, 'invalid-input');
   });
 
   test('uses safe executable defaults when the plan-facing API omits explicit tool paths', async () => {
@@ -529,7 +594,7 @@ describe('verifyCandidate artifact and process boundaries', () => {
       },
       decodeResult: (_command, args) => (
         args.includes(SNAPSHOT)
-          ? { status: 0, stdout: '', stderr: '' }
+          ? { status: 0, stdout: progressReport(3), stderr: '' }
           : { status: 9, stdout: '', stderr: 'mutable original was decoded' }
       )
     });

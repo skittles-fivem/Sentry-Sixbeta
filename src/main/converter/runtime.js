@@ -9,7 +9,7 @@ const { createJobStore } = require('./jobStore');
 const { createFilesystemTransactionAdapters } = require('./filesystemTransactions');
 const { scanTeslaFootage } = require('./scanner');
 const { runConverterBenchmark } = require('./benchmark');
-const { createEncoderPlanner } = require('./encoderPlanner');
+const { createEncoderPlanner, decodeAccelArgs } = require('./encoderPlanner');
 const { extractH264TelemetryTimeline } = require('./telemetryTimeline');
 const { createConverterAdapters } = require('./converterAdapters');
 const { createVerificationSnapshot } = require('./verificationSnapshot');
@@ -25,6 +25,7 @@ const ACTIVE_RECOVERY_STATES = new Set([
   'discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry',
   'verifying', 'copying', 'replacing', 'paused', 'paused_network'
 ]);
+const STAGING_CHUNK_BYTES = 16 * 1024 * 1024;
 const SNAPSHOT_DIRECTORY_PREFIX = 'sentry-six-verification-';
 const MAX_MEDIA_PROCESS_MS = 12 * 60 * 60 * 1000;
 const RETRYABLE_PATH_CODES = new Set([
@@ -476,6 +477,12 @@ async function createConverterRuntime(options = {}) {
   const stagingOptions = {
     // One staged source and one encode output per parallel conversion.
     maxActiveLeases: CONCURRENCY.max,
+    // Every copied chunk is journaled into the job manifest (twice) so a crash
+    // can always prove what it owns. On a large job one manifest save costs
+    // ~0.1 s, so 1 MiB chunks spent ~15 s per clip on bookkeeping; 16 MiB
+    // chunks keep the same guarantees with 16x fewer saves and far fewer
+    // network round trips on SMB sources and destinations.
+    chunkSize: STAGING_CHUNK_BYTES,
     fs: fileSystem,
     pathApi,
     platform,
@@ -554,6 +561,8 @@ async function createConverterRuntime(options = {}) {
     verifier: adapters.verifier,
     spawnProcess,
     ffmpegPath: options.ffmpegPath,
+    // Decode on the encoder's GPU (falls back to CPU decoding automatically).
+    decodeAccel: options.gpuDecode === false ? undefined : (encoder) => decodeAccelArgs(encoder, { platform }),
     pathApi,
     network,
     classifyPath: (target) => classifyPath(target, { pathApi, platform, volumeInfo }),

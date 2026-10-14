@@ -74,7 +74,7 @@ describe('real converter writer and verifier adapters', () => {
         streams: [{
           index: 0, codec_type: 'video', codec_name: 'hevc', codec_tag_string: 'hvc1',
           width: 1920, height: 1080,
-          duration: '0.033333', nb_frames: '1', nb_read_frames: '1',
+          duration: '0.033333', nb_frames: '1', nb_read_packets: '1',
           avg_frame_rate: '30/1', r_frame_rate: '30/1'
         }],
         format: { duration: '0.033333' }
@@ -85,7 +85,7 @@ describe('real converter writer and verifier adapters', () => {
     }));
     const decode = jest.fn(async (_command, _args, options) => {
       expect(options.signal).toBe(signal);
-      return { status: 0, stdout: '', stderr: '' };
+      return { status: 0, stdout: 'frame=1\nprogress=end\n', stderr: '' };
     });
     const adapters = createConverterAdapters({
       fs: fs.promises,
