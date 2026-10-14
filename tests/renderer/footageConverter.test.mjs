@@ -397,6 +397,46 @@ test('routes pause, resume, cancel, and retry to the restored job', async () => 
   ]);
 });
 
+test('offers to set a job aside when it cannot be cancelled, then clears it', async () => {
+  const elements = makeElements();
+  const api = fakeApi({ current: activeSnapshot({ state: 'paused' }) });
+  api.cancelConverter = async (id) => { api.calls.push(['cancel', id]); return { ok: false, error: { code: 'INVALID_MANIFEST' } }; };
+  api.discardConverterJob = async (id) => { api.calls.push(['discard', id]); return { ok: true, value: null }; };
+  const confirmations = [];
+  const notices = [];
+  const controller = createFootageConverterController({
+    api, elements,
+    confirm: (text) => { confirmations.push(text); return true; },
+    notify: (text) => notices.push(text)
+  });
+  await controller.init();
+
+  await elements.cancelButton.click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(api.calls.filter(([name]) => ['cancel', 'discard'].includes(name)), [['cancel', 'job-1'], ['discard', 'job-1']]);
+  assert.equal(confirmations.length, 2);
+  assert.match(confirmations[1], /set it aside/i);
+  assert.equal(controller.snapshot, null);
+  assert.match(notices.at(-1), /set aside/i);
+});
+
+test('keeps the job when the person declines to set it aside', async () => {
+  const elements = makeElements();
+  const api = fakeApi({ current: activeSnapshot({ state: 'paused' }) });
+  api.cancelConverter = async () => ({ ok: false, error: { code: 'INVALID_MANIFEST' } });
+  api.discardConverterJob = async (id) => { api.calls.push(['discard', id]); return { ok: true, value: null }; };
+  let asked = 0;
+  const controller = createFootageConverterController({ api, elements, confirm: () => { asked += 1; return asked === 1; } });
+  await controller.init();
+
+  await elements.cancelButton.click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(api.calls.some(([name]) => name === 'discard'), false);
+  assert.equal(controller.snapshot.id, 'job-1');
+});
+
 test('starts a new revision-zero job after a completed job with a higher revision', async () => {
   const elements = makeElements();
   const previous = activeSnapshot({ state: 'completed', revision: 42, summary: null });

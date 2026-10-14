@@ -1049,7 +1049,9 @@ function createFootageConverterController(options = {}) {
             GROUP_REQUIRED: ['errorGroupRequired', 'Select at least one Tesla clip group.'],
             REPLACEMENT_CONFIRMATION_REQUIRED: ['errorReplacementConfirmation', 'Acknowledge and confirm replacement before starting.'],
             REPLACEMENT_UNAVAILABLE: ['errorReplacementUnavailable', 'Replace originals is not available on this system.'],
-            AUTO_WINDOW_INVALID: ['errorAutoWindow', 'Choose different start and end hours for the time window.']
+            AUTO_WINDOW_INVALID: ['errorAutoWindow', 'Choose different start and end hours for the time window.'],
+            RECOVERY_REQUIRED: ['errorRecoveryRequired', 'This job stopped in the middle of replacing an original. Resume it to finish safely.'],
+            INVALID_MANIFEST: ['errorInvalidManifest', "This job's saved record couldn't be updated. Use Cancel to set it aside."]
         };
         return labels[error?.code]
             ? message(...labels[error.code])
@@ -1096,6 +1098,36 @@ function createFootageConverterController(options = {}) {
         }
     }
 
+    // Cancel, and if the job cannot be ended normally (for example it was left
+    // half-saved by a crash or its record can't be read), offer to set it aside
+    // so the converter is usable again without touching any folders by hand.
+    async function cancelJob() {
+        if (!snapshot?.id || typeof api.cancelConverter !== 'function') return;
+        if (!confirmAction(message('cancelConfirm', 'Cancel this conversion job after owned temporary files are reconciled?'))) return;
+        const jobId = snapshot.id;
+        try {
+            const next = unwrap(await api.cancelConverter(jobId));
+            if (next) applySnapshot(next, next.revision);
+            return;
+        } catch (error) {
+            if (typeof api.discardConverterJob !== 'function') {
+                notify(describeError(error), { type: 'error' });
+                return;
+            }
+        }
+        if (!confirmAction(message('discardConfirm', "This job can't be ended normally. Set it aside so you can start fresh? Files already converted are kept."))) return;
+        try {
+            const current = unwrap(await api.discardConverterJob(jobId));
+            snapshot = null;
+            latestRevision = -1;
+            if (current) applySnapshot(current, current.revision);
+            else render();
+            notify(message('discarded', 'The job was set aside. Files already converted were kept.'), { type: 'info' });
+        } catch (error) {
+            notify(describeError(error), { type: 'error' });
+        }
+    }
+
     function bind() {
         elements.sourceButton?.addEventListener('click', () => chooseFolder('source'));
         elements.destinationButton?.addEventListener('click', () => chooseFolder('destination'));
@@ -1128,9 +1160,7 @@ function createFootageConverterController(options = {}) {
         elements.startButton?.addEventListener('click', start);
         elements.pauseButton?.addEventListener('click', () => command('pauseConverter'));
         elements.resumeButton?.addEventListener('click', () => command('resumeConverter'));
-        elements.cancelButton?.addEventListener('click', () => command('cancelConverter', {
-            confirmMessage: message('cancelConfirm', 'Cancel this conversion job after owned temporary files are reconciled?')
-        }));
+        elements.cancelButton?.addEventListener('click', () => { void cancelJob(); });
         elements.retryButton?.addEventListener('click', () => command('retryFailedConverter'));
         elements.dismissButton?.addEventListener('click', () => command('dismissConverterSummary'));
         if (elements.autoStart && !elements.autoStart.value) elements.autoStart.value = '1';

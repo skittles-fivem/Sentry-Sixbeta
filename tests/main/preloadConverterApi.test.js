@@ -25,6 +25,7 @@ describe('converter preload API', () => {
     await api.pauseConverter('job-1');
     await api.resumeConverter('job-1');
     await api.cancelConverter('job-1');
+    await api.discardConverterJob('job-1');
     await api.retryFailedConverter('job-1');
     await api.dismissConverterSummary('job-1');
     await api.getConverterCapabilities();
@@ -36,6 +37,7 @@ describe('converter preload API', () => {
       ['converter:pause', { jobId: 'job-1' }],
       ['converter:resume', { jobId: 'job-1' }],
       ['converter:cancel', { jobId: 'job-1' }],
+      ['converter:discard', { jobId: 'job-1' }],
       ['converter:retryFailed', { jobId: 'job-1' }],
       ['converter:dismissSummary', { jobId: 'job-1' }],
       ['converter:getCapabilities']

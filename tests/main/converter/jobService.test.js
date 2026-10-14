@@ -1485,6 +1485,72 @@ describe('converter job orchestration', () => {
     });
   });
 
+  describe('a save interrupted by a crash (separate destination)', () => {
+    async function interruptedJob(label, extraItem = {}) {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), `sentry-six-interrupted-${label}-`));
+      temporaryRoots.push(root);
+      const store = createJobStore({ rootDir: root, fs: fs.promises });
+      const counters = emptyCounters();
+      counters.files = 1;
+      counters.sourceVideoBytes = 1000000;
+      counters.outputVideoBytes = 800000;
+      counters.savedBytes = 200000;
+      counters.groups.RecentClips = { files: 1, sourceBytes: 1000000, outputBytes: 800000, savedBytes: 200000 };
+      await store.create({
+        id: `interrupted-${label}`, config: { ...CONFIG, concurrency: 2 }, state: 'paused', discoveryComplete: true,
+        activeItemId: 'item-000001', counters, summary: null,
+        recovery: { fromState: 'copying', action: 'manual-intervention' },
+        items: [
+          { ...video('saving'), id: 'item-000001', state: 'processing', attempts: 1, eligibleVideo: true, ...extraItem },
+          { ...video('encoding'), id: 'item-000002', state: 'processing', attempts: 1, eligibleVideo: true },
+          { ...video('waiting'), id: 'item-000003', state: 'queued' },
+          { ...video('done'), id: 'item-000004', state: 'completed', attempts: 1, eligibleVideo: true,
+            outputPath: 'E:\\ConvertedTeslaCam\\RecentClips\\done.mp4', outputBytes: 800000, resultCode: 'converted' }
+        ]
+      });
+      return store;
+    }
+
+    test('Cancel ends the job (it used to do nothing, leaving it stuck "running")', async () => {
+      const store = await interruptedJob('cancel');
+      const h = harness({ store, items: [] });
+      const cancelled = await h.service.cancel('interrupted-cancel');
+      expect(cancelled.state).toBe('cancelled');
+      expect(cancelled.items.map((item) => item.state)).toEqual(['cancelled', 'cancelled', 'cancelled', 'completed']);
+      const saved = await store.load('interrupted-cancel');
+      expect(saved).toMatchObject({ state: 'cancelled' });
+      expect(saved.recovery).toBeUndefined();
+      expect(h.spawnProcess).not.toHaveBeenCalled();
+    });
+
+    test('Resume converts the interrupted clips again (it used to answer RECOVERY_REQUIRED)', async () => {
+      const store = await interruptedJob('resume');
+      const h = harness({ store, items: [] });
+      await h.service.resume('interrupted-resume');
+      const job = await h.service.whenIdle('interrupted-resume');
+      expect(job.state).toBe('completed');
+      expect(job.items.map((item) => item.state)).toEqual(['completed', 'completed', 'completed', 'completed']);
+      expect(h.spawnProcess).toHaveBeenCalledTimes(3);
+    });
+
+    test('leftover working files are removed; one that cannot be is recorded and the job still cancels', async () => {
+      const pendingPaths = { destinationPartial: 'E:\\ConvertedTeslaCam\\RecentClips\\.saving.partial.mp4' };
+      const cleanupOwnedArtifacts = jest.fn(async () => ({ cleaned: false, cleanupPending: ['destinationPartial'] }));
+      const h = harness({ items: [], stagingManager: { cleanupOwnedArtifacts } });
+      const created = await h.store.create({
+        id: 'interrupted-owned', config: CONFIG, state: 'paused', discoveryComplete: true, activeItemId: 'item-000001',
+        counters: emptyCounters(), summary: null, recovery: { fromState: 'copying', action: 'manual-intervention' },
+        ownedPaths: pendingPaths, ownedArtifacts: { destinationPartial: { path: pendingPaths.destinationPartial } },
+        items: [{ ...video('saving'), id: 'item-000001', state: 'processing', attempts: 1,
+          ownedPaths: pendingPaths, ownedArtifacts: { destinationPartial: { path: pendingPaths.destinationPartial } } }]
+      });
+      const cancelled = await h.service.cancel(created.id);
+      expect(cleanupOwnedArtifacts).toHaveBeenCalledWith(expect.objectContaining({ ownedPaths: pendingPaths }));
+      expect(cancelled.state).toBe('cancelled');
+      expect(cancelled.items[0]).toMatchObject({ state: 'failed', resultCode: 'cleanup-pending', failure: { code: 'interrupted' } });
+    });
+  });
+
   test.each(['shutdown', 'cancel'])(
     '%s aborts and awaits blocked real-store recovery inspection without resuming work',
     async (command) => {

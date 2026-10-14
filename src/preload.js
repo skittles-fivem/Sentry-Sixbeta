@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   pauseConverter: (jobId) => ipcRenderer.invoke('converter:pause', { jobId }),
   resumeConverter: (jobId) => ipcRenderer.invoke('converter:resume', { jobId }),
   cancelConverter: (jobId) => ipcRenderer.invoke('converter:cancel', { jobId }),
+  discardConverterJob: (jobId) => ipcRenderer.invoke('converter:discard', { jobId }),
   retryFailedConverter: (jobId) => ipcRenderer.invoke('converter:retryFailed', { jobId }),
   dismissConverterSummary: (jobId) => ipcRenderer.invoke('converter:dismissSummary', { jobId }),
   getConverterCapabilities: () => ipcRenderer.invoke('converter:getCapabilities'),

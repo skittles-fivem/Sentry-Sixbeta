@@ -1585,6 +1585,7 @@ function createConverterJobService(deps) {
   async function resume(id) {
     const runtime = await ensureRuntime(id);
     if (runtime.manifest.state !== 'paused' && !runtime.pauseRequested) throw serviceError('JOB_NOT_PAUSED');
+    await releaseInterruptedSave(runtime);
     if (runtime.manifest.activeItemId && runtime.manifest.recovery) throw serviceError('RECOVERY_REQUIRED');
     runtime.pauseRequested = false;
     runtime.pausePersisted = false;
@@ -1626,9 +1627,51 @@ function createConverterJobService(deps) {
     }
   }
 
+  // A job stopped while saving a clip (the computer crashed, lost power or
+  // was shut down mid-save) waits for a decision before it continues: its
+  // workers show as busy, Resume answered RECOVERY_REQUIRED and Cancel did
+  // nothing, so the job could not be ended from the app. With a separate
+  // destination no original is at risk: the interrupted clips' leftover
+  // working files are removed (a record is kept of any that cannot be) and
+  // the clips go back in the queue, so Resume converts them again and Cancel
+  // cancels them. Replacing originals keeps its stricter recovery.
+  async function releaseInterruptedSave(runtime) {
+    const recovery = runtime.manifest.recovery;
+    if (recovery?.action !== 'manual-intervention' || recovery.fromState === 'replacing'
+        || runtime.manifest.config.outputMode === 'replace' || runtime.runPromise) return false;
+    const interrupted = runtime.manifest.items.filter((item) => item.state === 'processing');
+    if (interrupted.some((item) => item.ownedPaths?.replacementBackup)) return false;
+    const pending = new Set();
+    for (const item of interrupted) {
+      if (Object.keys(item.ownedPaths || {}).length === 0) continue;
+      if (!await reconcileItemOwnership(runtime, item.id, ownershipOf(item))) pending.add(item.id);
+    }
+    await update(runtime, (current) => ({
+      state: 'paused', activeItemId: null, recovery: null, replacementPhase: null,
+      ownedPaths: {}, ownedArtifacts: {}, publicationArtifact: null, failure: null,
+      items: current.items.map((entry) => {
+        if (entry.state !== 'processing') return entry;
+        return pending.has(entry.id)
+          ? mergeItem(entry, { state: 'failed', resultCode: 'cleanup-pending', failure: { code: 'interrupted', retryable: false } })
+          : mergeItem(entry, { state: 'queued', failure: undefined, resultCode: undefined });
+      })
+    }));
+    for (const item of interrupted) {
+      if (!pending.has(item.id)) setOwnership(runtime, item.id, null);
+    }
+    emit(runtime, 'interrupted_save_released', { pending: pending.size });
+    return true;
+  }
+
   async function cancel(id) {
     const runtime = await ensureRuntime(id);
     if (runtime.manifest.recovery?.fromState === 'replacing') await resolveReplacementBeforeCancel(runtime, id);
+    await releaseInterruptedSave(runtime);
+    // Still waiting on a decision (an original may be at risk): say so instead
+    // of returning as if the job had been cancelled.
+    if (runtime.manifest.recovery?.action === 'manual-intervention' && !runtime.runPromise) {
+      throw serviceError('RECOVERY_REQUIRED');
+    }
     if (runtime.manifest.state === 'cancelled') return publicSnapshot(runtime.manifest);
     runtime.cancelRequested = true;
     runtime.abortController.abort();
@@ -1638,6 +1681,31 @@ function createConverterJobService(deps) {
     if (runtime.runPromise) await runtime.runPromise;
     else await finalize(runtime);
     return publicSnapshot(runtime.manifest);
+  }
+
+  // Last resort for a job that cannot be ended normally (Cancel failed):
+  // stop anything it is running and set it aside so the converter is free
+  // again. Converted files and the clips themselves are kept; the job file is
+  // renamed rather than deleted.
+  async function discard(id) {
+    const runtime = jobs.get(id);
+    if (runtime) {
+      runtime.cancelRequested = true;
+      runtime.abortController.abort();
+      runtime.queue?.close?.();
+      for (const resolve of runtime.pauseWaiters.splice(0)) resolve();
+      terminateChildren(runtime);
+      if (runtime.runPromise) {
+        await Promise.race([runtime.runPromise.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 30_000).unref?.())]);
+      }
+      jobs.delete(id);
+    }
+    if (typeof store.discard !== 'function') throw serviceError('OPERATION_FAILED');
+    await store.discard(id);
+    for (const listener of listeners) {
+      try { listener(deepFreeze({ type: 'discarded', jobId: id })); } catch (_) { /* observers are advisory */ }
+    }
+    return { jobId: id, discarded: true };
   }
 
   async function retryFailed(id) {
@@ -2090,6 +2158,7 @@ function createConverterJobService(deps) {
     pause: (...args) => serializeCommand(() => pause(...args)),
     resume: (...args) => serializeCommand(() => resume(...args)),
     cancel: (...args) => serializeCommand(() => cancel(...args)),
+    discard: (...args) => serializeCommand(() => discard(...args)),
     retryFailed: (...args) => serializeCommand(() => retryFailed(...args)),
     dismissSummary,
     recover,

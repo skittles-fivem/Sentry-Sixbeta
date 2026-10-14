@@ -731,6 +731,9 @@ function createJobStore(options) {
 
   const rootDir = path.resolve(options.rootDir);
   const fileSystem = options.fs;
+  const onUnreadable = typeof options.onUnreadable === 'function'
+    ? options.onUnreadable
+    : (id, error) => console.error(`[CONVERTER] Skipped job ${id} that could not be read:`, error?.code || error?.message || error);
   const queues = new Map();
   // The manifest this store last wrote per job, with the identity of the file it
   // wrote. transition() reuses it instead of re-reading, re-parsing and
@@ -1152,10 +1155,38 @@ function createJobStore(options) {
         const manifest = await runExclusive(entry.name, () => readManifest(entry.name));
         if (manifest) manifests.push(manifest);
       } catch (error) {
-        if (!error || error.code !== 'CORRUPT_MANIFEST') throw error;
+        // One job that cannot be read (corrupt, locked, unexpected content)
+        // must not stop every other job and the converter from starting.
+        if (error?.code !== 'CORRUPT_MANIFEST') {
+          try { onUnreadable(entry.name, error); } catch (_) { /* reporting is best effort */ }
+        }
       }
     }
     return manifests;
+  }
+
+  // Sets a job aside so it is no longer loaded: its job file is renamed (kept
+  // for diagnosis, never deleted) and its journal removed. Converted files
+  // and the clips themselves are not touched. Used when a job cannot be
+  // ended normally, so nobody has to remove it by hand.
+  async function discard(id) {
+    assertSafeJobId(id);
+    return runExclusive(id, async () => {
+      const paths = await openExistingJobDirectory(id);
+      if (!paths) return false;
+      lastWritten.delete(id);
+      const aside = path.join(paths.directory, `${MANIFEST_NAME}.set-aside-${Date.now().toString(36)}`);
+      try {
+        await fileSystem.rename(paths.manifest, aside);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw storeError('MANIFEST_WRITE_FAILED');
+      }
+      for (const leftover of [paths.journal, paths.temporary]) {
+        await fileSystem.unlink(leftover).catch(() => {});
+      }
+      await syncDirectory(paths.directory).catch(() => {});
+      return true;
+    });
   }
 
   async function rememberWritten(id, paths, manifest, journal) {
@@ -1336,7 +1367,7 @@ function createJobStore(options) {
     });
   }
 
-  return Object.freeze({ create, save, load, list, transition, recover });
+  return Object.freeze({ create, save, load, list, transition, recover, discard });
 }
 
 module.exports = {

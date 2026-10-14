@@ -13,6 +13,7 @@ const CHANNELS = Object.freeze([
   'converter:pause',
   'converter:resume',
   'converter:cancel',
+  'converter:discard',
   'converter:retryFailed',
   'converter:dismissSummary',
   'converter:getCapabilities',
@@ -443,6 +444,12 @@ function registerConverterIpc(options = {}) {
     'converter:pause': wrapped(async (_event, payload) => sanitizeSnapshot(await options.service.pause(validateJobId(payload)))),
     'converter:resume': wrapped(async (_event, payload) => sanitizeSnapshot(await options.service.resume(validateJobId(payload)))),
     'converter:cancel': wrapped(async (_event, payload) => sanitizeSnapshot(await options.service.cancel(validateJobId(payload)))),
+    // Sets aside a job that cannot be cancelled; answers with the job now current (or null).
+    'converter:discard': wrapped(async (_event, payload) => {
+      if (typeof options.service.discard !== 'function') fail('OPERATION_FAILED');
+      await options.service.discard(validateJobId(payload));
+      return chooseCurrent(await options.service.list());
+    }),
     'converter:retryFailed': wrapped(async (_event, payload) => sanitizeSnapshot(await options.service.retryFailed(validateJobId(payload)))),
     'converter:dismissSummary': wrapped(async (_event, payload) => sanitizeSnapshot(await options.service.dismissSummary(validateJobId(payload)))),
     'converter:getCapabilities': wrapped(async (_event, payload) => {

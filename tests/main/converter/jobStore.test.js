@@ -378,6 +378,30 @@ describe('converter job store', () => {
     expect((await store.list()).map((entry) => entry.id)).toEqual(['job-a', 'job-b']);
   });
 
+  test('discard sets a job aside so it no longer lists or loads, keeping its record on disk', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    await store.create({ id: 'job-keep', config: validConfig() });
+    await store.create({ id: 'job-stuck', state: 'paused', config: validConfig() });
+
+    await store.discard('job-stuck');
+
+    expect((await store.list()).map((entry) => entry.id)).toEqual(['job-keep']);
+    await expect(store.load('job-stuck')).resolves.toBeNull();
+    const leftovers = await fs.promises.readdir(path.join(rootDir, 'job-stuck'));
+    expect(leftovers.some((name) => name.startsWith('job.json.set-aside-'))).toBe(true);
+    await store.discard('job-stuck'); // a second set-aside is harmless
+  });
+
+  test('list skips a job whose record cannot be read instead of failing', async () => {
+    const skipped = [];
+    const store = createJobStore({ rootDir, fs: fs.promises, onUnreadable: (id) => skipped.push(id) });
+    await store.create({ id: 'job-good', config: validConfig() });
+    await fs.promises.mkdir(path.join(rootDir, 'job-bad', 'job.json'), { recursive: true });
+
+    expect((await store.list()).map((entry) => entry.id)).toEqual(['job-good']);
+    expect(skipped).toEqual(['job-bad']);
+  });
+
   test.each([
     '../outside',
     '..',

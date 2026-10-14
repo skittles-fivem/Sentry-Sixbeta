@@ -54,6 +54,7 @@ function createService() {
     pause: jest.fn(async (id) => ({ id, state: 'paused', revision: 2 })),
     resume: jest.fn(async (id) => ({ id, state: 'waiting', revision: 3 })),
     cancel: jest.fn(async (id) => ({ id, state: 'cancelled', revision: 4 })),
+    discard: jest.fn(async (id) => ({ jobId: id, discarded: true })),
     retryFailed: jest.fn(async (id) => ({ id, state: 'waiting', revision: 5 })),
     dismissSummary: jest.fn(async (id) => ({ id, state: 'completed', revision: 6, summary: null, summaryDismissed: true })),
     subscribe: jest.fn((next) => {
@@ -126,6 +127,7 @@ describe('converter IPC', () => {
     const h = setup();
     expect([...h.ipcMain.handlers.keys()].sort()).toEqual([
       'converter:cancel',
+      'converter:discard',
       'converter:chooseFolder',
       'converter:dismissSummary',
       'converter:getCapabilities',
@@ -145,7 +147,7 @@ describe('converter IPC', () => {
 
     const again = registerConverterIpc({ ipcMain: h.ipcMain, dialog: h.dialog, service: h.service });
     expect(again).toBe(h.registration);
-    expect(h.ipcMain.handle).toHaveBeenCalledTimes(16);
+    expect(h.ipcMain.handle).toHaveBeenCalledTimes(17);
   });
 
   test('chooses and canonicalizes an absolute directory with a bounded purpose', async () => {
@@ -439,6 +441,7 @@ describe('converter IPC', () => {
     ['converter:pause', 'pause'],
     ['converter:resume', 'resume'],
     ['converter:cancel', 'cancel'],
+    ['converter:discard', 'discard'],
     ['converter:retryFailed', 'retryFailed'],
     ['converter:dismissSummary', 'dismissSummary']
   ])('validates a safe job ID for %s', async (channel, method) => {
@@ -452,6 +455,14 @@ describe('converter IPC', () => {
         ok: false, error: { code: 'INVALID_JOB_ID', retryable: false }
       });
     }
+  });
+
+  test('discard answers with the job that is now current, or null when none is left', async () => {
+    const h = setup();
+    const result = await h.invoke('converter:discard', { jobId: 'job-1' });
+    expect(result).toEqual({ ok: true, value: null });
+    expect(h.service.discard).toHaveBeenCalledWith('job-1');
+    expect(h.service.list).toHaveBeenCalled();
   });
 
   test('returns stable structured service errors without leaking exception text', async () => {
