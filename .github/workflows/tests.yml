@@ -95,7 +95,13 @@ jobs:
       - run: npm ci
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
-      - run: npx jest --ci --reporters=default tests/main/converter/studioTelemetry
+      - name: Studio telemetry tests
+        run: >-
+          npx jest --ci --reporters=default
+          --json --outputFile=jest-results.json tests/main/converter/studioTelemetry
+      - name: List failed telemetry tests
+        if: failure()
+        run: node tests/ci/jestFailures.js jest-results.json "Studio telemetry (informational)" warning
 
   real-ffmpeg:
     name: Real FFmpeg conversions (${{ matrix.os }})
