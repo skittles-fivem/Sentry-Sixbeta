@@ -405,8 +405,12 @@ describeRealEncoders(`real pipeline (${encoderGate.reason || 'required CPU encod
       await assertFullDecode(tools.ffmpegPath, path.join(sourceFolder, name));
     }
     expect((await fs.promises.readdir(sourceFolder)).filter((name) => /^(TEMP-|BACKUP-)/.test(name))).toEqual([]);
-    // Nothing left behind in temp: staged copies and verification snapshots are gone.
-    const leftovers = (await fs.promises.readdir(caseRoot)).filter((name) => name.startsWith('sentry-six-verification-'));
+    // Nothing left behind in temp: staged copies and verification snapshots
+    // are gone (an emptied snapshot folder is swept once it is a minute old).
+    const leftovers = [];
+    for (const name of (await fs.promises.readdir(caseRoot)).filter((entry) => entry.startsWith('sentry-six-verification-'))) {
+      leftovers.push(...(await fs.promises.readdir(path.join(caseRoot, name))).map((file) => `${name}/${file}`));
+    }
     expect(leftovers).toEqual([]);
     await runtime.shutdown();
     // The persisted job (job.json + journal) reloads in a fresh store.
