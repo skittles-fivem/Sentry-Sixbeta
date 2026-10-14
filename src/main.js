@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -58,6 +58,7 @@ const { registerConverterIpc } = require('./main/converter/ipc');
 const { createConverterLifecycle, createConverterRuntime, startConverterWithRecoveryPrompt } = require('./main/converter/runtime');
 const { calculateMinimapSize, downloadStaticMapBackground, preRenderMinimap } = require('./main/minimap');
 const { createSentryUsbCache } = require('./main/sentryUsbCache');
+const { createClipThumbnails } = require('./main/clipThumbnails');
 const MapProviders = require('./shared/mapProviders');
 const crypto = require('crypto');
 
@@ -135,6 +136,62 @@ const activeExportPaths = {}; // Track output paths for cleanup on cancel
 const cancelledExports = new Set(); // Track cancelled exports by ID
 let mainWindow = null;
 
+// ============================================
+// AUTOMATIC CONVERSION: background mode
+// ============================================
+// With automatic conversion on and "keep running in the background" checked,
+// closing the window hides it to the tray so scheduled checks keep running.
+// "Start when I sign in" launches straight to the tray.
+const launchedInBackground = process.argv.includes('--background')
+  || (process.platform === 'darwin' && (() => { try { return app.getLoginItemSettings().wasOpenedAsHidden === true; } catch (_) { return false; } })());
+let keepRunningInBackground = false;
+let appQuitting = false;
+let tray = null;
+let autoConvertApi = null;
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) { createWindow(); return; }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function createAppTray() {
+  if (tray) return;
+  try {
+    const icon = nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'Sentry_six.png')).resize({ width: 16, height: 16 });
+    tray = new Tray(icon);
+    tray.setToolTip('Sentry Studio — automatic conversion');
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: 'Open Sentry Studio', click: showMainWindow },
+      { label: 'Check for new clips now', click: () => { void autoConvertApi?.checkNow?.().catch(() => {}); } },
+      { type: 'separator' },
+      { label: 'Quit', click: () => { appQuitting = true; app.quit(); } }
+    ]));
+    tray.on('click', showMainWindow);
+  } catch (error) {
+    console.error('[AUTO] Tray unavailable:', error?.message || error);
+    tray = null;
+  }
+}
+
+let autoSettingsApplied = false;
+function applyAutoConvertAppSettings(settings) {
+  keepRunningInBackground = settings?.enabled === true && settings?.keepRunning === true;
+  if (keepRunningInBackground) createAppTray();
+  else if (tray) { tray.destroy(); tray = null; }
+  try {
+    if (app.isPackaged) {
+      app.setLoginItemSettings({ openAtLogin: settings?.openAtLogin === true, openAsHidden: true, args: ['--background'] });
+    }
+  } catch (_) { /* not supported on this platform */ }
+  // A background launch without background mode still needs a visible window.
+  if (!autoSettingsApplied && launchedInBackground && !keepRunningInBackground) showMainWindow();
+  autoSettingsApplied = true;
+}
+
+app.on('before-quit', () => { appQuitting = true; });
+
 // The converter is composed once in the Electron main process. Its runtime
 // owns the singleton job store, recovery, child processes, and safe shutdown;
 // this file only resolves app paths/tools and connects the IPC boundary.
@@ -155,6 +212,7 @@ const converterLifecycle = createConverterLifecycle({
       fs,
       pathApi: path,
       platform: process.platform,
+      onClipConverted: (outputPath) => getClipThumbnails()?.prewarm(outputPath),
       onError: error => console.error('[CONVERTER] Recovery execution failed:', error?.code || 'RECOVERY_FAILED')
     });
     retainRuntime(runtime);
@@ -165,8 +223,12 @@ const converterLifecycle = createConverterLifecycle({
       dialog,
       service: runtime.service,
       capabilities: runtime.capabilities,
-      benchmark: { run: (request) => runtime.runBenchmark(request), cancel: () => runtime.cancelBenchmark() }
+      benchmark: { run: (request) => runtime.runBenchmark(request), cancel: () => runtime.cancelBenchmark() },
+      auto: runtime.auto
     });
+    autoConvertApi = runtime.auto;
+    applyAutoConvertAppSettings(runtime.auto.get().settings);
+    runtime.auto.subscribe((state) => applyAutoConvertAppSettings(state.settings));
     return runtime;
   },
   onError: (error) => console.error('[CONVERTER] Shutdown failed:', error?.code || 'SHUTDOWN_FAILED')
@@ -222,7 +284,20 @@ function createWindow() {
     },
   });
   mainWindow.once('ready-to-show', () => {
-    if (!mainWindow.isDestroyed()) mainWindow.show();
+    if (mainWindow.isDestroyed()) return;
+    // Started at sign-in for automatic conversion: stay in the tray.
+    if (launchedInBackground && !autoSettingsApplied) {
+      setTimeout(() => { if (!autoSettingsApplied || !keepRunningInBackground) showMainWindow(); }, 15_000);
+      return;
+    }
+    if (launchedInBackground && keepRunningInBackground) return;
+    mainWindow.show();
+  });
+  mainWindow.on('close', (event) => {
+    if (keepRunningInBackground && !appQuitting) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
   });
   mainWindow.setMenuBarVisibility(false);
 
@@ -2845,6 +2920,26 @@ ipcMain.handle('fs:readDir', async (_event, dirPath) => {
     console.error('Error reading directory:', err);
     return [];
   }
+});
+
+// Clip preview filmstrips (made on first preview, or right after conversion).
+let clipThumbnails = null;
+function getClipThumbnails() {
+  if (!clipThumbnails) {
+    const ffmpegPath = findFFmpegPath();
+    const ffprobePath = ffmpegPath ? findFFprobePath(ffmpegPath) : null;
+    if (!ffmpegPath || !ffprobePath) return null;
+    clipThumbnails = createClipThumbnails({
+      directory: path.join(app.getPath('userData'), 'clip-thumbnails'),
+      ffmpegPath, ffprobePath, spawn
+    });
+  }
+  return clipThumbnails;
+}
+
+ipcMain.handle('thumbnails:get', async (_event, filePath) => {
+  if (typeof filePath !== 'string' || filePath.length > 4096) return null;
+  try { return await getClipThumbnails()?.get(filePath) ?? null; } catch (_) { return null; }
 });
 
 // Check if path exists

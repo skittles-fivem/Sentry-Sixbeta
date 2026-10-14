@@ -677,7 +677,7 @@ test('marks converter navigation and disclosure copy for translation and accessi
   assert.equal((html.match(/name="converterCodec"[^>]*data-converter-codec=/g) || []).length, 2);
   const profileSelect = html.match(/<select id="converterProfileSelect"[\s\S]*?<\/select>/)?.[0] || '';
   assert.deepEqual([...profileSelect.matchAll(/<option value="([a-z]+)"/g)].map((match) => match[1]),
-    ['conservative', 'balanced', 'aggressive', 'custom']);
+    ['conservative', 'balanced', 'aggressive', 'custom', 'quality']);
   assert.match(html, /id="converterCustomBitrateRow"[^>]*hidden/);
   assert.doesNotMatch(html, /name="converterNetwork"|ui\.converter\.networkHandling/);
   assert.match(css, /\.converter-segments input:focus-visible \+ span[\s\S]*outline:/);
@@ -994,6 +994,34 @@ test('custom bitrate: a restored custom job shows its bitrate', async () => {
   assert.equal(elements.customBitrateRow.hidden, false);
 });
 
+test('constant quality: the dropdown reveals the level and sends qualityLevel only', async () => {
+  const elements = { ...makeElements(), profileSelect: new FakeElement({ value: 'balanced' }),
+    customBitrate: new FakeElement({ value: '2.5' }), customBitrateRow: new FakeElement(),
+    qualityLevel: new FakeElement({ value: 'balanced' }), qualityRow: new FakeElement() };
+  const api = fakeApi();
+  await createFootageConverterController({ api, elements, storage: memoryStorage() }).init();
+  assert.equal(elements.qualityRow.hidden, true);
+  elements.profileSelect.value = 'quality';
+  await elements.profileSelect.dispatch('change');
+  assert.equal(elements.qualityRow.hidden, false);
+  assert.equal(elements.customBitrateRow.hidden, true);
+  elements.qualityLevel.value = 'small';
+  const config = await startWith(elements, api);
+  assert.equal(config.profileId, 'quality');
+  assert.equal(config.qualityLevel, 'small');
+  assert.equal('bitrateKbps' in config, false);
+});
+
+test('constant quality: a restored job shows its level', async () => {
+  const snapshot = activeSnapshot({ config: { ...activeSnapshot().config, profileId: 'quality', qualityLevel: 'high' } });
+  const elements = { ...makeElements(), profileSelect: new FakeElement({ value: 'balanced' }),
+    qualityLevel: new FakeElement({ value: 'balanced' }), qualityRow: new FakeElement() };
+  await createFootageConverterController({ api: fakeApi({ current: snapshot }), elements, storage: memoryStorage() }).init();
+  assert.equal(elements.profileSelect.value, 'quality');
+  assert.equal(elements.qualityLevel.value, 'high');
+  assert.equal(elements.qualityRow.hidden, false);
+});
+
 function benchmarkElements() {
   const dialog = new FakeElement();
   dialog.open = false;
@@ -1065,4 +1093,89 @@ test('benchmark: explains a refusal while a conversion is running', async () => 
   assert.match(elements.benchmarkStatus.textContent, /current conversion/);
   assert.equal(elements.benchmarkApply.hidden, true);
   assert.equal(elements.benchmarkRun.disabled, false);
+});
+
+function autoElements() {
+  return {
+    ...makeElements(),
+    autoEnabled: new FakeElement(), autoInterval: new FakeElement({ value: '60' }),
+    autoWindowEnabled: new FakeElement(), autoStart: new FakeElement({ value: '1' }), autoEnd: new FakeElement({ value: '6' }),
+    autoKeepRunning: new FakeElement(), autoLogin: new FakeElement(), autoStatus: new FakeElement(), autoCheckNow: new FakeElement()
+  };
+}
+
+function autoApi(initial = { enabled: false, intervalMinutes: 60, window: null, keepRunning: false, openAtLogin: false, config: null }) {
+  const api = fakeApi();
+  let state = { settings: initial, status: { nextCheckAt: null } };
+  api.getConverterAuto = async () => ({ ok: true, value: state });
+  api.setConverterAuto = async (settings) => {
+    api.calls.push(['setAuto', settings]);
+    state = { settings, status: { nextCheckAt: settings.enabled ? Date.UTC(2026, 9, 14, 3, 0) : null } };
+    return { ok: true, value: state };
+  };
+  api.checkConverterAutoNow = async () => { api.calls.push(['checkAuto']); return { ok: true, value: state }; };
+  return api;
+}
+
+test('automatic conversion: turning it on saves the current job settings and schedule', async () => {
+  const elements = autoElements();
+  const api = autoApi();
+  await createFootageConverterController({ api, elements, storage: memoryStorage(), autoPollMs: 0 }).init();
+  assert.equal(elements.autoStatus.textContent, 'Off');
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  elements.destinationPath.value = 'E:\\Converted';
+  elements.autoInterval.value = '180';
+  elements.autoWindowEnabled.checked = true;
+  elements.autoStart.value = '23';
+  elements.autoEnd.value = '5';
+  elements.autoKeepRunning.checked = true;
+  elements.autoEnabled.checked = true;
+  await elements.autoEnabled.dispatch('change');
+  const saved = api.calls.find(([name]) => name === 'setAuto')[1];
+  assert.equal(saved.enabled, true);
+  assert.equal(saved.intervalMinutes, 180);
+  assert.deepEqual(saved.window, { startHour: 23, endHour: 5 });
+  assert.equal(saved.keepRunning, true);
+  assert.equal(saved.config.sourceRoot, 'D:\\TeslaCam');
+  assert.equal(saved.config.destinationRoot, 'E:\\Converted');
+  assert.match(elements.autoStatus.textContent, /Next check/);
+  assert.equal(elements.autoCheckNow.disabled, false);
+});
+
+test('automatic conversion: cannot be turned on without a source folder', async () => {
+  const elements = autoElements();
+  const api = autoApi();
+  const notices = [];
+  await createFootageConverterController({ api, elements, storage: memoryStorage(), autoPollMs: 0, notify: (text) => notices.push(text) }).init();
+  elements.autoEnabled.checked = true;
+  await elements.autoEnabled.dispatch('change');
+  assert.equal(api.calls.some(([name]) => name === 'setAuto'), false);
+  assert.match(notices.at(-1) || '', /source folder/i);
+  assert.equal(elements.autoEnabled.checked, false);
+});
+
+test('automatic conversion: shows the saved schedule and a new automatic job replaces a finished one', async () => {
+  const elements = autoElements();
+  const finished = activeSnapshot({ id: 'job-old', state: 'completed', revision: 50 });
+  const api = autoApi({ enabled: true, intervalMinutes: 360, window: { startHour: 2, endHour: 4 }, keepRunning: false, openAtLogin: true, config: {} });
+  api.getCurrentConverterJob = async () => ({ ok: true, value: finished });
+  const controller = createFootageConverterController({ api, elements, storage: memoryStorage(), autoPollMs: 0 });
+  await controller.init();
+  assert.equal(elements.autoEnabled.checked, true);
+  assert.equal(elements.autoInterval.value, '360');
+  assert.equal(elements.autoWindowEnabled.checked, true);
+  assert.equal(elements.autoStart.value, '2');
+  assert.equal(elements.autoLogin.checked, true);
+  api.emit({ jobId: 'job-auto', revision: 3, snapshot: activeSnapshot({ id: 'job-auto', state: 'encoding', revision: 3 }) });
+  assert.equal(controller.snapshot.id, 'job-auto');
+});
+
+test('a different job never replaces one that is still running', async () => {
+  const elements = autoElements();
+  const api = autoApi();
+  api.getCurrentConverterJob = async () => ({ ok: true, value: activeSnapshot({ id: 'job-live', state: 'encoding', revision: 10 }) });
+  const controller = createFootageConverterController({ api, elements, storage: memoryStorage(), autoPollMs: 0 });
+  await controller.init();
+  api.emit({ jobId: 'job-other', revision: 1, snapshot: activeSnapshot({ id: 'job-other', state: 'encoding', revision: 1 }) });
+  assert.equal(controller.snapshot.id, 'job-live');
 });

@@ -2,7 +2,9 @@
 
 const nodeFs = require('fs');
 const nodePath = require('path');
-const { isValidConcurrency, isValidCustomBitrate } = require('./contracts');
+const { isValidConcurrency, isValidCustomBitrate, isValidQualityLevel } = require('./contracts');
+
+const PROFILE_IDS = Object.freeze(['conservative', 'balanced', 'aggressive', 'custom', 'quality']);
 
 const CHANNELS = Object.freeze([
   'converter:chooseFolder',
@@ -17,8 +19,12 @@ const CHANNELS = Object.freeze([
   'converter:subscribeProgress',
   'converter:unsubscribeProgress',
   'converter:runBenchmark',
-  'converter:cancelBenchmark'
+  'converter:cancelBenchmark',
+  'converter:getAuto',
+  'converter:setAuto',
+  'converter:checkAutoNow'
 ]);
+const AUTO_INTERVALS = new Set([15, 30, 60, 180, 360, 720, 1440]);
 const GROUPS = new Set(['RecentClips', 'SavedClips', 'SentryClips']);
 const ACTIVE_STATES = new Set([
   'discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry',
@@ -52,7 +58,11 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-function boundedJsonValue(value, byteLimit, { stripPrivate = false } = {}) {
+// Requests from the window accept whole numbers only. Data sent to the window
+// (job snapshots, benchmark and automatic-conversion status) may carry normal
+// finite numbers: file modification times have sub-millisecond fractions, and
+// rejecting them silently froze the converter's live view.
+function boundedJsonValue(value, byteLimit, { stripPrivate = false, finiteNumbers = false } = {}) {
   const seen = new Set();
   let nodes = 0;
   let stringUnits = 0;
@@ -62,7 +72,7 @@ function boundedJsonValue(value, byteLimit, { stripPrivate = false } = {}) {
     if (stripPrivate && PRIVATE_SNAPSHOT_KEY.test(key)) return undefined;
     if (input === null || typeof input === 'boolean') return input;
     if (typeof input === 'number') {
-      if (!Number.isFinite(input) || !Number.isSafeInteger(input)) fail('INVALID_REQUEST');
+      if (!Number.isFinite(input) || (!finiteNumbers && !Number.isSafeInteger(input))) fail('INVALID_REQUEST');
       return input;
     }
     if (typeof input === 'string') {
@@ -108,7 +118,7 @@ function validatePayload(payload) {
 function sanitizeSnapshot(snapshot) {
   if (!isPlainObject(snapshot)) fail('INVALID_SNAPSHOT');
   if (!Array.isArray(snapshot.items) || snapshot.items.length <= 256) {
-    return boundedJsonValue(snapshot, MAX_SNAPSHOT_BYTES, { stripPrivate: true });
+    return boundedJsonValue(snapshot, MAX_SNAPSHOT_BYTES, { stripPrivate: true, finiteNumbers: true });
   }
   const descriptors = Object.getOwnPropertyDescriptors(snapshot);
   if (Object.values(descriptors).some((descriptor) => !Object.prototype.hasOwnProperty.call(descriptor, 'value'))) {
@@ -143,7 +153,7 @@ function sanitizeSnapshot(snapshot) {
     prepared.cleanupPendingCount = cleanupPendingCount;
     prepared.itemsTruncated = true;
     try {
-      return boundedJsonValue(prepared, MAX_SNAPSHOT_BYTES, { stripPrivate: true });
+      return boundedJsonValue(prepared, MAX_SNAPSHOT_BYTES, { stripPrivate: true, finiteNumbers: true });
     } catch (error) {
       if (error?.code !== 'PAYLOAD_TOO_LARGE' || limit === 1) throw error;
       limit = Math.max(1, Math.floor(limit / 2));
@@ -276,14 +286,17 @@ async function validateStartConfig(payload, dependencies, capabilities) {
   const hasGroupOrder = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'groupOrder');
   const hasConcurrency = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'concurrency');
   const hasBitrate = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'bitrateKbps');
+  const hasQuality = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'qualityLevel');
   const expectedKeys = [...keys, ...(hasGroupOrder ? ['groupOrder'] : []), ...(hasConcurrency ? ['concurrency'] : []),
-    ...(hasBitrate ? ['bitrateKbps'] : [])];
+    ...(hasBitrate ? ['bitrateKbps'] : []), ...(hasQuality ? ['qualityLevel'] : [])];
   if (!exactKeys(payload, expectedKeys)) fail('INVALID_REQUEST');
   // Custom profile: an explicit bitrate is required; size profiles take none.
   if (payload.profileId === 'custom' ? !isValidCustomBitrate(payload.bitrateKbps) : hasBitrate) fail('INVALID_BITRATE');
+  // Constant quality: a named level is required; other profiles take none.
+  if (payload.profileId === 'quality' ? !isValidQualityLevel(payload.qualityLevel) : hasQuality) fail('INVALID_QUALITY');
   if (hasConcurrency && !isValidConcurrency(payload.concurrency)) fail('INVALID_CONCURRENCY');
   if (!['h265', 'av1'].includes(payload.codec)) fail('INVALID_CODEC');
-  if (!['conservative', 'balanced', 'aggressive', 'custom'].includes(payload.profileId)) fail('INVALID_PROFILE');
+  if (!PROFILE_IDS.includes(payload.profileId)) fail('INVALID_PROFILE');
   if (!['auto', 'staging', 'direct'].includes(payload.networkMode)) fail('INVALID_NETWORK_MODE');
   if (!['separate', 'replace'].includes(payload.outputMode)) fail('INVALID_OUTPUT_MODE');
   if (!Array.isArray(payload.includedGroups) || payload.includedGroups.length === 0
@@ -353,6 +366,7 @@ function registerConverterIpc(options = {}) {
   const capabilities = validateCapabilities(options.capabilities);
   const senders = new Map();
   let unregistered = false;
+  let droppedUpdateLogged = false;
 
   function removeSender(sender, options = {}) {
     const registration = senders.get(sender);
@@ -388,7 +402,12 @@ function registerConverterIpc(options = {}) {
         ? sanitizeSnapshot(event.snapshot)
         : { id: event.jobId, revision: event.revision, progress: sanitizeLiveProgress(event.progress) };
       payload = { jobId: event.jobId, revision: event.revision, snapshot };
-    } catch (_error) {
+    } catch (error) {
+      // Never drop live updates silently: one bad value used to freeze the view.
+      if (!droppedUpdateLogged) {
+        droppedUpdateLogged = true;
+        console.warn('[CONVERTER] A live update could not be sent to the window:', error?.code || 'UNKNOWN');
+      }
       return;
     }
     for (const sender of [...senders.keys()]) {
@@ -439,12 +458,15 @@ function registerConverterIpc(options = {}) {
     'converter:runBenchmark': wrapped(async (event, payload) => {
       if (typeof options.benchmark?.run !== 'function') fail('BENCHMARK_UNAVAILABLE');
       if (!isPlainObject(payload) || Object.keys(payload)
-        .some((key) => !['codec', 'sourceRoot', 'profileId', 'bitrateKbps'].includes(key))) fail('INVALID_REQUEST');
+        .some((key) => !['codec', 'sourceRoot', 'profileId', 'bitrateKbps', 'qualityLevel'].includes(key))) fail('INVALID_REQUEST');
       if (!['h265', 'av1'].includes(payload.codec)) fail('INVALID_CODEC');
       const profileId = payload.profileId ?? 'balanced';
-      if (!['conservative', 'balanced', 'aggressive', 'custom'].includes(profileId)) fail('INVALID_PROFILE');
+      if (!PROFILE_IDS.includes(profileId)) fail('INVALID_PROFILE');
       if (profileId === 'custom' ? !isValidCustomBitrate(payload.bitrateKbps) : payload.bitrateKbps !== undefined) {
         fail('INVALID_BITRATE');
+      }
+      if (profileId === 'quality' ? !isValidQualityLevel(payload.qualityLevel) : payload.qualityLevel !== undefined) {
+        fail('INVALID_QUALITY');
       }
       const sourceRoot = payload.sourceRoot === undefined || payload.sourceRoot === null
         ? null : (await canonicalDirectory(payload.sourceRoot, dependencies)).real;
@@ -453,11 +475,12 @@ function registerConverterIpc(options = {}) {
         codec: payload.codec,
         profileId,
         ...(profileId === 'custom' ? { bitrateKbps: payload.bitrateKbps } : {}),
+        ...(profileId === 'quality' ? { qualityLevel: payload.qualityLevel } : {}),
         sourceRoot,
         onProgress: (progress) => {
           try {
             if (sender && !(typeof sender.isDestroyed === 'function' && sender.isDestroyed())) {
-              sender.send('converter:benchmarkProgress', boundedJsonValue(progress, MAX_PAYLOAD_BYTES));
+              sender.send('converter:benchmarkProgress', boundedJsonValue(progress, MAX_PAYLOAD_BYTES, { finiteNumbers: true }));
             }
           } catch (_error) { /* progress is best effort */ }
         }
@@ -467,6 +490,40 @@ function registerConverterIpc(options = {}) {
       validateNoPayload(payload);
       options.benchmark?.cancel?.();
       return null;
+    }),
+    'converter:getAuto': wrapped(async (_event, payload) => {
+      validateNoPayload(payload);
+      if (typeof options.auto?.get !== 'function') fail('AUTO_UNAVAILABLE');
+      return boundedJsonValue(options.auto.get(), MAX_PAYLOAD_BYTES, { finiteNumbers: true });
+    }),
+    'converter:setAuto': wrapped(async (_event, payload) => {
+      if (typeof options.auto?.configure !== 'function') fail('AUTO_UNAVAILABLE');
+      if (!isPlainObject(payload) || Object.keys(payload)
+        .some((key) => !['enabled', 'intervalMinutes', 'window', 'keepRunning', 'openAtLogin', 'config'].includes(key))) {
+        fail('INVALID_REQUEST');
+      }
+      if (typeof payload.enabled !== 'boolean' || !AUTO_INTERVALS.has(payload.intervalMinutes)
+          || typeof payload.keepRunning !== 'boolean' || typeof payload.openAtLogin !== 'boolean') fail('INVALID_REQUEST');
+      let window = null;
+      if (payload.window !== null && payload.window !== undefined) {
+        const { startHour, endHour } = isPlainObject(payload.window) ? payload.window : {};
+        if (![startHour, endHour].every((hour) => Number.isSafeInteger(hour) && hour >= 0 && hour <= 23)
+            || startHour === endHour) fail('INVALID_AUTO_WINDOW');
+        window = { startHour, endHour };
+      }
+      // The saved job settings pass the same validation as a manual start.
+      const config = payload.config === undefined || payload.config === null
+        ? null : await validateStartConfig(payload.config, dependencies, capabilities);
+      if (payload.enabled && !config) fail('AUTO_CONFIG_REQUIRED');
+      return boundedJsonValue(await options.auto.configure({
+        enabled: payload.enabled, intervalMinutes: payload.intervalMinutes, window,
+        keepRunning: payload.keepRunning, openAtLogin: payload.openAtLogin, config
+      }), MAX_PAYLOAD_BYTES, { finiteNumbers: true });
+    }),
+    'converter:checkAutoNow': wrapped(async (_event, payload) => {
+      validateNoPayload(payload);
+      if (typeof options.auto?.checkNow !== 'function') fail('AUTO_UNAVAILABLE');
+      return boundedJsonValue(await options.auto.checkNow(), MAX_PAYLOAD_BYTES, { finiteNumbers: true });
     })
   };
 

@@ -987,6 +987,13 @@ describe('verifyCandidate size and valid results', () => {
     expect(testHarness.snapshot.cleanup).toHaveBeenCalledTimes(1);
   });
 
+  test('constant quality needs only real savings, not a profile size target', async () => {
+    const candidateBytes = buildCandidate('h265');
+    const sourceBytes = candidateBytes.length + 2_000;
+    expect((await verifyCandidate(harness({ candidateBytes, sourceBytes, profileId: 'quality' }).options)).ok).toBe(true);
+    expectFailure(await verifyCandidate(harness({ candidateBytes, sourceBytes, profileId: 'balanced' }).options), 'profile-size', true);
+  });
+
   test('returns non-retryable not-smaller when output is larger than source', async () => {
     const candidateBytes = buildCandidate('h265');
     const testHarness = harness({ candidateBytes, sourceBytes: candidateBytes.length - 1 });

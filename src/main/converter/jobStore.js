@@ -2,7 +2,7 @@
 
 const path = require('path');
 const { randomUUID } = require('crypto');
-const { createEmptyCounters, isValidConcurrency, isValidCustomBitrate, TIMING_PHASES } = require('./contracts');
+const { createEmptyCounters, isValidConcurrency, isValidCustomBitrate, isValidQualityLevel, TIMING_PHASES } = require('./contracts');
 
 const MANIFEST_VERSION = 1;
 const MANIFEST_NAME = 'job.json';
@@ -56,7 +56,7 @@ const TOP_FIELDS = new Set([
 ]);
 const CONFIG_FIELDS = new Set([
   'sourceRoot', 'destinationRoot', 'codec', 'profileId', 'networkMode',
-  'outputMode', 'includedGroups', 'groupOrder', 'replacementConfirmed', 'concurrency', 'bitrateKbps'
+  'outputMode', 'includedGroups', 'groupOrder', 'replacementConfirmed', 'concurrency', 'bitrateKbps', 'qualityLevel', 'autoConvert'
 ]);
 const ITEM_FIELDS = new Set([
   'id', 'state', 'kind', 'group', 'eventId', 'relativePath', 'sourcePath',
@@ -473,7 +473,7 @@ function normalizeConfig(value) {
     replacementConfirmed: value.replacementConfirmed
   };
   if (!new Set(['h265', 'av1']).has(result.codec)
-      || !new Set(['conservative', 'balanced', 'aggressive', 'custom']).has(result.profileId)
+      || !new Set(['conservative', 'balanced', 'aggressive', 'custom', 'quality']).has(result.profileId)
       || !new Set(['auto', 'staging', 'direct']).has(result.networkMode)
       || !new Set(['separate', 'replace']).has(result.outputMode)
       || typeof result.replacementConfirmed !== 'boolean') throw storeError('INVALID_MANIFEST');
@@ -493,6 +493,16 @@ function normalizeConfig(value) {
     if (!isValidCustomBitrate(value.bitrateKbps)) throw storeError('INVALID_MANIFEST');
     result.bitrateKbps = value.bitrateKbps;
   } else if (value.bitrateKbps !== undefined) throw storeError('INVALID_MANIFEST');
+  // Constant-quality mode requires its level; other profiles must not carry one.
+  if (result.profileId === 'quality') {
+    if (!isValidQualityLevel(value.qualityLevel)) throw storeError('INVALID_MANIFEST');
+    result.qualityLevel = value.qualityLevel;
+  } else if (value.qualityLevel !== undefined) throw storeError('INVALID_MANIFEST');
+  // Started by automatic conversion (only clips it has not handled before).
+  if (value.autoConvert !== undefined) {
+    if (value.autoConvert !== true) throw storeError('INVALID_MANIFEST');
+    result.autoConvert = true;
+  }
   if (value.concurrency !== undefined) {
     if (!isValidConcurrency(value.concurrency)) throw storeError('INVALID_MANIFEST');
     result.concurrency = value.concurrency;

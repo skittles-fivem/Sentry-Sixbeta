@@ -63,9 +63,36 @@ function encoderBelongsToFamily(codec, encoder) {
  * The MP4 muxer is forced to avoid edit lists and shift negative timestamps to
  * zero while passthrough frame mode prevents implicit duplication or dropping.
  */
-function buildEncodeArgs({ codec, encoder, bitrate, vaapiDevice = '/dev/dri/renderD128', hwFrames = false }) {
+// Constant-quality settings per encoder family, for each named level. Scales
+// differ by encoder (NVENC/QSV 0-51, AMF/VAAPI AV1 0-255, VideoToolbox 1-100
+// where higher is better, x265 CRF 0-51, SVT-AV1/libaom CRF 0-63).
+const QUALITY_VALUES = Object.freeze({
+  hw51: Object.freeze({ high: 24, balanced: 28, small: 32 }),
+  hw255: Object.freeze({ high: 96, balanced: 112, small: 128 }),
+  videotoolbox: Object.freeze({ high: 65, balanced: 55, small: 45 }),
+  x265: Object.freeze({ high: 22, balanced: 26, small: 30 }),
+  av1crf: Object.freeze({ high: 30, balanced: 36, small: 42 })
+});
+
+function qualityRateArgs(codec, encoder, level) {
+  if (!Object.prototype.hasOwnProperty.call(QUALITY_VALUES.hw51, level)) throw new RangeError(`Unknown quality level: ${level}`);
+  const pick = (table) => String(QUALITY_VALUES[table][level]);
+  if (encoder.endsWith('_nvenc')) return ['-rc', 'vbr', '-cq', pick('hw51'), '-b:v', '0'];
+  if (encoder.endsWith('_qsv')) return ['-global_quality', pick('hw51')];
+  if (encoder.endsWith('_amf')) {
+    const qp = codec === 'av1' ? pick('hw255') : pick('hw51');
+    return ['-rc', 'cqp', '-qp_i', qp, '-qp_p', qp];
+  }
+  if (encoder.endsWith('_vaapi')) return ['-rc_mode', 'CQP', '-qp', codec === 'av1' ? pick('hw255') : pick('hw51')];
+  if (encoder.endsWith('_videotoolbox')) return ['-q:v', pick('videotoolbox')];
+  if (encoder === 'libx265') return ['-crf', pick('x265')];
+  if (encoder === 'libaom-av1') return ['-crf', pick('av1crf'), '-b:v', '0'];
+  return ['-crf', pick('av1crf')]; // libsvtav1
+}
+
+function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice = '/dev/dri/renderD128', hwFrames = false }) {
   requireFamily(codec);
-  requirePositive('bitrate', bitrate);
+  if (quality === null) requirePositive('bitrate', bitrate);
   if (typeof encoder !== 'string' || !encoderBelongsToFamily(codec, encoder)) {
     throw new RangeError(`Encoder ${encoder} is not a ${codec} candidate`);
   }
@@ -76,7 +103,9 @@ function buildEncodeArgs({ codec, encoder, bitrate, vaapiDevice = '/dev/dri/rend
     args.push('-vaapi_device', vaapiDevice, '-vf', 'format=nv12,hwupload');
   }
 
-  args.push('-c:v', encoder, '-b:v', String(Math.round(bitrate)));
+  args.push('-c:v', encoder);
+  if (quality !== null) args.push(...qualityRateArgs(codec, encoder, quality));
+  else args.push('-b:v', String(Math.round(bitrate)));
 
   // GPU-resident input frames (zero-copy decode) are already 8-bit 4:2:0 and
   // cannot pass through a software pixel-format conversion.
@@ -84,7 +113,7 @@ function buildEncodeArgs({ codec, encoder, bitrate, vaapiDevice = '/dev/dri/rend
   else if (encoder.endsWith('_qsv')) args.push('-pix_fmt', 'nv12');
   else if (!encoder.endsWith('_vaapi')) args.push('-pix_fmt', 'yuv420p');
 
-  if (encoder.endsWith('_amf')) args.push('-rc', 'vbr_peak');
+  if (encoder.endsWith('_amf') && quality === null) args.push('-rc', 'vbr_peak');
   if (encoder === 'libx265') args.push('-preset', 'medium');
   if (encoder === 'libsvtav1') args.push('-preset', '8');
   if (encoder === 'libaom-av1') args.push('-cpu-used', '6', '-row-mt', '1');

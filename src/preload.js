@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   clearSentryUsbDrives: () => ipcRenderer.invoke('sentryUsb:clear'),
   reverseGeocode: (coords) => ipcRenderer.invoke('geo:reverseGeocode', coords),
   exists: (filePath) => ipcRenderer.invoke('fs:exists', filePath),
+  getClipThumbnail: (filePath) => ipcRenderer.invoke('thumbnails:get', filePath),
   stat: (filePath) => ipcRenderer.invoke('fs:stat', filePath),
   showItemInFolder: (filePath) => ipcRenderer.invoke('fs:showItemInFolder', filePath),
   deleteFolder: (folderPath) => ipcRenderer.invoke('fs:deleteFolder', folderPath),
@@ -55,6 +56,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   },
   cancelConverterBenchmark: () => ipcRenderer.invoke('converter:cancelBenchmark'),
+  getConverterAuto: () => ipcRenderer.invoke('converter:getAuto'),
+  setConverterAuto: (settings) => ipcRenderer.invoke('converter:setAuto', settings),
+  checkConverterAutoNow: () => ipcRenderer.invoke('converter:checkAutoNow'),
   onConverterProgress: (callback) => {
     if (typeof callback !== 'function') throw new TypeError('callback must be a function');
     const wrapper = (_event, payload) => callback(payload);

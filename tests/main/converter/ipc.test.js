@@ -137,12 +137,15 @@ describe('converter IPC', () => {
       'converter:start',
       'converter:subscribeProgress',
       'converter:unsubscribeProgress',
-      'converter:cancelBenchmark'
+      'converter:cancelBenchmark',
+      'converter:getAuto',
+      'converter:setAuto',
+      'converter:checkAutoNow'
     ].sort());
 
     const again = registerConverterIpc({ ipcMain: h.ipcMain, dialog: h.dialog, service: h.service });
     expect(again).toBe(h.registration);
-    expect(h.ipcMain.handle).toHaveBeenCalledTimes(13);
+    expect(h.ipcMain.handle).toHaveBeenCalledTimes(16);
   });
 
   test('chooses and canonicalizes an absolute directory with a bounded purpose', async () => {
@@ -236,6 +239,58 @@ describe('converter IPC', () => {
     const h = setup();
     await expect(h.invoke('converter:start', { ...CONFIG, concurrency })).resolves.toEqual({
       ok: false, error: { code, retryable: false }
+    });
+    expect(h.service.start).not.toHaveBeenCalled();
+  });
+
+  describe('automatic conversion settings', () => {
+    const auto = () => ({
+      get: jest.fn(() => ({ settings: { enabled: false }, status: { lastCheckAt: 1791949248961.5 } })),
+      configure: jest.fn(async (settings) => ({ settings, status: {} })),
+      checkNow: jest.fn(async () => ({ settings: {}, status: {} }))
+    });
+    const valid = { enabled: true, intervalMinutes: 60, window: { startHour: 22, endHour: 6 }, keepRunning: true, openAtLogin: false, config: CONFIG };
+
+    test('validates the saved job settings like a manual start and forwards them', async () => {
+      const h = setup({ auto: auto() });
+      await expect(h.invoke('converter:setAuto', valid)).resolves.toMatchObject({ ok: true });
+      expect(h.ipcMain.handlers.size).toBeGreaterThan(0);
+      const [settings] = (await h.invoke('converter:getAuto')).ok ? [true] : [false];
+      expect(settings).toBe(true);
+    });
+
+    test.each([
+      [{ ...valid, intervalMinutes: 7 }, 'INVALID_REQUEST'],
+      [{ ...valid, window: { startHour: 3, endHour: 3 } }, 'INVALID_AUTO_WINDOW'],
+      [{ ...valid, config: null }, 'AUTO_CONFIG_REQUIRED'],
+      [{ ...valid, config: { ...CONFIG, profileId: 'bogus' } }, 'INVALID_PROFILE'],
+      [{ ...valid, extra: 1 }, 'INVALID_REQUEST']
+    ])('rejects invalid automatic settings %#', async (payload, code) => {
+      const h = setup({ auto: auto() });
+      await expect(h.invoke('converter:setAuto', payload)).resolves.toMatchObject({ ok: false, error: { code } });
+    });
+
+    test('turning it off needs no job settings', async () => {
+      const h = setup({ auto: auto() });
+      await expect(h.invoke('converter:setAuto', { ...valid, enabled: false, config: null })).resolves.toMatchObject({ ok: true });
+    });
+  });
+
+  test('accepts constant quality and forwards qualityLevel', async () => {
+    const h = setup();
+    await expect(h.invoke('converter:start', { ...CONFIG, profileId: 'quality', qualityLevel: 'balanced' }))
+      .resolves.toMatchObject({ ok: true });
+    expect(h.service.start).toHaveBeenCalledWith(expect.objectContaining({ profileId: 'quality', qualityLevel: 'balanced' }));
+  });
+
+  test.each([
+    [{ profileId: 'quality' }],
+    [{ profileId: 'quality', qualityLevel: 'ultra' }],
+    [{ profileId: 'balanced', qualityLevel: 'high' }]
+  ])('rejects an invalid quality combination %p', async (overrides) => {
+    const h = setup();
+    await expect(h.invoke('converter:start', { ...CONFIG, ...overrides })).resolves.toEqual({
+      ok: false, error: { code: 'INVALID_QUALITY', retryable: false }
     });
     expect(h.service.start).not.toHaveBeenCalled();
   });
@@ -394,6 +449,35 @@ describe('converter IPC', () => {
     expect(second.send).not.toHaveBeenCalled();
     expect(h.service.subscribe.mock.results[0].value).toHaveBeenCalledTimes(1);
     expect(h.ipcMain.handlers.size).toBe(0);
+  });
+
+  test.each([10, 400])('forwards live updates whose clips carry fractional file times (%i clips)', async (count) => {
+    const h = setup();
+    await h.invoke('converter:subscribeProgress');
+    const items = Array.from({ length: count }, (_, index) => ({
+      id: `item-${index}`, state: index < 7 ? 'completed' : 'queued', relativePath: `RecentClips/${index}.mp4`,
+      sourceBytes: 1000, mtimeMs: 1791949248961.999 + index
+    }));
+    const snapshot = { id: 'job-1', state: 'encoding', revision: 7, config: CONFIG, items, counters: {} };
+    h.service.emit({ type: 'snapshot', jobId: 'job-1', revision: 7, snapshot });
+    expect(h.sender.send).toHaveBeenCalledTimes(1);
+    const sent = h.sender.send.mock.calls[0][1].snapshot;
+    expect(sent.state).toBe('encoding');
+    if (count > 256) expect(sent.itemStateCounts.completed).toBe(7);
+    h.service.snapshots.push(snapshot);
+    await expect(h.invoke('converter:getCurrent')).resolves.toMatchObject({ ok: true, value: { id: 'job-1' } });
+  });
+
+  test('still rejects non-finite numbers in live updates and fractional numbers in requests', async () => {
+    const h = setup();
+    await h.invoke('converter:subscribeProgress');
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    h.service.emit({ type: 'snapshot', jobId: 'job-1', revision: 7,
+      snapshot: { id: 'job-1', state: 'encoding', revision: 7, items: [{ id: 'a', mtimeMs: Number.NaN }] } });
+    expect(h.sender.send).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+    await expect(h.invoke('converter:start', { ...CONFIG, concurrency: 2.5 })).resolves.toMatchObject({ ok: false });
   });
 
   test('reference-counts duplicate subscriptions so one unsubscribe keeps the sender live', async () => {

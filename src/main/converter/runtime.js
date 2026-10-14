@@ -10,6 +10,7 @@ const { createFilesystemTransactionAdapters } = require('./filesystemTransaction
 const { scanTeslaFootage } = require('./scanner');
 const { runConverterBenchmark } = require('./benchmark');
 const { createEncoderPlanner, decodeAccelArgs } = require('./encoderPlanner');
+const { createAutoConverter } = require('./autoConvert');
 const { extractH264TelemetryTimeline } = require('./telemetryTimeline');
 const { createConverterAdapters } = require('./converterAdapters');
 const { createVerificationSnapshot } = require('./verificationSnapshot');
@@ -575,6 +576,7 @@ async function createConverterRuntime(options = {}) {
     // Persist discovered files in batches and let discovery run ahead of
     // conversion (item ids are tiny; the manifest itself caps the item count),
     // instead of one full manifest rewrite per file in lock-step with encoding.
+    skipDiscovered: (config, discovered) => auto.isKnown(config, discovered),
     discoveryBatchSize: 200,
     discoveryFlushMs: 250,
     queueLimit: 10_000,
@@ -584,6 +586,25 @@ async function createConverterRuntime(options = {}) {
   };
   const service = factories.createConverterJobService({ ...serviceDeps, store, stagingManager });
 
+  async function hasActiveJob() {
+    return (await service.list()).some((job) => !['completed', 'failed', 'cancelled'].includes(job.state)
+      && !(job.state === 'paused' && job.recovery?.action === 'manual-intervention'));
+  }
+
+  // Automatic conversion of new clips (off until the user turns it on).
+  const auto = createAutoConverter({
+    service,
+    scanner,
+    fs: pfs,
+    pathApi,
+    directory: pathApi.join(options.userDataPath, 'converter-auto'),
+    isBusy: async () => benchmarkController !== null || await hasActiveJob(),
+    onChange: (state) => { for (const listener of autoListeners) { try { listener(state); } catch (_) { /* isolated */ } } },
+    ...(options.autoTimers ? { timers: options.autoTimers } : {}),
+    ...(options.autoClock ? { now: options.autoClock.now, hourOf: options.autoClock.hourOf } : {})
+  });
+  const autoListeners = new Set();
+
   // Per-file timing log: one line per converted file showing where its
   // wall-clock time went (<userData>/converter-logs/<jobId>.log). Best effort:
   // logging never affects a conversion.
@@ -592,6 +613,10 @@ async function createConverterRuntime(options = {}) {
   const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
   if (typeof service.subscribe === 'function') service.subscribe((event) => {
     if (event?.type !== 'item_timing' || typeof event.jobId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(event.jobId)) return;
+    // Let the app pre-make a preview filmstrip for the newly saved clip.
+    if (typeof options.onClipConverted === 'function' && typeof event.outputPath === 'string') {
+      try { options.onClipConverted(event.outputPath); } catch (_) { /* previews are best effort */ }
+    }
     const phases = Object.entries(event.phases || {}).filter(([, ms]) => ms > 0)
       .map(([phase, ms]) => `${phase}=${seconds(ms)}`).join(' ');
     const line = `${new Date().toISOString()} ${event.relativePath} total=${seconds(event.totalMs || 0)} ${phases}`
@@ -675,6 +700,7 @@ async function createConverterRuntime(options = {}) {
         codec: config.codec,
         profileId: config.profileId,
         ...(config.profileId === 'custom' ? { bitrateKbps: config.bitrateKbps } : {}),
+        ...(config.profileId === 'quality' ? { qualityLevel: config.qualityLevel } : {}),
         networkMode: 'direct',
         outputMode: 'separate',
         includedGroups: ['RecentClips', 'SavedClips', 'SentryClips'],
@@ -697,12 +723,10 @@ async function createConverterRuntime(options = {}) {
     store,
     stagingManager,
     capabilities,
-    async runBenchmark({ codec, profileId = 'balanced', bitrateKbps, sourceRoot = null, onProgress } = {}) {
+    async runBenchmark({ codec, profileId = 'balanced', bitrateKbps, qualityLevel, sourceRoot = null, onProgress } = {}) {
       if (shutdownPromise) throw runtimeError('SERVICE_SHUTDOWN');
       if (benchmarkController) throw runtimeError('BENCHMARK_ACTIVE');
-      const active = (await service.list()).some((job) => !['completed', 'failed', 'cancelled'].includes(job.state)
-        && !(job.state === 'paused' && job.recovery?.action === 'manual-intervention'));
-      if (active) throw runtimeError('JOB_ACTIVE');
+      if (await hasActiveJob()) throw runtimeError('JOB_ACTIVE');
       const controller = new AbortController();
       benchmarkController = controller;
       try {
@@ -713,7 +737,7 @@ async function createConverterRuntime(options = {}) {
         try { encoder = await planner.select(codec); } catch (_) { /* reported by the conversions */ }
         return await runConverterBenchmark({
           clips, countFrames, encoder, tempRoot, signal: controller.signal, onProgress, pathApi, fs: pfs,
-          runLevel: benchmarkLevelRunner({ codec, profileId, bitrateKbps })
+          runLevel: benchmarkLevelRunner({ codec, profileId, bitrateKbps, qualityLevel })
         });
       } finally {
         if (benchmarkController === controller) benchmarkController = null;
@@ -734,6 +758,9 @@ async function createConverterRuntime(options = {}) {
             recovered.push(await service.recover(manifest.id, inspectRecovery, { deferExecution: true }));
           }
           if (shutdownPromise) throw runtimeError('SERVICE_SHUTDOWN');
+          // Load automatic-conversion settings and its file index before any
+          // recovered automatic job resumes discovering files.
+          if (options.autoConvert !== false) await auto.start().catch(() => undefined);
           // No queue or reconnect starts until every manifest safely reconciles.
           // Serial execution preserves the singleton worker across saved jobs.
           recoveryPromise = (async () => {
@@ -755,7 +782,14 @@ async function createConverterRuntime(options = {}) {
       }
       return startPromise;
     },
+    auto: Object.freeze({
+      get: () => auto.getState(),
+      configure: (settings) => auto.configure(settings),
+      checkNow: () => auto.checkNow(),
+      subscribe: (listener) => { autoListeners.add(listener); return () => autoListeners.delete(listener); }
+    }),
     shutdown() {
+      auto.stop();
       if (!shutdownPromise) shutdownPromise = (async () => {
         const results = await Promise.allSettled([Promise.resolve().then(() => service.shutdown()), recoveryPromise]);
         const rejected = results.find(result => result.status === 'rejected');

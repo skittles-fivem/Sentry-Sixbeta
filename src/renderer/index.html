@@ -600,11 +600,21 @@
                                     <option value="balanced" selected data-i18n="ui.converter.profileOptionBalanced">Balanced — approximately 20% smaller (recommended)</option>
                                     <option value="aggressive" data-i18n="ui.converter.profileOptionSmaller">Smaller — approximately 50% smaller</option>
                                     <option value="custom" data-i18n="ui.converter.profileOptionCustom">Custom bitrate…</option>
+                                    <option value="quality" data-i18n="ui.converter.profileOptionQuality">Constant quality — size varies by scene…</option>
                                 </select>
                                 <label id="converterCustomBitrateRow" class="converter-field converter-custom-bitrate" for="converterCustomBitrate" hidden>
                                     <span class="converter-field-label" data-i18n="ui.converter.customBitrateLabel">Video bitrate (Mbps)</span>
                                     <input id="converterCustomBitrate" class="converter-select" type="number" min="0.25" max="100" step="0.25" value="2.5" inputmode="decimal">
                                     <small class="converter-disclosure" data-i18n="ui.converter.customBitrateHint">Tesla clips are recorded at roughly 3–6 Mbps. Pick a lower value to save space; a clip whose result is not smaller than its original keeps the original.</small>
+                                </label>
+                                <label id="converterQualityRow" class="converter-field converter-custom-bitrate" for="converterQualityLevel" hidden>
+                                    <span class="converter-field-label" data-i18n="ui.converter.qualityLevelLabel">Quality level</span>
+                                    <select id="converterQualityLevel" class="converter-select">
+                                        <option value="high" data-i18n="ui.converter.qualityHigh">High — keeps the most detail</option>
+                                        <option value="balanced" selected data-i18n="ui.converter.qualityBalanced">Balanced (recommended)</option>
+                                        <option value="small" data-i18n="ui.converter.qualitySmall">Small — smallest files</option>
+                                    </select>
+                                    <small class="converter-disclosure" data-i18n="ui.converter.qualityHint">Instead of a size target, each clip is encoded to the same visual quality: parked and still scenes shrink far more, busy driving keeps its detail. A clip that would not get smaller keeps its original.</small>
                                 </label>
                                 <p class="converter-disclosure" data-i18n="ui.converter.lossyDisclosure">Conversion re-encodes video using lossy compression. Every profile may discard some image detail.</p>
                             </fieldset>
@@ -640,6 +650,100 @@
                                     <input id="converterReplacementConfirmation" type="checkbox">
                                     <span><span id="converterReplacementWarning"></span> <span data-i18n="ui.converter.replacementAcknowledgement">I understand the app makes a backup before replacing each verified original and restores that backup if replacement cannot finish.</span></span>
                                 </label>
+                            </fieldset>
+
+                            <fieldset class="converter-fieldset converter-auto-fieldset">
+                                <legend data-i18n="ui.converter.autoTitle">Automatic conversion</legend>
+                                <label class="converter-confirm-row">
+                                    <input id="converterAutoEnabled" type="checkbox">
+                                    <span><strong data-i18n="ui.converter.autoEnable">Convert new clips automatically</strong>
+                                    <small data-i18n="ui.converter.autoDetail">Checks the source folder on a schedule and converts only clips it hasn't handled yet, with the settings above (saved when you turn this on or change an option here).</small></span>
+                                </label>
+                                <div class="converter-auto-grid">
+                                    <label class="converter-field" for="converterAutoInterval">
+                                        <span class="converter-field-label" data-i18n="ui.converter.autoInterval">Check every</span>
+                                        <select id="converterAutoInterval" class="converter-select">
+                                            <option value="15" data-i18n="ui.converter.autoEvery15">15 minutes</option>
+                                            <option value="30" data-i18n="ui.converter.autoEvery30">30 minutes</option>
+                                            <option value="60" selected data-i18n="ui.converter.autoEvery60">1 hour</option>
+                                            <option value="180" data-i18n="ui.converter.autoEvery180">3 hours</option>
+                                            <option value="360" data-i18n="ui.converter.autoEvery360">6 hours</option>
+                                            <option value="720" data-i18n="ui.converter.autoEvery720">12 hours</option>
+                                            <option value="1440" data-i18n="ui.converter.autoEvery1440">24 hours</option>
+                                        </select>
+                                    </label>
+                                    <div class="converter-auto-window">
+                                        <label class="converter-confirm-row">
+                                            <input id="converterAutoWindowEnabled" type="checkbox">
+                                            <span data-i18n="ui.converter.autoWindow">Only between</span>
+                                        </label>
+                                        <select id="converterAutoStart" class="converter-select" aria-label="Start hour">
+                                            <option value="0">00:00</option>
+                                            <option value="1">01:00</option>
+                                            <option value="2">02:00</option>
+                                            <option value="3">03:00</option>
+                                            <option value="4">04:00</option>
+                                            <option value="5">05:00</option>
+                                            <option value="6">06:00</option>
+                                            <option value="7">07:00</option>
+                                            <option value="8">08:00</option>
+                                            <option value="9">09:00</option>
+                                            <option value="10">10:00</option>
+                                            <option value="11">11:00</option>
+                                            <option value="12">12:00</option>
+                                            <option value="13">13:00</option>
+                                            <option value="14">14:00</option>
+                                            <option value="15">15:00</option>
+                                            <option value="16">16:00</option>
+                                            <option value="17">17:00</option>
+                                            <option value="18">18:00</option>
+                                            <option value="19">19:00</option>
+                                            <option value="20">20:00</option>
+                                            <option value="21">21:00</option>
+                                            <option value="22">22:00</option>
+                                            <option value="23">23:00</option>
+                                        </select>
+                                        <span data-i18n="ui.converter.autoAnd">and</span>
+                                        <select id="converterAutoEnd" class="converter-select" aria-label="End hour">
+                                            <option value="0">00:00</option>
+                                            <option value="1">01:00</option>
+                                            <option value="2">02:00</option>
+                                            <option value="3">03:00</option>
+                                            <option value="4">04:00</option>
+                                            <option value="5">05:00</option>
+                                            <option value="6">06:00</option>
+                                            <option value="7">07:00</option>
+                                            <option value="8">08:00</option>
+                                            <option value="9">09:00</option>
+                                            <option value="10">10:00</option>
+                                            <option value="11">11:00</option>
+                                            <option value="12">12:00</option>
+                                            <option value="13">13:00</option>
+                                            <option value="14">14:00</option>
+                                            <option value="15">15:00</option>
+                                            <option value="16">16:00</option>
+                                            <option value="17">17:00</option>
+                                            <option value="18">18:00</option>
+                                            <option value="19">19:00</option>
+                                            <option value="20">20:00</option>
+                                            <option value="21">21:00</option>
+                                            <option value="22">22:00</option>
+                                            <option value="23">23:00</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <label class="converter-confirm-row">
+                                    <input id="converterAutoKeepRunning" type="checkbox">
+                                    <span data-i18n="ui.converter.autoKeepRunning">Keep running in the background (tray icon) when the window is closed</span>
+                                </label>
+                                <label class="converter-confirm-row">
+                                    <input id="converterAutoLogin" type="checkbox">
+                                    <span data-i18n="ui.converter.autoLogin">Start Sentry Studio in the background when I sign in</span>
+                                </label>
+                                <div class="converter-auto-status">
+                                    <span id="converterAutoStatus" role="status" data-i18n="ui.converter.autoOff">Off</span>
+                                    <button id="converterAutoCheckNow" type="button" class="converter-button" data-i18n="ui.converter.autoCheckNow">Check now</button>
+                                </div>
                             </fieldset>
 
                             <output id="converterEstimate" hidden></output>

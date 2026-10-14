@@ -160,6 +160,17 @@ function collectElements(root) {
         profileSelect: byId('converterProfileSelect'),
         customBitrate: byId('converterCustomBitrate'),
         customBitrateRow: byId('converterCustomBitrateRow'),
+        qualityLevel: byId('converterQualityLevel'),
+        qualityRow: byId('converterQualityRow'),
+        autoEnabled: byId('converterAutoEnabled'),
+        autoInterval: byId('converterAutoInterval'),
+        autoWindowEnabled: byId('converterAutoWindowEnabled'),
+        autoStart: byId('converterAutoStart'),
+        autoEnd: byId('converterAutoEnd'),
+        autoKeepRunning: byId('converterAutoKeepRunning'),
+        autoLogin: byId('converterAutoLogin'),
+        autoStatus: byId('converterAutoStatus'),
+        autoCheckNow: byId('converterAutoCheckNow'),
         concurrency: byId('converterConcurrency'),
         outputOptions: all('[data-converter-output]'),
         replaceOption: byId('converterReplaceOption'),
@@ -324,7 +335,7 @@ function createFootageConverterController(options = {}) {
 
     function selectedProfile() {
         const value = elements.profileSelect?.value;
-        return ['conservative', 'balanced', 'aggressive', 'custom'].includes(value)
+        return ['conservative', 'balanced', 'aggressive', 'custom', 'quality'].includes(value)
             ? value : selected(elements.profileOptions, 'converterProfile', 'balanced');
     }
 
@@ -336,8 +347,21 @@ function createFootageConverterController(options = {}) {
         return kbps >= 250 && kbps <= 100_000 ? kbps : null;
     }
 
+    function selectedQualityLevel() {
+        const value = elements.qualityLevel?.value;
+        return ['high', 'balanced', 'small'].includes(value) ? value : 'balanced';
+    }
+
+    // Profile-specific settings sent with a start or benchmark request.
+    function profileSettings(profileId) {
+        if (profileId === 'custom') return { bitrateKbps: customBitrateKbps() };
+        if (profileId === 'quality') return { qualityLevel: selectedQualityLevel() };
+        return {};
+    }
+
     function updateCustomBitrateVisibility() {
         setHidden(elements.customBitrateRow, selectedProfile() !== 'custom');
+        setHidden(elements.qualityRow, selectedProfile() !== 'quality');
     }
 
     function selectedConcurrency() {
@@ -368,6 +392,9 @@ function createFootageConverterController(options = {}) {
         if (elements.profileSelect && config.profileId) elements.profileSelect.value = config.profileId;
         if (elements.customBitrate && Number.isSafeInteger(config.bitrateKbps)) {
             elements.customBitrate.value = String(config.bitrateKbps / 1000);
+        }
+        if (elements.qualityLevel && ['high', 'balanced', 'small'].includes(config.qualityLevel)) {
+            elements.qualityLevel.value = config.qualityLevel;
         }
         updateCustomBitrateVisibility();
         setChecked(elements.outputOptions, 'converterOutput', config.outputMode);
@@ -617,7 +644,7 @@ function createFootageConverterController(options = {}) {
             const request = {
                 codec: selected(elements.codecOptions, 'converterCodec', 'h265'),
                 profileId,
-                ...(profileId === 'custom' ? { bitrateKbps } : {}),
+                ...profileSettings(profileId),
                 sourceRoot: elements.sourcePath?.value?.trim() || null
             };
             const result = unwrap(await api.runConverterBenchmark(request, (progress) => {
@@ -683,8 +710,113 @@ function createFootageConverterController(options = {}) {
             if (!buffered[slot] || payload.revision >= buffered[slot].revision) buffered[slot] = payload;
             return;
         }
-        if (snapshot?.id && payload.jobId !== snapshot.id) return;
+        if (snapshot?.id && payload.jobId !== snapshot.id) {
+            // A new job (e.g. an automatic one) replaces a finished one on screen.
+            const progressOnly = Object.keys(payload.snapshot).every((key) => ['id', 'revision', 'progress'].includes(key));
+            if (progressOnly || !['completed', 'failed', 'cancelled'].includes(snapshot.state)) return;
+            snapshot = null;
+            latestRevision = -1;
+        }
         applySnapshot(payload.snapshot, payload.revision);
+    }
+
+    // ---- Automatic conversion -------------------------------------------
+    let autoState = null;
+    let autoTimer = null;
+
+    function clockTime(ms) {
+        try {
+            return new Date(ms).toLocaleTimeString(getLocale(), { hour: 'numeric', minute: '2-digit' });
+        } catch (_) {
+            return new Date(ms).toLocaleTimeString();
+        }
+    }
+
+    function renderAuto() {
+        const settings = autoState?.settings;
+        const status = autoState?.status || {};
+        if (!settings) return;
+        if (elements.autoEnabled) elements.autoEnabled.checked = settings.enabled === true;
+        if (elements.autoInterval) elements.autoInterval.value = String(settings.intervalMinutes || 60);
+        if (elements.autoWindowEnabled) elements.autoWindowEnabled.checked = Boolean(settings.window);
+        if (settings.window) {
+            if (elements.autoStart) elements.autoStart.value = String(settings.window.startHour);
+            if (elements.autoEnd) elements.autoEnd.value = String(settings.window.endHour);
+        }
+        if (elements.autoKeepRunning) elements.autoKeepRunning.checked = settings.keepRunning === true;
+        if (elements.autoLogin) elements.autoLogin.checked = settings.openAtLogin === true;
+        for (const control of [elements.autoStart, elements.autoEnd]) setDisabled(control, !settings.window);
+        setDisabled(elements.autoCheckNow, !settings.enabled || status.checking === true);
+        let text;
+        if (!settings.enabled) text = message('autoOff', 'Off');
+        else if (status.checking) text = message('autoChecking', 'Checking for new clips…');
+        else if (status.activeJobId && status.pausedForWindow) {
+            text = message('autoPausedWindow', 'Paused outside the time window — resumes at {time}', {
+                time: clockTime(new Date().setHours(settings.window?.startHour ?? 0, 0, 0, 0))
+            });
+        } else if (status.activeJobId) text = message('autoConverting', 'Converting new clips…');
+        else {
+            const parts = [];
+            if (status.error) parts.push(message('autoError', 'Last check failed: {code}', { code: status.error }));
+            else if (Number.isSafeInteger(status.lastNewFiles)) {
+                parts.push(status.lastNewFiles === 0
+                    ? message('autoNoneNew', 'No new clips at {time}', { time: clockTime(status.lastCheckAt) })
+                    : message('autoFoundNew', '{count} new clips found at {time}', { count: status.lastNewFiles, time: clockTime(status.lastCheckAt) }));
+            }
+            if (status.nextCheckAt) parts.push(message('autoNext', 'Next check {time}', { time: clockTime(status.nextCheckAt) }));
+            else parts.push(message('autoSoon', 'Checks shortly'));
+            text = parts.join(' · ');
+        }
+        setText(elements.autoStatus, text);
+    }
+
+    async function refreshAuto() {
+        if (typeof api.getConverterAuto !== 'function') return;
+        try {
+            autoState = unwrap(await api.getConverterAuto());
+            renderAuto();
+        } catch (_) { /* automatic conversion unavailable */ }
+    }
+
+    function hourValue(control, fallback) {
+        const value = Number(control?.value);
+        return Number.isSafeInteger(value) && value >= 0 && value <= 23 ? value : fallback;
+    }
+
+    async function saveAuto() {
+        if (typeof api.setConverterAuto !== 'function') return;
+        const enabled = elements.autoEnabled?.checked === true;
+        try {
+            const windowOn = elements.autoWindowEnabled?.checked === true;
+            const window = windowOn ? { startHour: hourValue(elements.autoStart, 1), endHour: hourValue(elements.autoEnd, 6) } : null;
+            if (window && window.startHour === window.endHour) throw apiError('AUTO_WINDOW_INVALID');
+            const settings = {
+                enabled,
+                intervalMinutes: Number(elements.autoInterval?.value) || 60,
+                window,
+                keepRunning: elements.autoKeepRunning?.checked === true,
+                openAtLogin: elements.autoLogin?.checked === true,
+                // Turning it on (or changing an option while on) saves the
+                // current job settings above for every automatic run.
+                config: enabled ? configFromControls() : (autoState?.settings?.config || null)
+            };
+            autoState = unwrap(await api.setConverterAuto(settings));
+        } catch (error) {
+            notify(describeError(error), { type: 'error' });
+            await refreshAuto();
+            return;
+        }
+        renderAuto();
+    }
+
+    async function checkAutoNow() {
+        if (typeof api.checkConverterAutoNow !== 'function') return;
+        try {
+            autoState = unwrap(await api.checkConverterAutoNow());
+            renderAuto();
+        } catch (error) {
+            notify(describeError(error), { type: 'error' });
+        }
     }
 
     async function chooseFolder(purpose) {
@@ -727,7 +859,7 @@ function createFootageConverterController(options = {}) {
             destinationRoot: outputMode === 'replace' ? null : destinationRoot,
             codec: selected(elements.codecOptions, 'converterCodec', 'h265'),
             profileId,
-            ...(profileId === 'custom' ? { bitrateKbps: customBitrateKbps() } : {}),
+            ...profileSettings(profileId),
             networkMode: 'auto',
             outputMode,
             includedGroups,
@@ -744,7 +876,8 @@ function createFootageConverterController(options = {}) {
             BITRATE_INVALID: ['errorBitrateInvalid', 'Enter a bitrate between 0.25 and 100 Mbps.'],
             GROUP_REQUIRED: ['errorGroupRequired', 'Select at least one Tesla clip group.'],
             REPLACEMENT_CONFIRMATION_REQUIRED: ['errorReplacementConfirmation', 'Acknowledge and confirm replacement before starting.'],
-            REPLACEMENT_UNAVAILABLE: ['errorReplacementUnavailable', 'Replace originals is not available on this system.']
+            REPLACEMENT_UNAVAILABLE: ['errorReplacementUnavailable', 'Replace originals is not available on this system.'],
+            AUTO_WINDOW_INVALID: ['errorAutoWindow', 'Choose different start and end hours for the time window.']
         };
         return labels[error?.code]
             ? message(...labels[error.code])
@@ -821,6 +954,13 @@ function createFootageConverterController(options = {}) {
         }));
         elements.retryButton?.addEventListener('click', () => command('retryFailedConverter'));
         elements.dismissButton?.addEventListener('click', () => command('dismissConverterSummary'));
+        if (elements.autoStart && !elements.autoStart.value) elements.autoStart.value = '1';
+        if (elements.autoEnd && (!elements.autoEnd.value || elements.autoEnd.value === '0')) elements.autoEnd.value = '6';
+        for (const control of [elements.autoEnabled, elements.autoInterval, elements.autoWindowEnabled,
+            elements.autoStart, elements.autoEnd, elements.autoKeepRunning, elements.autoLogin]) {
+            control?.addEventListener?.('change', () => saveAuto());
+        }
+        elements.autoCheckNow?.addEventListener?.('click', () => checkAutoNow());
     }
 
     async function initialize() {
@@ -833,6 +973,10 @@ function createFootageConverterController(options = {}) {
                 updateOutputMode();
                 render();
             });
+        }
+        await refreshAuto();
+        if (typeof api.getConverterAuto === 'function' && options.autoPollMs !== 0) {
+            autoTimer = setInterval(() => { void refreshAuto(); }, options.autoPollMs || 30_000);
         }
         try {
             updateCapabilities(unwrap(await api.getConverterCapabilities()));
@@ -855,6 +999,8 @@ function createFootageConverterController(options = {}) {
         get visible() { return visible; },
         get snapshot() { return snapshot; },
         destroy() {
+            if (autoTimer) clearInterval(autoTimer);
+            autoTimer = null;
             unsubscribe?.();
             unsubscribe = null;
             unsubscribeLanguage?.();

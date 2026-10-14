@@ -294,6 +294,17 @@ describe('converter job store', () => {
     }
   });
 
+  test('persists constant quality and rejects inconsistent quality settings', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    await store.save(job('quality-mode', { config: validConfig({ profileId: 'quality', qualityLevel: 'high' }) }));
+    await expect(store.load('quality-mode')).resolves.toMatchObject({ config: { profileId: 'quality', qualityLevel: 'high' } });
+    for (const [index, overrides] of [{ profileId: 'quality' }, { profileId: 'quality', qualityLevel: 'max' },
+      { profileId: 'balanced', qualityLevel: 'high' }].entries()) {
+      await expect(store.save(job(`quality-bad-${index}`, { config: validConfig(overrides) })))
+        .rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
+    }
+  });
+
   test('defaults an absent group order when reading an old manifest', async () => {
     const store = createJobStore({ rootDir, fs: fs.promises });
     const oldManifest = job('old-order');

@@ -2599,6 +2599,39 @@ describe('parallel conversion workers', () => {
     expect(h.verifier.mock.calls[0][0]).toMatchObject({ profileId: 'custom' });
   });
 
+  test('constant quality encodes at the chosen level with no bitrate and no size target', async () => {
+    const h = harness({ items: clips(1), queueLimit: 10 });
+    const done = await h.service.whenIdle(await h.service.start({ ...CONFIG, profileId: 'quality', qualityLevel: 'small' }));
+    expect(done.items[0].state).toBe('completed');
+    const args = h.spawnProcess.mock.calls[0][1];
+    expect(args.slice(args.indexOf('-rc'), args.indexOf('-rc') + 6)).toEqual(['-rc', 'vbr', '-cq', '32', '-b:v', '0']);
+    expect(h.verifier.mock.calls[0][0]).toMatchObject({ profileId: 'quality' });
+  });
+
+  const notSmaller = { ok: false, reason: 'not-smaller', retryable: false, sourceBytes: 1_000_000, outputBytes: 1_100_000, details: {} };
+
+  test('a constant-quality clip that would not save space copies the original instead of failing (separate output)', async () => {
+    const h = harness({ items: clips(1), queueLimit: 10, verifyResults: [notSmaller] });
+    const done = await h.service.whenIdle(await h.service.start({ ...CONFIG, profileId: 'quality', qualityLevel: 'high' }));
+    expect(done.items[0]).toMatchObject({ state: 'completed', resultCode: 'no-savings' });
+    expect(h.stagingManager.copyAsset).toHaveBeenCalledWith(expect.objectContaining({ source: done.items[0].sourcePath }));
+    expect(h.stagingManager.publishSeparate).not.toHaveBeenCalled();
+  });
+
+  test('a custom-bitrate clip that would not save space keeps the original (replace mode)', async () => {
+    const h = harness({ items: clips(1), queueLimit: 10, verifyResults: [notSmaller] });
+    const done = await h.service.whenIdle(await h.service.start({ ...CONFIG, profileId: 'custom', bitrateKbps: 9000,
+      destinationRoot: null, outputMode: 'replace', replacementConfirmed: true }));
+    expect(done.items[0]).toMatchObject({ state: 'skipped', resultCode: 'no-savings' });
+    expect(h.stagingManager.replaceOriginal).not.toHaveBeenCalled();
+  });
+
+  test('size profiles still fail a clip that would not save space', async () => {
+    const h = harness({ items: clips(1), queueLimit: 10, verifyResults: [notSmaller] });
+    const done = await h.service.whenIdle(await h.service.start(CONFIG));
+    expect(done.items[0]).toMatchObject({ state: 'failed' });
+  });
+
   test('progress events report the combined encoder fps', async () => {
     const h = harness({ items: clips(1), queueLimit: 10,
       spawnActions: [{ chunks: ['fps=123.4\nout_time_ms=500000\nprogress=continue\n', 'progress=end\n'] }] });

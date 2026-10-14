@@ -8,7 +8,8 @@ const {
   createEmptyCounters,
   addCompletedFile,
   serializeSummary,
-  targetOutputBytes
+  targetOutputBytes,
+  hasSizeTarget
 } = require('./contracts');
 const {
   SAFE_VIDEO_BITRATE_FLOORS,
@@ -524,6 +525,8 @@ function createConverterJobService(deps) {
         if (runtime.cancelRequested || runtime.stopRequested) break;
         const key = identity(discovered);
         if (known.has(key)) continue;
+        // Automatic jobs skip clips an earlier automatic run already handled.
+        if (typeof deps.skipDiscovered === 'function' && deps.skipDiscovered(runtime.manifest.config, discovered)) continue;
         known.add(key);
         pending.push(createQueueItem(runtime, discovered));
         if (pending.length >= discoveryBatchSize || clock.now() - lastFlush >= discoveryFlushMs) await flush();
@@ -696,13 +699,13 @@ function createConverterJobService(deps) {
       : pathApi.resolve(config.destinationRoot, ...item.relativePath.split('/'));
   }
 
-  async function runChild(runtime, itemId, source, target, codec, encoder, bitrate, decodeAccel = null) {
+  async function runChild(runtime, itemId, source, target, codec, encoder, { bitrate, quality = null }, decodeAccel = null) {
     const hwFrames = Array.isArray(decodeAccel) && decodeAccel.includes('-hwaccel_output_format');
     const args = [
       '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
       ...(decodeAccel || []),
       '-i', source,
-      ...buildEncodeArgs({ codec, encoder: encoder.codec, bitrate, hwFrames }),
+      ...buildEncodeArgs({ codec, encoder: encoder.codec, bitrate, quality, hwFrames }),
       '-an', '-sn', '-dn',
       '-progress', 'pipe:1', '-nostats',
       '-f', 'mp4', target
@@ -831,9 +834,12 @@ function createConverterJobService(deps) {
     return false;
   }
 
-  async function processAsset(runtime, item) {
+  // Also used for a video whose conversion would not save space (custom
+  // bitrate or constant quality): the original is kept (replace mode) or
+  // copied unchanged (separate mode) instead of failing the clip.
+  async function processAsset(runtime, item, codes = { retained: 'asset-retained', copied: 'copied' }) {
     if (runtime.manifest.config.outputMode === 'replace') {
-      await itemPatch(runtime, item.id, { state: 'skipped', resultCode: 'asset-retained', eligibleVideo: false }, {
+      await itemPatch(runtime, item.id, { state: 'skipped', resultCode: codes.retained, eligibleVideo: false }, {
         state: 'waiting', activeItemId: null
       });
       return;
@@ -869,7 +875,7 @@ function createConverterJobService(deps) {
       eligibleVideo: false,
       outputPath: result.finalPath,
       outputBytes: result.outputBytes,
-      resultCode: cleanupPending.length ? 'completed-cleanup-pending' : 'copied',
+      resultCode: cleanupPending.length ? 'completed-cleanup-pending' : codes.copied,
       ownedPaths: publicationCleanup.cleaned === false ? result.ownedPaths : {},
       ownedArtifacts: publicationCleanup.cleaned === false ? result.ownedArtifacts : {}
     };
@@ -962,9 +968,13 @@ function createConverterJobService(deps) {
     const timeline = await deps.readTimeline({ source: staged.source, item, signal });
     timing.mark('timeline');
     const codec = runtime.manifest.config.codec;
-    const customBitrate = runtime.manifest.config.profileId === 'custom';
-    const targetBytes = customBitrate ? null : targetOutputBytes(item.sourceBytes, runtime.manifest.config.profileId);
-    let bitrate = customBitrate ? runtime.manifest.config.bitrateKbps * 1000 : calculateInitialBitrate({
+    const profileId = runtime.manifest.config.profileId;
+    const customBitrate = profileId === 'custom';
+    // Constant quality: the encoder holds a quality level; no bitrate or target.
+    const quality = profileId === 'quality' ? runtime.manifest.config.qualityLevel : null;
+    const noTarget = !hasSizeTarget(profileId);
+    const targetBytes = noTarget ? null : targetOutputBytes(item.sourceBytes, profileId);
+    let bitrate = quality ? null : customBitrate ? runtime.manifest.config.bitrateKbps * 1000 : calculateInitialBitrate({
       codec,
       targetBytes,
       durationSeconds: inspected.durationSeconds,
@@ -977,7 +987,7 @@ function createConverterJobService(deps) {
     // variable-frame-rate Tesla clips. Leave a small headroom so the first
     // candidate normally lands inside the profile window; the bounded retry
     // remains available for encoders that still miss.
-    if (selected.hardware === true && !customBitrate) bitrate = Math.max(SAFE_VIDEO_BITRATE_FLOORS[codec], Math.floor(bitrate * 0.93));
+    if (selected.hardware === true && !noTarget) bitrate = Math.max(SAFE_VIDEO_BITRATE_FLOORS[codec], Math.floor(bitrate * 0.93));
     let sizeRetryCount = 0;
     let attempts = currentItem(runtime, item.id)?.attempts || 0;
     let latestOwnership = staged.ownership;
@@ -999,7 +1009,7 @@ function createConverterJobService(deps) {
       latestOwnership = reserved;
       setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), reserved));
       const usedTier = encodeTiers[0] || null;
-      const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected, bitrate, usedTier?.args || null);
+      const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected, { bitrate, quality }, usedTier?.args || null);
       timing.mark('encode');
       if (!encoded.ok) {
         let failedOwnership = reserved;
@@ -1122,6 +1132,7 @@ function createConverterJobService(deps) {
           bitrate = retry.bitrate;
           continue;
         }
+        if (noTarget && verification?.reason === 'not-smaller') throw serviceError('KEEP_ORIGINAL');
         const error = Object.assign(new Error('verification failed'), {
           code: verification?.reason || 'VERIFICATION_FAILED',
           retryable: verification?.retryable === true
@@ -1231,7 +1242,7 @@ function createConverterJobService(deps) {
         };
       });
       emit(runtime, 'item_timing', {
-        itemId: item.id, relativePath: item.relativePath, encoder: selected.codec,
+        itemId: item.id, relativePath: item.relativePath, encoder: selected.codec, outputPath: published.finalPath,
         sourceBytes: item.sourceBytes, outputBytes: verification.outputBytes, attempts, ...itemTiming
       });
       return;
@@ -1242,6 +1253,15 @@ function createConverterJobService(deps) {
       const cleanup = await cleanupOwnership(runtime, item.id, staged.ownership);
       if (cleanup.cleaned === false) setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), staged.ownership));
       throw error;
+    }
+  }
+
+  async function keepOriginalWhenNoSavings(runtime, item, operation) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error?.code !== 'KEEP_ORIGINAL' || Object.keys(ownershipFor(runtime, item.id)?.ownedPaths || {}).length > 0) throw error;
+      return processAsset(runtime, currentItem(runtime, item.id), { retained: 'no-savings', copied: 'no-savings' });
     }
   }
 
@@ -1320,7 +1340,7 @@ function createConverterJobService(deps) {
         beginItem(runtime, item);
         try {
           if (item.kind === 'asset') await processAsset(runtime, item);
-          else await processVideo(runtime, item);
+          else await keepOriginalWhenNoSavings(runtime, item, () => processVideo(runtime, item));
         } catch (error) {
           await failItem(runtime, item.id, error);
         } finally {

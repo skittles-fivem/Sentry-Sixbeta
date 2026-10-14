@@ -8147,3 +8147,9 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 .export-bitrate-custom input {
     width: 90px;
 }
+
+/* Filmstrip preview: frames from across the clip, under any thumb.png. */
+.clip-thumb-tooltip img.clip-filmstrip {
+    width: 480px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+}

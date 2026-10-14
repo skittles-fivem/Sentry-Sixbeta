@@ -360,6 +360,33 @@ describe('bitrate and retry planning', () => {
   });
 });
 
+describe('constant-quality encode arguments', () => {
+  const { buildEncodeArgs } = require('../../../src/main/converter/encoderPlanner');
+  const rate = (codec, encoder, quality) => {
+    const args = buildEncodeArgs({ codec, encoder, quality });
+    expect(args).not.toContain('vbr_peak');
+    return args.slice(args.indexOf(encoder) + 1, args.indexOf('-pix_fmt') > -1 ? args.indexOf('-pix_fmt') : undefined);
+  };
+  test.each([
+    ['h265', 'hevc_nvenc', 'balanced', ['-rc', 'vbr', '-cq', '28', '-b:v', '0']],
+    ['av1', 'av1_nvenc', 'high', ['-rc', 'vbr', '-cq', '24', '-b:v', '0']],
+    ['h265', 'hevc_qsv', 'small', ['-global_quality', '32']],
+    ['h265', 'hevc_amf', 'balanced', ['-rc', 'cqp', '-qp_i', '28', '-qp_p', '28']],
+    ['av1', 'av1_amf', 'balanced', ['-rc', 'cqp', '-qp_i', '112', '-qp_p', '112']],
+    ['h265', 'hevc_videotoolbox', 'high', ['-q:v', '65']],
+    ['h265', 'libx265', 'balanced', ['-crf', '26']],
+    ['av1', 'libsvtav1', 'small', ['-crf', '42']]
+  ])('%s %s %s', (codec, encoder, quality, expected) => {
+    expect(rate(codec, encoder, quality).slice(0, expected.length)).toEqual(expected);
+  });
+  test('no -b:v target in quality mode except the explicit 0 for NVENC/libaom', () => {
+    expect(buildEncodeArgs({ codec: 'h265', encoder: 'libx265', quality: 'high' })).not.toContain('-b:v');
+  });
+  test('rejects an unknown level', () => {
+    expect(() => buildEncodeArgs({ codec: 'h265', encoder: 'libx265', quality: 'ultra' })).toThrow();
+  });
+});
+
 describe('decodeAccelArgs', () => {
   const { decodeAccelArgs } = require('../../../src/main/converter/encoderPlanner');
   test.each([

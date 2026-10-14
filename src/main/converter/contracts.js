@@ -48,6 +48,21 @@ function isValidCustomBitrate(value) {
   return Number.isSafeInteger(value) && value >= CUSTOM_BITRATE_KBPS.min && value <= CUSTOM_BITRATE_KBPS.max;
 }
 
+// Constant-quality mode (opt-in): the encoder holds a quality level instead of
+// a size target, so still scenes shrink far more and busy ones keep detail.
+// Only "output must be smaller than the source" is enforced, as for custom.
+const QUALITY_PROFILE_ID = 'quality';
+const QUALITY_LEVELS = deepFreeze(['high', 'balanced', 'small']);
+
+function isValidQualityLevel(value) {
+  return QUALITY_LEVELS.includes(value);
+}
+
+// Profiles without a byte target (the verifier only requires real savings).
+function hasSizeTarget(profileId) {
+  return profileId !== CUSTOM_PROFILE_ID && profileId !== QUALITY_PROFILE_ID;
+}
+
 function isValidConcurrency(value) {
   return Number.isSafeInteger(value) && value >= CONCURRENCY.min && value <= CONCURRENCY.max;
 }
@@ -138,4 +153,4 @@ function serializeSummary(counters) {
   };
 }
 
-module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, CUSTOM_PROFILE_ID, CUSTOM_BITRATE_KBPS, isValidCustomBitrate, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };
+module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, CUSTOM_PROFILE_ID, CUSTOM_BITRATE_KBPS, isValidCustomBitrate, QUALITY_PROFILE_ID, QUALITY_LEVELS, isValidQualityLevel, hasSizeTarget, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };
