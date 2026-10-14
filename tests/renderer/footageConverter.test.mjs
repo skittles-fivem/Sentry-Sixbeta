@@ -993,3 +993,67 @@ test('custom bitrate: a restored custom job shows its bitrate', async () => {
   assert.equal(elements.customBitrate.value, '4.2');
   assert.equal(elements.customBitrateRow.hidden, false);
 });
+
+function benchmarkElements() {
+  const dialog = new FakeElement();
+  dialog.open = false;
+  dialog.showModal = () => { dialog.open = true; };
+  dialog.close = () => { dialog.open = false; };
+  return {
+    ...makeElements(),
+    concurrency: new FakeElement({ value: '5' }),
+    benchmarkButton: new FakeElement(), benchmarkDialog: dialog, benchmarkStatus: new FakeElement(),
+    benchmarkTable: new FakeElement(), benchmarkRows: new FakeElement(), benchmarkBest: new FakeElement(),
+    benchmarkRun: new FakeElement(), benchmarkApply: new FakeElement(), benchmarkClose: new FakeElement()
+  };
+}
+
+test('benchmark: runs from the dialog, shows results and applies the recommended setting', async () => {
+  const elements = benchmarkElements();
+  const api = fakeApi();
+  const storage = memoryStorage();
+  api.runConverterBenchmark = async (request, onProgress) => {
+    api.calls.push(['benchmark', request]);
+    onProgress({ step: 'run', encoder: 'hevc_nvenc', hardware: true, level: 2, index: 2, total: 5 });
+    assert.match(elements.benchmarkStatus.textContent, /hevc_nvenc \(GPU\) with 2 at once.*2 of 5/);
+    return { ok: true, value: {
+      sample: 'clip', preferredEncoder: 'hevc_nvenc',
+      results: [
+        { encoder: 'hevc_nvenc', hardware: true, level: 1, ok: true, fps: 210.5 },
+        { encoder: 'hevc_nvenc', hardware: true, level: 4, ok: true, fps: 640 },
+        { encoder: 'hevc_nvenc', hardware: true, level: 6, ok: false, fps: 0 },
+        { encoder: 'libx265', hardware: false, level: 1, ok: true, fps: 31 }
+      ],
+      best: { encoder: 'hevc_nvenc', hardware: true, level: 4, ok: true, fps: 640 }
+    } };
+  };
+  await createFootageConverterController({ api, elements, storage }).init();
+  elements.sourcePath.value = 'D:\\TeslaCam';
+
+  await elements.benchmarkButton.click();
+  assert.equal(elements.benchmarkDialog.open, true);
+  await elements.benchmarkRun.click();
+
+  assert.deepEqual(api.calls.find(([name]) => name === 'benchmark')[1], { codec: 'h265', sourceRoot: 'D:\\TeslaCam' });
+  assert.equal(elements.benchmarkRows.children.length, 4);
+  assert.equal(elements.benchmarkTable.hidden, false);
+  assert.match(elements.benchmarkBest.textContent, /4 at once with hevc_nvenc \(GPU\).*640 fps/);
+  assert.equal(elements.benchmarkApply.hidden, false);
+  assert.match(elements.benchmarkStatus.textContent, /source folder/);
+
+  await elements.benchmarkApply.click();
+  assert.equal(elements.concurrency.value, '4');
+  assert.equal(storage.values.get('converterConcurrency'), '4');
+  assert.equal(elements.benchmarkDialog.open, false);
+});
+
+test('benchmark: explains a refusal while a conversion is running', async () => {
+  const elements = benchmarkElements();
+  const api = fakeApi();
+  api.runConverterBenchmark = async () => ({ ok: false, error: { code: 'JOB_ACTIVE', retryable: false } });
+  await createFootageConverterController({ api, elements, storage: memoryStorage() }).init();
+  await elements.benchmarkRun.click();
+  assert.match(elements.benchmarkStatus.textContent, /current conversion/);
+  assert.equal(elements.benchmarkApply.hidden, true);
+  assert.equal(elements.benchmarkRun.disabled, false);
+});

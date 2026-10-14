@@ -8,6 +8,7 @@ const { CONCURRENCY } = require('./contracts');
 const { createJobStore } = require('./jobStore');
 const { createFilesystemTransactionAdapters } = require('./filesystemTransactions');
 const { scanTeslaFootage } = require('./scanner');
+const { runConverterBenchmark } = require('./benchmark');
 const { createEncoderPlanner } = require('./encoderPlanner');
 const { extractH264TelemetryTimeline } = require('./telemetryTimeline');
 const { createConverterAdapters } = require('./converterAdapters');
@@ -607,11 +608,50 @@ async function createConverterRuntime(options = {}) {
   let startPromise;
   let shutdownPromise;
   let recoveryPromise;
+  // Encoding benchmark: one at a time, and never while a conversion runs (the
+  // numbers would be meaningless and the encoders shared).
+  let benchmarkController = null;
+  async function findBenchmarkClip(sourceRoot, signal) {
+    if (typeof sourceRoot !== 'string' || sourceRoot.length === 0) return null;
+    let fallback = null;
+    let seen = 0;
+    try {
+      for await (const item of scanTeslaFootage({ sourceRoot }, { signal, path: pathApi, platform, concurrency: 16 })) {
+        if (item.kind !== 'video') continue;
+        if (item.camera === 'front' || item.camera === 'back') return item.sourcePath;
+        fallback = fallback || item.sourcePath;
+        if (++seen >= 50) break;
+      }
+    } catch (_) { /* fall back to a generated sample */ }
+    return fallback;
+  }
+
   const runtime = {
     service,
     store,
     stagingManager,
     capabilities,
+    async runBenchmark({ codec, sourceRoot = null, onProgress } = {}) {
+      if (shutdownPromise) throw runtimeError('SERVICE_SHUTDOWN');
+      if (benchmarkController) throw runtimeError('BENCHMARK_ACTIVE');
+      const active = (await service.list()).some((job) => !['completed', 'failed', 'cancelled'].includes(job.state)
+        && !(job.state === 'paused' && job.recovery?.action === 'manual-intervention'));
+      if (active) throw runtimeError('JOB_ACTIVE');
+      const controller = new AbortController();
+      benchmarkController = controller;
+      try {
+        const sourcePath = await findBenchmarkClip(sourceRoot, controller.signal);
+        return await runConverterBenchmark({
+          runProcess: processRunner, planner, ffmpegPath: options.ffmpegPath, ffprobePath: options.ffprobePath,
+          tempRoot, codec, sourcePath, signal: controller.signal, onProgress, pathApi, fs: pfs
+        });
+      } finally {
+        if (benchmarkController === controller) benchmarkController = null;
+      }
+    },
+    cancelBenchmark() {
+      benchmarkController?.abort();
+    },
     start() {
       if (shutdownPromise) return Promise.reject(runtimeError('SERVICE_SHUTDOWN'));
       if (!startPromise) {

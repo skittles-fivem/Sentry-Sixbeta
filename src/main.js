@@ -164,7 +164,8 @@ const converterLifecycle = createConverterLifecycle({
       ipcMain,
       dialog,
       service: runtime.service,
-      capabilities: runtime.capabilities
+      capabilities: runtime.capabilities,
+      benchmark: { run: (request) => runtime.runBenchmark(request), cancel: () => runtime.cancelBenchmark() }
     });
     return runtime;
   },

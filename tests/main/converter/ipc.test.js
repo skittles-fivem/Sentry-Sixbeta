@@ -133,14 +133,16 @@ describe('converter IPC', () => {
       'converter:pause',
       'converter:resume',
       'converter:retryFailed',
+      'converter:runBenchmark',
       'converter:start',
       'converter:subscribeProgress',
-      'converter:unsubscribeProgress'
-    ]);
+      'converter:unsubscribeProgress',
+      'converter:cancelBenchmark'
+    ].sort());
 
     const again = registerConverterIpc({ ipcMain: h.ipcMain, dialog: h.dialog, service: h.service });
     expect(again).toBe(h.registration);
-    expect(h.ipcMain.handle).toHaveBeenCalledTimes(11);
+    expect(h.ipcMain.handle).toHaveBeenCalledTimes(13);
   });
 
   test('chooses and canonicalizes an absolute directory with a bounded purpose', async () => {
@@ -459,6 +461,19 @@ describe('converter IPC', () => {
       type: 'progress', jobId: 'job-1', revision: 10,
       progress: { outTimeUs: 1, phase: 'private-phase' }
     });
+    expect(h.sender.send).toHaveBeenCalledTimes(1);
+  });
+
+  test('forwards combined encode fps and rejects invalid fps values', async () => {
+    const h = setup();
+    await h.invoke('converter:subscribeProgress');
+    h.service.emit({ type: 'progress', jobId: 'job-1', revision: 3, progress: { phase: 'continue', fps: 412.36 } });
+    expect(h.sender.send).toHaveBeenCalledWith('converter:progress', {
+      jobId: 'job-1', revision: 3, snapshot: { id: 'job-1', revision: 3, progress: { phase: 'continue', fps: 412.4 } }
+    });
+    for (const fps of [-1, Number.POSITIVE_INFINITY, '400', 2_000_000]) {
+      h.service.emit({ type: 'progress', jobId: 'job-1', revision: 4, progress: { phase: 'continue', fps } });
+    }
     expect(h.sender.send).toHaveBeenCalledTimes(1);
   });
 

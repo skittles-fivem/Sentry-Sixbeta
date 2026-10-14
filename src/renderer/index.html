@@ -524,7 +524,27 @@
                                     <h2 data-i18n="ui.converter.configure">Configure</h2>
                                     <p data-i18n="ui.converter.configureDetail">Choose the archive, codec, safety profile, and destination before Start.</p>
                                 </div>
+                                <button type="button" id="converterBenchmarkBtn" class="converter-benchmark-btn"
+                                    title="Find the fastest parallel-conversion setting for this computer">
+                                    <span class="material-symbols-outlined mi-sm" aria-hidden="true">speed</span>
+                                    <span data-i18n="ui.converter.benchmark">Benchmark</span>
+                                </button>
                             </div>
+                            <dialog id="converterBenchmarkDialog" class="converter-benchmark-dialog" aria-labelledby="converterBenchmarkTitle">
+                                <h3 id="converterBenchmarkTitle" data-i18n="ui.converter.benchmarkTitle">Encoding benchmark</h3>
+                                <p class="converter-disclosure" data-i18n="ui.converter.benchmarkIntro">Encodes and verifies a 10-second clip (from your source folder when one is chosen) with each encoder at 1–8 parallel conversions, using the codec selected above. Takes a few minutes; close other heavy apps for accurate results.</p>
+                                <p id="converterBenchmarkStatus" class="converter-benchmark-status" role="status" aria-live="polite"></p>
+                                <table id="converterBenchmarkTable" class="converter-benchmark-table" hidden>
+                                    <thead><tr><th data-i18n="ui.converter.benchmarkEncoder">Encoder</th><th data-i18n="ui.converter.benchmarkParallel">At once</th><th data-i18n="ui.converter.benchmarkFps">FPS</th><th aria-hidden="true"></th></tr></thead>
+                                    <tbody id="converterBenchmarkRows"></tbody>
+                                </table>
+                                <p id="converterBenchmarkBest" class="converter-benchmark-best" hidden></p>
+                                <div class="converter-benchmark-actions">
+                                    <button type="button" id="converterBenchmarkRun" class="converter-benchmark-action primary" data-i18n="ui.converter.benchmarkRun">Run benchmark</button>
+                                    <button type="button" id="converterBenchmarkApply" class="converter-benchmark-action" hidden></button>
+                                    <button type="button" id="converterBenchmarkClose" class="converter-benchmark-action" data-i18n="ui.converter.benchmarkClose">Close</button>
+                                </div>
+                            </dialog>
 
                             <div class="converter-path-stack">
                                 <label class="converter-field" for="converterSourcePath">
@@ -669,6 +689,7 @@
                                 <div class="converter-counter-wide"><dt data-i18n="ui.converter.processedBytes">Video processed so far</dt><dd id="converterProcessedBytes">0 B</dd></div>
                                 <div><dt data-i18n="ui.converter.speed">Speed</dt><dd id="converterSpeed">—</dd></div>
                                 <div><dt data-i18n="ui.converter.timeRemaining">Time remaining</dt><dd id="converterEta">—</dd></div>
+                                <div><dt data-i18n="ui.converter.encodeFps">Encoding FPS</dt><dd id="converterFps">—</dd></div>
                             </dl>
 
                             <section id="converterTimings" class="converter-timings" aria-labelledby="converterTimingsTitle" hidden>

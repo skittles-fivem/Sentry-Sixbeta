@@ -45,6 +45,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   retryFailedConverter: (jobId) => ipcRenderer.invoke('converter:retryFailed', { jobId }),
   dismissConverterSummary: (jobId) => ipcRenderer.invoke('converter:dismissSummary', { jobId }),
   getConverterCapabilities: () => ipcRenderer.invoke('converter:getCapabilities'),
+  runConverterBenchmark: async (request, onProgress) => {
+    const wrapper = (_event, progress) => { if (typeof onProgress === 'function') onProgress(progress); };
+    ipcRenderer.on('converter:benchmarkProgress', wrapper);
+    try {
+      return await ipcRenderer.invoke('converter:runBenchmark', request);
+    } finally {
+      ipcRenderer.removeListener('converter:benchmarkProgress', wrapper);
+    }
+  },
+  cancelConverterBenchmark: () => ipcRenderer.invoke('converter:cancelBenchmark'),
   onConverterProgress: (callback) => {
     if (typeof callback !== 'function') throw new TypeError('callback must be a function');
     const wrapper = (_event, payload) => callback(payload);

@@ -15,7 +15,9 @@ const CHANNELS = Object.freeze([
   'converter:dismissSummary',
   'converter:getCapabilities',
   'converter:subscribeProgress',
-  'converter:unsubscribeProgress'
+  'converter:unsubscribeProgress',
+  'converter:runBenchmark',
+  'converter:cancelBenchmark'
 ]);
 const GROUPS = new Set(['RecentClips', 'SavedClips', 'SentryClips']);
 const ACTIVE_STATES = new Set([
@@ -161,6 +163,12 @@ function sanitizeLiveProgress(progress) {
   if (outTimeDescriptor && Object.prototype.hasOwnProperty.call(outTimeDescriptor, 'value')) {
     if (!Number.isSafeInteger(outTimeDescriptor.value) || outTimeDescriptor.value < 0) fail('INVALID_PROGRESS');
     sanitized.outTimeUs = outTimeDescriptor.value;
+  }
+  const fpsDescriptor = descriptors.fps;
+  if (fpsDescriptor && Object.prototype.hasOwnProperty.call(fpsDescriptor, 'value')) {
+    if (typeof fpsDescriptor.value !== 'number' || !Number.isFinite(fpsDescriptor.value)
+        || fpsDescriptor.value < 0 || fpsDescriptor.value > 1_000_000) fail('INVALID_PROGRESS');
+    sanitized.fps = Math.round(fpsDescriptor.value * 10) / 10;
   }
   return sanitized;
 }
@@ -426,6 +434,30 @@ function registerConverterIpc(options = {}) {
     'converter:unsubscribeProgress': wrapped(async (event, payload) => {
       validateNoPayload(payload);
       removeSender(event?.sender);
+      return null;
+    }),
+    'converter:runBenchmark': wrapped(async (event, payload) => {
+      if (typeof options.benchmark?.run !== 'function') fail('BENCHMARK_UNAVAILABLE');
+      if (!isPlainObject(payload) || Object.keys(payload).some((key) => !['codec', 'sourceRoot'].includes(key))) fail('INVALID_REQUEST');
+      if (!['h265', 'av1'].includes(payload.codec)) fail('INVALID_CODEC');
+      const sourceRoot = payload.sourceRoot === undefined || payload.sourceRoot === null
+        ? null : (await canonicalDirectory(payload.sourceRoot, dependencies)).real;
+      const sender = event?.sender;
+      return options.benchmark.run({
+        codec: payload.codec,
+        sourceRoot,
+        onProgress: (progress) => {
+          try {
+            if (sender && !(typeof sender.isDestroyed === 'function' && sender.isDestroyed())) {
+              sender.send('converter:benchmarkProgress', boundedJsonValue(progress, MAX_PAYLOAD_BYTES));
+            }
+          } catch (_error) { /* progress is best effort */ }
+        }
+      });
+    }),
+    'converter:cancelBenchmark': wrapped(async (_event, payload) => {
+      validateNoPayload(payload);
+      options.benchmark?.cancel?.();
       return null;
     })
   };

@@ -2472,6 +2472,14 @@ describe('parallel conversion workers', () => {
     expect(h.verifier.mock.calls[0][0]).toMatchObject({ profileId: 'custom' });
   });
 
+  test('progress events report the combined encoder fps', async () => {
+    const h = harness({ items: clips(1), queueLimit: 10,
+      spawnActions: [{ chunks: ['fps=123.4\nout_time_ms=500000\nprogress=continue\n', 'progress=end\n'] }] });
+    await h.service.whenIdle(await h.service.start(CONFIG));
+    const progress = h.events.filter((event) => event.type === 'progress').map((event) => event.progress);
+    expect(progress[0]).toMatchObject({ phase: 'continue', outTimeUs: 500000, fps: 123.4 });
+  });
+
   test('recovery cleans and re-queues interrupted non-lead items before resuming', async () => {
     const h = harness({ items: [] });
     const candidate = (itemId) => `C:\\temp\\recover-parallel-${itemId}-candidate.mp4`;

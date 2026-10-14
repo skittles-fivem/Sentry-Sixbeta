@@ -940,3 +940,139 @@ body.converter-mode #driveList {
     font-variant-numeric: tabular-nums;
     color: var(--text-color);
 }
+
+/* Encoding benchmark: a small header button and its dialog */
+.converter-section-heading .converter-benchmark-btn {
+    margin-left: auto;
+    align-self: flex-start;
+}
+
+.converter-benchmark-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.converter-benchmark-btn:hover,
+.converter-benchmark-btn:focus-visible {
+    color: var(--text-secondary);
+    border-color: var(--accent-color);
+}
+
+.converter-benchmark-dialog {
+    position: fixed;
+    inset: 0;
+    margin: auto;
+    width: min(560px, calc(100vw - 32px));
+    height: fit-content;
+    max-height: calc(100vh - 48px);
+    overflow: auto;
+    padding: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 14px;
+    background: #15181d;
+    color: var(--text-secondary, #e6e6e6);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+}
+
+.converter-benchmark-dialog .converter-disclosure {
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-muted);
+    margin: 0 0 6px;
+}
+
+.converter-benchmark-table th:last-child,
+.converter-benchmark-table td:last-child {
+    width: 35%;
+}
+
+.converter-benchmark-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.55);
+}
+
+.converter-benchmark-dialog h3 {
+    margin: 0 0 8px;
+    font-size: 15px;
+}
+
+.converter-benchmark-status {
+    min-height: 1.4em;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.converter-benchmark-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    margin: 8px 0;
+}
+
+.converter-benchmark-table[hidden] {
+    display: none;
+}
+
+.converter-benchmark-table th,
+.converter-benchmark-table td {
+    padding: 5px 6px;
+    text-align: left;
+    border-bottom: 1px solid var(--border-subtle);
+    font-variant-numeric: tabular-nums;
+}
+
+.converter-benchmark-table tr.is-best td {
+    color: var(--accent-color);
+    font-weight: 600;
+}
+
+.converter-benchmark-bar {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--accent-color);
+    opacity: 0.7;
+}
+
+.converter-benchmark-best {
+    font-size: 13px;
+    margin: 8px 0;
+}
+
+.converter-benchmark-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.converter-benchmark-action {
+    padding: 6px 12px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+}
+
+.converter-benchmark-action.primary {
+    background: var(--accent-color);
+    border-color: var(--accent-color);
+    color: #0b0d10;
+    font-weight: 600;
+}
+
+.converter-benchmark-action:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.converter-benchmark-action[hidden] {
+    display: none;
+}

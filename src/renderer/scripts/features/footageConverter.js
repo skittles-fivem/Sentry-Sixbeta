@@ -187,6 +187,16 @@ function collectElements(root) {
         countWaiting: byId('converterCountWaiting'),
         processedBytes: byId('converterProcessedBytes'),
         speed: byId('converterSpeed'),
+        fps: byId('converterFps'),
+        benchmarkButton: byId('converterBenchmarkBtn'),
+        benchmarkDialog: byId('converterBenchmarkDialog'),
+        benchmarkStatus: byId('converterBenchmarkStatus'),
+        benchmarkTable: byId('converterBenchmarkTable'),
+        benchmarkRows: byId('converterBenchmarkRows'),
+        benchmarkBest: byId('converterBenchmarkBest'),
+        benchmarkRun: byId('converterBenchmarkRun'),
+        benchmarkApply: byId('converterBenchmarkApply'),
+        benchmarkClose: byId('converterBenchmarkClose'),
         eta: byId('converterEta'),
         timings: byId('converterTimings'),
         timingRows: byId('converterTimingRows'),
@@ -503,6 +513,10 @@ function createFootageConverterController(options = {}) {
         const pace = active && !paused ? throughput(finished, remaining) : { perMinute: null, remainingMs: null };
         setText(elements.speed, pace.perMinute === null ? '—'
             : message('speedValue', '{rate} files/min', { rate: pace.perMinute.toFixed(pace.perMinute < 10 ? 1 : 0) }));
+        // Full snapshots carry no progress; keep the last reading briefly.
+        const fps = lastFps && Date.now() - lastFps.at < 5_000 ? lastFps.value : null;
+        setText(elements.fps, active && !paused && Number.isFinite(fps) && fps > 0
+            ? message('fpsValue', '{fps} fps', { fps: fps >= 100 ? Math.round(fps) : fps.toFixed(1) }) : '—');
         setText(elements.eta, pace.remainingMs === null || snapshot?.discoveryComplete === false && remaining === 0 ? '—'
             : formatRemaining(pace.remainingMs));
         renderTimings();
@@ -518,6 +532,7 @@ function createFootageConverterController(options = {}) {
         setHidden(elements.errorRows, failedItems.length === 0);
         setDisabled(elements.startButton, active);
         setDisabled(elements.concurrency, active);
+        setDisabled(elements.benchmarkButton, active);
         setDisabled(elements.profileSelect, active);
         setDisabled(elements.customBitrate, active);
         setDisabled(elements.pauseButton, !active || paused || snapshot?.state === 'paused_network');
@@ -529,9 +544,109 @@ function createFootageConverterController(options = {}) {
         renderSummary(items);
     }
 
+    let lastFps = null;
+    let benchmarkRunning = false;
+    let benchmarkBest = null;
+
+    function encoderLabel(entry) {
+        return `${entry.encoder} (${entry.hardware ? 'GPU' : 'CPU'})`;
+    }
+
+    function benchmarkErrorText(error) {
+        const code = error?.code || 'OPERATION_FAILED';
+        if (code === 'JOB_ACTIVE') return message('benchmarkJobActive', 'Finish or cancel the current conversion before benchmarking.');
+        if (code === 'CANCELLED') return message('benchmarkCancelled', 'Benchmark cancelled.');
+        if (code === 'BENCHMARK_ACTIVE') return message('benchmarkBusy', 'A benchmark is already running.');
+        return message('benchmarkFailed', 'Benchmark failed: {code}', { code });
+    }
+
+    function renderBenchmark(result) {
+        const rows = Array.isArray(result?.results) ? result.results : [];
+        const top = Math.max(1, ...rows.map((entry) => entry.fps || 0));
+        const doc = elements.benchmarkRows?.ownerDocument || globalThis.document;
+        const best = result?.best || null;
+        const cells = rows.map((entry) => {
+            const row = doc.createElement('tr');
+            const isBest = best && entry.encoder === best.encoder && entry.level === best.level;
+            row.classList?.toggle?.('is-best', Boolean(isBest));
+            const values = [encoderLabel(entry), String(entry.level),
+                entry.ok ? String(entry.fps >= 100 ? Math.round(entry.fps) : entry.fps) : message('benchmarkFailedRun', 'failed')];
+            for (const value of values) {
+                const cell = doc.createElement('td');
+                cell.textContent = value;
+                row.append(cell);
+            }
+            const barCell = doc.createElement('td');
+            const bar = doc.createElement('div');
+            bar.className = 'converter-benchmark-bar';
+            if (bar.style) bar.style.width = `${Math.round(100 * (entry.fps || 0) / top)}%`;
+            barCell.append(bar);
+            row.append(barCell);
+            return row;
+        });
+        elements.benchmarkRows?.replaceChildren(...cells);
+        setHidden(elements.benchmarkTable, cells.length === 0);
+        benchmarkBest = best;
+        if (best) {
+            setText(elements.benchmarkBest, message('benchmarkBestText',
+                'Fastest for this computer: {count} at once with {encoder} — {fps} fps.',
+                { count: best.level, encoder: encoderLabel(best), fps: best.fps >= 100 ? Math.round(best.fps) : best.fps }));
+            setText(elements.benchmarkApply, message('benchmarkApply', 'Use {count} at once', { count: best.level }));
+        }
+        setHidden(elements.benchmarkBest, !best);
+        setHidden(elements.benchmarkApply, !best);
+        setText(elements.benchmarkStatus, result?.sample === 'clip'
+            ? message('benchmarkDoneClip', 'Done — tested with a clip from your source folder.')
+            : message('benchmarkDoneGenerated', 'Done — tested with a generated sample clip.'));
+    }
+
+    async function runBenchmark() {
+        if (benchmarkRunning || typeof api.runConverterBenchmark !== 'function') return;
+        benchmarkRunning = true;
+        benchmarkBest = null;
+        setDisabled(elements.benchmarkRun, true);
+        setHidden(elements.benchmarkApply, true);
+        setHidden(elements.benchmarkBest, true);
+        setText(elements.benchmarkStatus, message('benchmarkPreparing', 'Preparing a sample clip…'));
+        try {
+            const request = {
+                codec: selected(elements.codecOptions, 'converterCodec', 'h265'),
+                sourceRoot: elements.sourcePath?.value?.trim() || null
+            };
+            const result = unwrap(await api.runConverterBenchmark(request, (progress) => {
+                if (progress?.step === 'run') {
+                    setText(elements.benchmarkStatus, message('benchmarkTesting',
+                        'Testing {encoder} with {count} at once… ({index} of {total})', {
+                            encoder: encoderLabel(progress), count: progress.level, index: progress.index, total: progress.total
+                        }));
+                }
+            }));
+            renderBenchmark(result);
+        } catch (error) {
+            setText(elements.benchmarkStatus, benchmarkErrorText(error));
+        } finally {
+            benchmarkRunning = false;
+            setDisabled(elements.benchmarkRun, false);
+        }
+    }
+
+    function closeBenchmark() {
+        if (benchmarkRunning) void Promise.resolve(api.cancelConverterBenchmark?.()).catch(() => {});
+        elements.benchmarkDialog?.close?.();
+    }
+
+    function applyBenchmark() {
+        if (!benchmarkBest) return;
+        setConcurrency(benchmarkBest.level);
+        rememberConcurrency(benchmarkBest.level);
+        notify(message('benchmarkApplied', 'Parallel conversions set to {count}.', { count: benchmarkBest.level }), { type: 'info' });
+        elements.benchmarkDialog?.close?.();
+    }
+
     function applySnapshot(next, revision = next?.revision) {
         if (!next || !Number.isSafeInteger(revision) || revision < latestRevision) return false;
         const progressOnly = Object.keys(next).every((key) => ['id', 'revision', 'progress'].includes(key));
+        if (Number.isFinite(next.progress?.fps)) lastFps = { value: next.progress.fps, at: Date.now() };
         if (progressOnly && snapshot) snapshot = { ...snapshot, progress: next.progress };
         else {
             snapshot = { ...next };
@@ -680,6 +795,13 @@ function createFootageConverterController(options = {}) {
         elements.concurrency?.addEventListener?.('change', () => {
             const value = normalizeConcurrency(elements.concurrency.value);
             if (value !== null) rememberConcurrency(value);
+        });
+        elements.benchmarkButton?.addEventListener?.('click', () => elements.benchmarkDialog?.showModal?.());
+        elements.benchmarkRun?.addEventListener?.('click', runBenchmark);
+        elements.benchmarkApply?.addEventListener?.('click', applyBenchmark);
+        elements.benchmarkClose?.addEventListener?.('click', closeBenchmark);
+        elements.benchmarkDialog?.addEventListener?.('cancel', () => {
+            if (benchmarkRunning) void Promise.resolve(api.cancelConverterBenchmark?.()).catch(() => {});
         });
         elements.startButton?.addEventListener('click', start);
         elements.pauseButton?.addEventListener('click', () => command('pauseConverter'));

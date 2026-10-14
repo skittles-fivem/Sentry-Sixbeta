@@ -288,6 +288,7 @@ function createConverterJobService(deps) {
       // Per-item worker state. With concurrency 1 there is at most one entry,
       // which reproduces the original single-worker pipeline exactly.
       children: new Map(),
+      encodeFps: new Map(),
       ownerships: new Map(),
       inFlight: new Set(),
       leadItemId: null,
@@ -702,10 +703,18 @@ function createConverterJobService(deps) {
         if (key === 'out_time_ms' || key === 'out_time_us') {
           const parsed = Number(value);
           if (Number.isSafeInteger(parsed) && parsed >= 0) progress.outTimeUs = parsed;
+        } else if (key === 'fps') {
+          const parsed = Number(value);
+          if (Number.isFinite(parsed) && parsed >= 0) runtime.encodeFps.set(itemId, parsed);
         } else if (key === 'progress' && (value === 'continue' || value === 'end')) {
           progress.phase = value;
-          // The UI shows one live progress line: the lead item's.
-          if (isLead(runtime, itemId)) emit(runtime, 'progress', { progress: { ...progress } });
+          // The UI shows one live progress line: the lead item's, plus the
+          // combined frames per second of every encode running right now.
+          if (isLead(runtime, itemId)) {
+            let fps = 0;
+            for (const value of runtime.encodeFps.values()) fps += value;
+            emit(runtime, 'progress', { progress: { ...progress, fps: Math.round(fps * 10) / 10 } });
+          }
         }
       }
     });
@@ -715,6 +724,7 @@ function createConverterJobService(deps) {
         if (settled) return;
         settled = true;
         if (runtime.children.get(itemId) === entry) runtime.children.delete(itemId);
+        runtime.encodeFps.delete(itemId);
         resolve(result);
       };
       child.once('error', () => finish({ ok: false, code: 'encoder-start-failed' }));
