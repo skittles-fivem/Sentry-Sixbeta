@@ -7,6 +7,11 @@ const { createEmptyCounters, isValidConcurrency, isValidCustomBitrate, TIMING_PH
 const MANIFEST_VERSION = 1;
 const MANIFEST_NAME = 'job.json';
 const TEMPORARY_MANIFEST_NAME = 'job.json.tmp';
+// Per-clip progress is appended here (one small JSON line per change) instead
+// of rewriting the whole manifest; job.json is rewritten every JOURNAL_LIMIT
+// changes or whenever clips are added. Loading replays the journal on top.
+const JOURNAL_NAME = 'job.journal';
+const JOURNAL_LIMIT = Object.freeze({ records: 200, bytes: 16 * 1024 * 1024 });
 const SAFE_JOB_ID = /^[a-z0-9][a-z0-9_-]{0,127}$/;
 const WINDOWS_RESERVED_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
 // Sized for a full Tesla archive: a real 6,835-clip SMB job (long UNC paths)
@@ -167,7 +172,7 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-function preflightManifest(value) {
+function preflightManifest(value, cache = null) {
   const stack = [{ value, depth: 0 }];
   const active = new WeakSet();
   let nodes = 0;
@@ -200,9 +205,21 @@ function preflightManifest(value) {
         active.delete(entry.value);
         continue;
       }
+      const current = entry.value;
+      // An item this store already validated and froze: add its measured
+      // budget instead of walking it again.
+      const budget = cache && current && typeof current === 'object' && cache.trusted.has(current)
+        ? cache.budgets.get(current) : null;
+      if (budget) {
+        nodes += budget.nodes;
+        stringCodeUnits += budget.stringCodeUnits;
+        estimatedBytes += budget.estimatedBytes;
+        if (nodes > MANIFEST_LIMITS.nodes || stringCodeUnits > MANIFEST_LIMITS.stringCodeUnits
+            || estimatedBytes + (nodes * 12) > MANIFEST_LIMITS.bytes) throw storeError('INVALID_MANIFEST');
+        continue;
+      }
       nodes += 1;
       if (nodes > MANIFEST_LIMITS.nodes || entry.depth > MANIFEST_LIMITS.depth) throw storeError('INVALID_MANIFEST');
-      const current = entry.value;
       if (current === null || typeof current === 'boolean') {
         estimatedBytes += 5;
       } else if (typeof current === 'string') {
@@ -246,6 +263,7 @@ function preflightManifest(value) {
     if (error instanceof JobStoreError) throw error;
     throw storeError('INVALID_MANIFEST');
   }
+  return { nodes, stringCodeUnits, estimatedBytes };
 }
 
 function hasOwn(value, key) {
@@ -612,8 +630,8 @@ function normalizeTimings(value) {
   return { files: safeInteger(value.files), totalMs };
 }
 
-function normalizeManifest(value) {
-  preflightManifest(value);
+function normalizeManifest(value, cache = null) {
+  preflightManifest(value, cache);
   rejectUnknownFields(value, TOP_FIELDS);
   if (value.schemaVersion !== MANIFEST_VERSION) throw storeError('UNSUPPORTED_MANIFEST_VERSION');
   assertSafeJobId(value.id);
@@ -626,7 +644,7 @@ function normalizeManifest(value) {
     config: normalizeConfig(value.config)
   };
   if (!Array.isArray(value.items) || value.items.length > MANIFEST_LIMITS.items) throw storeError('INVALID_MANIFEST');
-  result.items = value.items.map(normalizeItem);
+  result.items = value.items.map((item) => (cache && item && typeof item === 'object' && cache.trusted.has(item) ? item : normalizeItem(item)));
   if (new Set(result.items.map((item) => item.id)).size !== result.items.length) throw storeError('INVALID_MANIFEST');
   result.counters = normalizeCounters(value.counters);
   result.summary = value.summary === null ? null : normalizeSummary(value.summary);
@@ -706,13 +724,36 @@ function createJobStore(options) {
   // swapped file or directory, falls back to the full validated read.
   const lastWritten = new Map();
   let quarantineSequence = 0;
+  // Items this store normalized and deep-froze, with their measured budget.
+  // Frozen objects cannot change, so a later manifest that reuses one by
+  // reference does not need it re-validated.
+  const itemCache = { trusted: new WeakSet(), budgets: new WeakMap() };
+
+  function freezeDeep(value) {
+    if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+    Object.freeze(value);
+    for (const child of Object.values(value)) freezeDeep(child);
+    return value;
+  }
+
+  function seal(manifest) {
+    for (const item of manifest.items) {
+      if (itemCache.trusted.has(item)) continue;
+      const budget = preflightManifest(item);
+      freezeDeep(item);
+      itemCache.budgets.set(item, budget);
+      itemCache.trusted.add(item);
+    }
+    return freezeDeep(manifest);
+  }
 
   function jobPaths(id) {
     assertSafeJobId(id);
     const directory = path.resolve(rootDir, id);
     const relative = path.relative(rootDir, directory);
     if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw storeError('UNSAFE_JOB_PATH');
-    return { directory, manifest: path.join(directory, MANIFEST_NAME), temporary: path.join(directory, TEMPORARY_MANIFEST_NAME) };
+    return { directory, manifest: path.join(directory, MANIFEST_NAME), temporary: path.join(directory, TEMPORARY_MANIFEST_NAME),
+      journal: path.join(directory, JOURNAL_NAME) };
   }
 
   async function ensureRoot() {
@@ -817,6 +858,82 @@ function createJobStore(options) {
     }
   }
 
+  async function removeJournal(paths) {
+    try {
+      await fileSystem.unlink(paths.journal);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') return;
+      throw storeError('MANIFEST_WRITE_FAILED');
+    }
+    await syncDirectory(paths.directory).catch(() => { throw storeError('MANIFEST_WRITE_FAILED'); });
+  }
+
+  // A full manifest write supersedes every journal record (they all carry a
+  // revision no newer than it), so the journal is removed right after.
+  async function writeFull(paths, manifest) {
+    await atomicWrite(paths, manifest);
+    await removeJournal(paths);
+  }
+
+  async function appendJournal(paths, line, existingBytes) {
+    let handle;
+    try {
+      if (existingBytes > 0) {
+        const stat = await fileSystem.lstat(paths.journal);
+        if (!stat.isFile() || stat.isSymbolicLink() || Number(stat.size) !== existingBytes) throw storeError('MANIFEST_WRITE_FAILED');
+        handle = await fileSystem.open(paths.journal, 'a');
+      } else {
+        handle = await fileSystem.open(paths.journal, 'wx', 0o600);
+      }
+      await handle.writeFile(line, { encoding: 'utf8' });
+      await handle.sync();
+      await handle.close();
+      handle = null;
+      if (existingBytes === 0) await syncDirectory(paths.directory);
+    } catch (_) {
+      if (handle) try { await handle.close(); } catch (_) { /* bounded below */ }
+      throw storeError('MANIFEST_WRITE_FAILED');
+    }
+  }
+
+  async function readJournal(paths) {
+    let stat;
+    try { stat = await fileSystem.lstat(paths.journal); } catch (error) {
+      if (error && error.code === 'ENOENT') return null;
+      throw storeError('MANIFEST_READ_FAILED');
+    }
+    if (!stat.isFile() || stat.isSymbolicLink() || Number(stat.size) > MANIFEST_LIMITS.bytes) throw storeError('MANIFEST_READ_FAILED');
+    try { return await fileSystem.readFile(paths.journal); } catch (_) { throw storeError('MANIFEST_READ_FAILED'); }
+  }
+
+  // Replay committed journal records on top of the base manifest. Only the
+  // final line may be incomplete (a crash mid-append, before it was durable
+  // and before the change was acknowledged); it is ignored.
+  function replayJournal(base, bytes) {
+    const lines = bytes.toString('utf8').split('\n');
+    lines.pop();
+    let manifest = base;
+    for (const line of lines) {
+      const record = JSON.parse(line);
+      if (!isPlainObject(record) || !Number.isSafeInteger(record.r) || !isPlainObject(record.top)
+          || !Array.isArray(record.set) || record.top.revision !== record.r || hasOwn(record.top, 'items')) {
+        throw storeError('INVALID_MANIFEST');
+      }
+      if (record.r <= manifest.revision) continue;
+      if (record.r !== manifest.revision + 1) throw storeError('INVALID_MANIFEST');
+      const items = manifest.items.slice();
+      for (const entry of record.set) {
+        if (!Array.isArray(entry) || entry.length !== 2 || !Number.isSafeInteger(entry[0])
+            || entry[0] < 0 || entry[0] >= items.length || items[entry[0]].id !== entry[1]?.id) {
+          throw storeError('INVALID_MANIFEST');
+        }
+        items[entry[0]] = entry[1];
+      }
+      manifest = { ...record.top, items };
+    }
+    return manifest;
+  }
+
   function statIdentity(stat) {
     return {
       dev: String(stat.dev), ino: String(stat.ino), size: Number(stat.size),
@@ -909,11 +1026,22 @@ function createJobStore(options) {
       if (!read) return null;
       if (read.changed) continue;
       if (read.oversized) throw storeError('MANIFEST_READ_FAILED');
+      let base;
       try {
-        const manifest = normalizeManifest(JSON.parse(read.bytes.toString('utf8')));
-        if (manifest.id !== id) throw storeError('INVALID_MANIFEST');
-        return manifest;
-      } catch (_) { /* quarantine the exact raw bytes read below */ }
+        base = normalizeManifest(JSON.parse(read.bytes.toString('utf8')));
+        if (base.id !== id) throw storeError('INVALID_MANIFEST');
+      } catch (_) { base = null; /* quarantine the exact raw bytes read below */ }
+      if (base) {
+        const journal = await readJournal(paths);
+        if (!journal || journal.length === 0) return base;
+        try {
+          const manifest = normalizeManifest(replayJournal(base, journal));
+          if (manifest.id !== id) throw storeError('INVALID_MANIFEST');
+          return manifest;
+        } catch (_) { /* quarantine the journal below; job.json itself is intact */ }
+        if (await quarantine(paths, journal)) throw storeError('CORRUPT_MANIFEST');
+        continue;
+      }
       const quarantined = await quarantine(paths, read.bytes);
       if (quarantined) throw storeError('CORRUPT_MANIFEST');
     }
@@ -976,7 +1104,7 @@ function createJobStore(options) {
       }
       const paths = await ensureJobDirectory(safeManifest.id);
       lastWritten.delete(safeManifest.id);
-      await atomicWrite(paths, safeManifest);
+      await writeFull(paths, safeManifest);
       return cloneManifest(safeManifest);
     });
   }
@@ -1005,31 +1133,57 @@ function createJobStore(options) {
     return manifests;
   }
 
-  async function rememberWritten(id, paths, manifest) {
+  async function rememberWritten(id, paths, manifest, journal) {
     try {
       const stat = await fileSystem.lstat(paths.manifest);
       if (stat.isFile() && !stat.isSymbolicLink()) {
-        lastWritten.set(id, { manifest, identity: statIdentity(stat) });
+        lastWritten.set(id, { manifest, identity: statIdentity(stat), journal });
         return;
       }
     } catch (_) { /* fall back to full reads */ }
     lastWritten.delete(id);
   }
 
+  async function journalBytesOnDisk(paths) {
+    try {
+      const stat = await fileSystem.lstat(paths.journal);
+      return stat.isFile() && !stat.isSymbolicLink() ? Number(stat.size) : -1;
+    } catch (error) {
+      return error && error.code === 'ENOENT' ? 0 : -1;
+    }
+  }
+
+  // Returns the manifest plus the journal state when this store wrote both
+  // and neither changed on disk since; otherwise a full validated read.
   async function currentManifest(id) {
     const cached = lastWritten.get(id);
     if (cached) {
       lastWritten.delete(id);
       try {
-        const stat = await fileSystem.lstat(jobPaths(id).manifest);
+        const paths = jobPaths(id);
+        const stat = await fileSystem.lstat(paths.manifest);
         const identity = statIdentity(stat);
         if (stat.isFile() && !stat.isSymbolicLink() && sameIdentity(identity, cached.identity)
-            && identity.ctimeMs === cached.identity.ctimeMs) {
-          return cached.manifest;
+            && identity.ctimeMs === cached.identity.ctimeMs
+            && await journalBytesOnDisk(paths) === cached.journal.bytes) {
+          return { manifest: cached.manifest, journal: cached.journal };
         }
       } catch (_) { /* full read below reports the real state */ }
     }
-    return readManifest(id);
+    return { manifest: await readManifest(id), journal: null };
+  }
+
+  function journalRecord(current, next) {
+    if (current.items.length !== next.items.length) return null;
+    const set = [];
+    for (let index = 0; index < next.items.length; index += 1) {
+      if (next.items[index] === current.items[index]) continue;
+      if (next.items[index].id !== current.items[index].id) return null;
+      set.push([index, next.items[index]]);
+    }
+    const top = { ...next };
+    delete top.items;
+    return `${JSON.stringify({ r: next.revision, top, set })}\n`;
   }
 
   async function transition(id, patch) {
@@ -1041,13 +1195,24 @@ function createJobStore(options) {
       if (!TOP_FIELDS.has(key)) throw storeError(isSensitiveField(key) ? 'SENSITIVE_MANIFEST_DATA' : 'INVALID_MANIFEST');
     }
     return runExclusive(id, async () => {
-      const current = await currentManifest(id);
+      const { manifest: current, journal } = await currentManifest(id);
       if (!current) throw storeError('JOB_NOT_FOUND');
-      const next = normalizeManifest({ ...current, ...patch, revision: current.revision + 1 });
+      const next = seal(normalizeManifest({ ...current, ...patch, revision: current.revision + 1 }, itemCache));
       const paths = await ensureJobDirectory(id);
-      await atomicWrite(paths, next);
-      await rememberWritten(id, paths, next);
-      return cloneManifest(next);
+      const line = journal && journal.records < JOURNAL_LIMIT.records ? journalRecord(current, next) : null;
+      const lineBytes = line ? Buffer.byteLength(line, 'utf8') : 0;
+      let written;
+      if (line && journal.bytes + lineBytes <= JOURNAL_LIMIT.bytes) {
+        await appendJournal(paths, line, journal.bytes);
+        written = { records: journal.records + 1, bytes: journal.bytes + lineBytes };
+      } else {
+        await writeFull(paths, next);
+        written = { records: 0, bytes: 0 };
+      }
+      await rememberWritten(id, paths, next, written);
+      // Returned frozen (it is the store's own cached copy); callers build new
+      // objects for changes, and reusing its items keeps the next save cheap.
+      return next;
     });
   }
 
@@ -1137,7 +1302,7 @@ function createJobStore(options) {
         ...(reinspect ? { replacementPhase: phase } : {}) });
       const paths = await ensureJobDirectory(id);
       lastWritten.delete(id);
-      await atomicWrite(paths, recovered);
+      await writeFull(paths, recovered);
       return cloneManifest(recovered);
     });
   }

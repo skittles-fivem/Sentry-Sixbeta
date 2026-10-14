@@ -35,7 +35,27 @@ async function removeSnapshotFile(directory, snapshotPath) {
   if (firstError) throw firstError;
 }
 
-async function createVerificationSnapshot({ bytes, size = bytes?.length, sha256: expectedSha256 = bytes && sha256(bytes), tempRoot = os.tmpdir() } = {}) {
+// Move the just-read candidate into the private snapshot folder instead of
+// writing a second copy. Only a plain, single-link file of the exact size read
+// is accepted; its content is re-hashed by the verifier after decoding and
+// again before publication, so a later change is still caught.
+async function adoptIntoSnapshot(adoptPath, snapshotPath, size) {
+  const before = await fs.promises.lstat(adoptPath);
+  if (!before.isFile() || before.nlink !== 1 || before.size !== size) return false;
+  try {
+    await fs.promises.rename(adoptPath, snapshotPath);
+  } catch (_error) {
+    return false; // different volume, locked by a scanner, etc.: copy instead
+  }
+  const after = await fs.promises.lstat(snapshotPath);
+  if (!after.isFile() || after.nlink !== 1 || after.size !== size || after.ino !== before.ino
+      || after.dev !== before.dev || after.mtimeMs !== before.mtimeMs) {
+    throw new Error('Adopted snapshot changed');
+  }
+  return true;
+}
+
+async function createVerificationSnapshot({ bytes, size = bytes?.length, sha256: expectedSha256 = bytes && sha256(bytes), tempRoot = os.tmpdir(), adoptPath } = {}) {
   if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new TypeError('Snapshot bytes must be a non-empty Buffer');
   if (!Number.isSafeInteger(size) || size !== bytes.length) throw new TypeError('Snapshot size must match its bytes');
   if (!validDigest(expectedSha256) || expectedSha256 !== sha256(bytes)) throw new TypeError('Snapshot digest must match its bytes');
@@ -49,11 +69,15 @@ async function createVerificationSnapshot({ bytes, size = bytes?.length, sha256:
     directory = await fs.promises.mkdtemp(path.join(tempRoot, SNAPSHOT_PREFIX));
     await fs.promises.chmod(directory, 0o700);
     snapshotPath = path.join(directory, `${token}.mp4`);
-    handle = await fs.promises.open(snapshotPath, 'wx', 0o600);
-    await handle.writeFile(bytes);
-    await handle.sync();
-    await handle.close();
-    handle = null;
+    const adopted = typeof adoptPath === 'string' && path.isAbsolute(adoptPath)
+      && await adoptIntoSnapshot(adoptPath, snapshotPath, size);
+    if (!adopted) {
+      handle = await fs.promises.open(snapshotPath, 'wx', 0o600);
+      await handle.writeFile(bytes);
+      await handle.sync();
+      await handle.close();
+      handle = null;
+    }
     await fs.promises.chmod(snapshotPath, 0o400);
   } catch (error) {
     if (handle) {

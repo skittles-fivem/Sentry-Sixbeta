@@ -976,7 +976,12 @@ async function verifyCandidate(options) {
   const snapshotFactory = options.createSnapshot || createVerificationSnapshot;
   let snapshot;
   try {
-    snapshot = await Promise.resolve(snapshotFactory({ bytes: candidateBytes, size: outputBytes, sha256: outputSha256 }));
+    snapshot = await Promise.resolve(snapshotFactory({
+      bytes: candidateBytes,
+      size: outputBytes,
+      sha256: outputSha256,
+      ...(options.adoptCandidate === true ? { adoptPath: options.candidate } : {})
+    }));
   } catch (_error) {
     return failure(VERIFICATION_REASONS.SNAPSHOT_FAILED, sourceBytes, outputBytes, { kind: 'create-failed' });
   }

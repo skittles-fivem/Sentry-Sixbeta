@@ -585,7 +585,43 @@ describe('converter job orchestration', () => {
   });
 
   describe('GPU decoding', () => {
-    const accel = (encoder) => (encoder.endsWith('_nvenc') ? ['-hwaccel', 'cuda'] : null);
+    const accel = (encoder, options = {}) => (options.zeroCopy ? null : encoder.endsWith('_nvenc') ? ['-hwaccel', 'cuda'] : null);
+    const zeroCopyAccel = (encoder, options = {}) => (!encoder.endsWith('_nvenc') ? null
+      : options.zeroCopy ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'] : ['-hwaccel', 'cuda']);
+    const tier = (args) => (args.includes('-hwaccel_output_format') ? 'zero-copy' : args.includes('-hwaccel') ? 'gpu' : 'cpu');
+
+    test('keeps NVIDIA frames on the GPU and drops the software pixel format', async () => {
+      const h = harness({ deps: { decodeAccel: zeroCopyAccel } });
+      const id = await h.service.start(CONFIG);
+      await h.service.whenIdle(id);
+      const args = h.spawnProcess.mock.calls[0][1];
+      expect(tier(args)).toBe('zero-copy');
+      expect(args).not.toContain('-pix_fmt');
+      expect(h.verifier.mock.calls[0][0].decodeAccel).toEqual(['-hwaccel', 'cuda']);
+    });
+
+    test('steps down zero-copy, then GPU decode, then CPU decode before a CPU encoder', async () => {
+      const h = harness({ deps: { decodeAccel: zeroCopyAccel }, spawnActions: [{ status: 1 }, { status: 1 }, { status: 0 }] });
+      const id = await h.service.start(CONFIG);
+      await h.service.whenIdle(id);
+      expect(h.spawnProcess.mock.calls.map(([, args]) => tier(args))).toEqual(['zero-copy', 'gpu', 'cpu']);
+      expect(h.spawnProcess.mock.calls[2][1]).toContain('-pix_fmt');
+      expect((await h.service.get(id)).items[0]).toMatchObject({ state: 'completed', encoder: 'hevc_nvenc' });
+      const next = await h.service.start(CONFIG);
+      await h.service.whenIdle(next);
+      expect(tier(h.spawnProcess.mock.calls[3][1])).toBe('cpu');
+    });
+
+    test('a GPU encoder failure does not disable GPU decoding for later clips', async () => {
+      const h = harness({ deps: { decodeAccel: zeroCopyAccel },
+        spawnActions: [{ status: 1 }, { status: 1 }, { status: 1 }, { status: 0 }, { status: 0 }] });
+      const id = await h.service.start(CONFIG);
+      await h.service.whenIdle(id);
+      expect((await h.service.get(id)).items[0]).toMatchObject({ state: 'completed', encoder: 'libx265' });
+      const next = await h.service.start(CONFIG);
+      await h.service.whenIdle(next);
+      expect(tier(h.spawnProcess.mock.calls[4][1])).toBe('zero-copy');
+    });
     const hasAccel = (args) => args.includes('-hwaccel');
 
     test('decodes the source on the GPU and passes the GPU decoder to verify', async () => {
@@ -675,6 +711,36 @@ describe('converter job orchestration', () => {
       space: { sufficient: true, requiredBytes: 2_000_000, freeBytes: 3_000_000 }
     });
     expect(h.stagingManager.stageSource).toHaveBeenCalledTimes(1);
+  });
+
+  test('replacing from a network source reads it once: the staging copy supplies the fingerprint', async () => {
+    const authority = { size: 1_000_000, sha256: 'd'.repeat(64), device: '7', inode: '8' };
+    const captureSource = jest.fn(async () => { throw new Error('should not re-read the network source'); });
+    const stageSource = jest.fn(async ({ source, expectedSource }) => {
+      expect(expectedSource).toBeUndefined();
+      return { stagedSource: `${source}.staged`, expectedSource: authority };
+    });
+    const replaceOriginal = jest.fn(async ({ source, expectedSource }) => {
+      expect(expectedSource).toEqual(authority);
+      return { finalPath: source, outputBytes: 800_000 };
+    });
+    const h = harness({ stagingManager: { captureSource, stageSource, replaceOriginal } });
+    const id = await h.service.start({ ...CONFIG, networkMode: 'staging', destinationRoot: null, outputMode: 'replace', replacementConfirmed: true });
+    await h.service.whenIdle(id);
+    expect(captureSource).not.toHaveBeenCalled();
+    expect(replaceOriginal).toHaveBeenCalledTimes(1);
+    const item = (await h.store.load(id)).items[0];
+    expect(item.expectedSource).toEqual(authority);
+  });
+
+  test('replacing refuses a staging copy that returned no fingerprint', async () => {
+    const stageSource = jest.fn(async ({ source }) => ({ stagedSource: source }));
+    const replaceOriginal = jest.fn();
+    const h = harness({ stagingManager: { stageSource, replaceOriginal, captureSource: jest.fn() } });
+    const id = await h.service.start({ ...CONFIG, networkMode: 'staging', destinationRoot: null, outputMode: 'replace', replacementConfirmed: true });
+    await h.service.whenIdle(id);
+    expect(replaceOriginal).not.toHaveBeenCalled();
+    expect((await h.service.get(id)).items[0].state).toBe('failed');
   });
 
   test('checks real free space before every forced staging copy', async () => {

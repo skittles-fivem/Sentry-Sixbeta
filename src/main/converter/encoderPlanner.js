@@ -63,7 +63,7 @@ function encoderBelongsToFamily(codec, encoder) {
  * The MP4 muxer is forced to avoid edit lists and shift negative timestamps to
  * zero while passthrough frame mode prevents implicit duplication or dropping.
  */
-function buildEncodeArgs({ codec, encoder, bitrate, vaapiDevice = '/dev/dri/renderD128' }) {
+function buildEncodeArgs({ codec, encoder, bitrate, vaapiDevice = '/dev/dri/renderD128', hwFrames = false }) {
   requireFamily(codec);
   requirePositive('bitrate', bitrate);
   if (typeof encoder !== 'string' || !encoderBelongsToFamily(codec, encoder)) {
@@ -78,7 +78,10 @@ function buildEncodeArgs({ codec, encoder, bitrate, vaapiDevice = '/dev/dri/rend
 
   args.push('-c:v', encoder, '-b:v', String(Math.round(bitrate)));
 
-  if (encoder.endsWith('_qsv')) args.push('-pix_fmt', 'nv12');
+  // GPU-resident input frames (zero-copy decode) are already 8-bit 4:2:0 and
+  // cannot pass through a software pixel-format conversion.
+  if (hwFrames) { /* keep frames on the GPU */ }
+  else if (encoder.endsWith('_qsv')) args.push('-pix_fmt', 'nv12');
   else if (!encoder.endsWith('_vaapi')) args.push('-pix_fmt', 'yuv420p');
 
   if (encoder.endsWith('_amf')) args.push('-rc', 'vbr_peak');
@@ -102,8 +105,10 @@ function buildEncodeArgs({ codec, encoder, bitrate, vaapiDevice = '/dev/dri/rend
  * Decoded frames are copied back to system memory, so the encode arguments
  * stay identical with or without them. CPU encoders get no GPU decode.
  */
-function decodeAccelArgs(encoder, { platform = process.platform, vaapiDevice = '/dev/dri/renderD128' } = {}) {
+function decodeAccelArgs(encoder, { platform = process.platform, vaapiDevice = '/dev/dri/renderD128', zeroCopy = false } = {}) {
   if (typeof encoder !== 'string') return null;
+  // Zero-copy: NVDEC frames stay in GPU memory and go straight into NVENC.
+  if (zeroCopy) return encoder.endsWith('_nvenc') ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'] : null;
   const vaapi = ['-hwaccel', 'vaapi', '-hwaccel_device', vaapiDevice];
   if (encoder.endsWith('_nvenc')) return ['-hwaccel', 'cuda'];
   if (encoder.endsWith('_videotoolbox')) return ['-hwaccel', 'videotoolbox'];

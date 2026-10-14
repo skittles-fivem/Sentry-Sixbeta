@@ -1675,3 +1675,120 @@ describe('converter job store', () => {
     expect(await store.load('inspection-failure')).toMatchObject({ state: 'copying', revision: 9 });
   });
 });
+
+describe('per-clip progress journal', () => {
+  let temporaryRoot;
+  let rootDir;
+  beforeEach(async () => {
+    temporaryRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sentry-job-journal-'));
+    rootDir = path.join(temporaryRoot, 'converter-jobs');
+  });
+  afterEach(async () => { await fs.promises.rm(temporaryRoot, { recursive: true, force: true }); });
+
+  const items = (count) => Array.from({ length: count }, (_, index) => validVideoItem({
+    id: `item-${index}`,
+    relativePath: `SentryClips/2026-08-30_12-34-56/clip-${index}-front.mp4`,
+    sourcePath: `D:\\TeslaCam\\SentryClips\\2026-08-30_12-34-56\\clip-${index}-front.mp4`
+  }));
+  const jobDir = (id) => path.join(rootDir, id);
+  const readBase = async (id) => JSON.parse(await fs.promises.readFile(path.join(jobDir(id), 'job.json'), 'utf8'));
+  const journalPath = (id) => path.join(jobDir(id), 'job.journal');
+
+  async function started(store, id, count = 3) {
+    await store.create({ id, config: validConfig(), state: 'waiting', items: items(count) });
+    // The first transition after a full read writes job.json and primes the journal.
+    return store.transition(id, { updatedAt: 1 });
+  }
+
+  function setItem(manifest, index, changes) {
+    return manifest.items.map((item, position) => (position === index ? { ...item, ...changes } : item));
+  }
+
+  test('appends one-clip changes to the journal instead of rewriting job.json', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    let current = await started(store, 'journal-basic');
+    const baseRevision = (await readBase('journal-basic')).revision;
+    current = await store.transition('journal-basic', { items: setItem(current, 1, { state: 'processing' }) });
+    current = await store.transition('journal-basic', { items: setItem(current, 1, { attempts: 1, encoder: 'hevc_nvenc' }) });
+    expect((await readBase('journal-basic')).revision).toBe(baseRevision);
+    const lines = (await fs.promises.readFile(journalPath('journal-basic'), 'utf8')).trim().split('\n');
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[1]).set).toEqual([[1, expect.objectContaining({ id: 'item-1', encoder: 'hevc_nvenc' })]]);
+    // A new process (fresh store) sees every change.
+    const reloaded = await createJobStore({ rootDir, fs: fs.promises }).load('journal-basic');
+    expect(reloaded.revision).toBe(current.revision);
+    expect(reloaded.items[1]).toMatchObject({ state: 'processing', attempts: 1, encoder: 'hevc_nvenc' });
+    expect(reloaded.items[0].state).toBe('queued');
+  });
+
+  test('returns a frozen manifest and still validates changed clips', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    const current = await started(store, 'journal-validate');
+    expect(Object.isFrozen(current)).toBe(true);
+    expect(Object.isFrozen(current.items[0])).toBe(true);
+    await expect(store.transition('journal-validate', { items: setItem(current, 0, { state: 'not-a-state' }) }))
+      .rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
+    await expect(store.transition('journal-validate', { items: setItem(current, 0, { state: 'failed' }) }))
+      .rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
+    expect((await store.load('journal-validate')).items[0].state).toBe('queued');
+  });
+
+  test('ignores a torn final journal line from a crash mid-append', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    let current = await started(store, 'journal-torn');
+    current = await store.transition('journal-torn', { items: setItem(current, 2, { state: 'processing' }) });
+    await fs.promises.appendFile(journalPath('journal-torn'), '{"r":999,"top":{"sta');
+    const reloaded = await createJobStore({ rootDir, fs: fs.promises }).load('journal-torn');
+    expect(reloaded).toMatchObject({ revision: current.revision });
+    expect(reloaded.items[2].state).toBe('processing');
+  });
+
+  test('a corrupt committed journal record quarantines the journal and reports a corrupt job', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    let current = await started(store, 'journal-corrupt');
+    current = await store.transition('journal-corrupt', { items: setItem(current, 0, { state: 'processing' }) });
+    await fs.promises.writeFile(journalPath('journal-corrupt'), `{not json}\n${await fs.promises.readFile(journalPath('journal-corrupt'), 'utf8')}`);
+    await expect(createJobStore({ rootDir, fs: fs.promises }).load('journal-corrupt')).rejects.toMatchObject({ code: 'CORRUPT_MANIFEST' });
+    expect((await fs.promises.readdir(jobDir('journal-corrupt'))).some((name) => name.startsWith('job.json.corrupt-'))).toBe(true);
+  });
+
+  test('rejects a journal record that changes a clip identity or skips a revision', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    let current = await started(store, 'journal-gap');
+    current = await store.transition('journal-gap', { items: setItem(current, 0, { state: 'processing' }) });
+    const record = JSON.parse((await fs.promises.readFile(journalPath('journal-gap'), 'utf8')).trim());
+    record.r += 5;
+    record.top.revision = record.r;
+    await fs.promises.writeFile(journalPath('journal-gap'), `${JSON.stringify(record)}\n`);
+    await expect(createJobStore({ rootDir, fs: fs.promises }).load('journal-gap')).rejects.toMatchObject({ code: 'CORRUPT_MANIFEST' });
+  });
+
+  test('compacts into job.json after 200 changes and when clips are added', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    let current = await started(store, 'journal-compact', 2);
+    for (let step = 0; step < 200; step += 1) {
+      current = await store.transition('journal-compact', { items: setItem(current, step % 2, { attempts: step % 3 }) });
+    }
+    expect((await fs.promises.readFile(journalPath('journal-compact'), 'utf8')).trim().split('\n')).toHaveLength(200);
+    current = await store.transition('journal-compact', { items: setItem(current, 0, { state: 'processing' }) });
+    await expect(fs.promises.access(journalPath('journal-compact'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await readBase('journal-compact')).revision).toBe(current.revision);
+
+    current = await store.transition('journal-compact', { items: setItem(current, 1, { state: 'processing' }) });
+    await fs.promises.access(journalPath('journal-compact'));
+    const added = items(3)[2];
+    current = await store.transition('journal-compact', { items: [...current.items, added] });
+    await expect(fs.promises.access(journalPath('journal-compact'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await readBase('journal-compact')).items).toHaveLength(3);
+  });
+
+  test('save and recovery writes supersede the journal', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    let current = await started(store, 'journal-save');
+    current = await store.transition('journal-save', { items: setItem(current, 0, { state: 'processing' }) });
+    const copy = JSON.parse(JSON.stringify(current));
+    await store.save({ ...copy, revision: copy.revision + 1, state: 'paused' });
+    await expect(fs.promises.access(journalPath('journal-save'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await createJobStore({ rootDir, fs: fs.promises }).load('journal-save')).toMatchObject({ state: 'paused', revision: copy.revision + 1 });
+  });
+});

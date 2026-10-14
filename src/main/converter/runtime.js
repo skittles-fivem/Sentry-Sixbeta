@@ -503,7 +503,10 @@ async function createConverterRuntime(options = {}) {
     verifierOptions: {
       ffmpegPath: options.ffmpegPath,
       ffprobePath: options.ffprobePath,
-      createSnapshot: snapshotRegistry.createSnapshot
+      createSnapshot: snapshotRegistry.createSnapshot,
+      // The candidate is a private temp file: move it into the snapshot
+      // instead of writing a second full copy of every converted clip.
+      adoptCandidate: true
     }
   });
 
@@ -562,7 +565,7 @@ async function createConverterRuntime(options = {}) {
     spawnProcess,
     ffmpegPath: options.ffmpegPath,
     // Decode on the encoder's GPU (falls back to CPU decoding automatically).
-    decodeAccel: options.gpuDecode === false ? undefined : (encoder) => decodeAccelArgs(encoder, { platform }),
+    decodeAccel: options.gpuDecode === false ? undefined : (encoder, accel = {}) => decodeAccelArgs(encoder, { platform, zeroCopy: accel.zeroCopy === true }),
     pathApi,
     network,
     classifyPath: (target) => classifyPath(target, { pathApi, platform, volumeInfo }),

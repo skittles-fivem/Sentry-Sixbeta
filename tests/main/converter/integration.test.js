@@ -15,6 +15,7 @@ const { inspectAv1Telemetry } = require('../../../src/main/converter/av1Telemetr
 const { isWithinProfile } = require('../../../src/main/converter/contracts');
 const { createFileTransaction } = require('../../../src/main/converter/staging');
 const { parseMp4, findBoxes } = require('../../../src/main/converter/mp4');
+const { createJobStore } = require('../../../src/main/converter/jobStore');
 const { assertFullDecode, createTeslaH264Fixture, locateBundledTools,
   measureQuality, probeFramePts, probeRequiredEncodersSync, probeVideo, runProcess } = require('./ffmpegFixtures');
 const { h265Mp4, hevcNal, lengthPrefixedSample } = require('./fixtureBuilders');
@@ -349,6 +350,48 @@ describeRealEncoders(`real pipeline (${encoderGate.reason || 'required CPU encod
     const lines = log.trim().split('\n');
     expect(lines).toHaveLength(4);
     for (const line of lines) expect(line).toMatch(/RecentClips\/2026-08-30_12-00-0\d-front\.mp4 total=[\d.]+s .*encode=[\d.]+s .*verify=[\d.]+s/);
+  });
+
+  // Atomic replacement of originals is only supported on Windows and macOS.
+  (process.platform === 'linux' ? test.skip : test)('replaces originals in parallel from a staged (network-style) source with one source read each', async () => {
+    const caseRoot = path.join(root, 'parallel-replace-staging');
+    const sourceFolder = path.join(caseRoot, 'source', 'RecentClips');
+    const userDataPath = path.join(caseRoot, 'user-data');
+    await Promise.all([fs.promises.mkdir(sourceFolder, { recursive: true }), fs.promises.mkdir(userDataPath, { recursive: true })]);
+    const names = [0, 1, 2].map((index) => `2026-08-30_12-00-0${index}-front.mp4`);
+    await Promise.all(names.map((name, index) => createTeslaH264Fixture({ ffmpegPath: tools.ffmpegPath,
+      outputPath: path.join(sourceFolder, name), telemetryPattern: telemetryPattern(index % 2 ? 'driving' : 'parked-to-driving', 16 * 12),
+      durationSeconds: 16, spatialNoise: 16 })));
+    const timelines = new Map();
+    for (const name of names) timelines.set(name, extractH264TelemetryTimeline(await fs.promises.readFile(path.join(sourceFolder, name))));
+    const runtime = await createConverterRuntime({
+      userDataPath, tempPath: caseRoot, ffmpegPath: tools.ffmpegPath, ffprobePath: tools.ffprobePath,
+      spawn, processTimeoutMs: 120_000,
+      removeOwned: ownedFileRemover(), renameExclusive: noReplacePromoter(),
+      factories: { createEncoderPlanner(options) {
+        const real = createEncoderPlanner(options);
+        return { select: real.selectCpuFallback, selectCpuFallback: real.selectCpuFallback };
+      } }
+    });
+    const jobId = await runtime.service.start({ sourceRoot: path.join(caseRoot, 'source'), destinationRoot: null,
+      codec: 'h265', profileId: 'balanced', networkMode: 'staging', outputMode: 'replace', replacementConfirmed: true,
+      includedGroups: ['RecentClips'], concurrency: 3 });
+    const job = await runtime.service.whenIdle(jobId);
+    expect(job.items.map((item) => [item.state, item.resultCode, item.failure?.code])).toEqual(
+      names.map(() => ['completed', 'converted', undefined]));
+    for (const name of names) {
+      const installed = await fs.promises.readFile(path.join(sourceFolder, name));
+      expect(inspectOutput('h265', installed).fingerprints).toEqual(expectedFingerprints(timelines.get(name)));
+      await assertFullDecode(tools.ffmpegPath, path.join(sourceFolder, name));
+    }
+    expect((await fs.promises.readdir(sourceFolder)).filter((name) => /^(TEMP-|BACKUP-)/.test(name))).toEqual([]);
+    // Nothing left behind in temp: staged copies and verification snapshots are gone.
+    const leftovers = (await fs.promises.readdir(caseRoot)).filter((name) => name.startsWith('sentry-six-verification-'));
+    expect(leftovers).toEqual([]);
+    await runtime.shutdown();
+    // The persisted job (job.json + journal) reloads in a fresh store.
+    const reloaded = await createJobStore({ rootDir: path.join(userDataPath, 'converter-jobs'), fs: fs.promises }).load(jobId);
+    expect(reloaded.items.every((item) => item.state === 'completed')).toBe(true);
   });
 
   test('copies event assets, skips real H265/AV1 inputs, and resumes after a simulated share reconnect', async () => {

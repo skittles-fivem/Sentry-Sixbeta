@@ -374,4 +374,9 @@ describe('decodeAccelArgs', () => {
   ])('%s on %s', (encoder, platform, expected) => {
     expect(decodeAccelArgs(encoder, { platform })).toEqual(expected);
   });
+  test('zero-copy is NVIDIA only', () => {
+    expect(decodeAccelArgs('av1_nvenc', { platform: 'win32', zeroCopy: true }))
+      .toEqual(['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda']);
+    expect(decodeAccelArgs('hevc_qsv', { platform: 'win32', zeroCopy: true })).toBeNull();
+  });
 });

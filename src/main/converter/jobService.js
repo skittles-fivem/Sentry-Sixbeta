@@ -104,14 +104,26 @@ function ownershipOf(value) {
   return composeOwnership({}, value || {});
 }
 
+const PRIVATE_SNAPSHOT_KEYS = ['ownedPaths', 'ownedArtifacts', 'publicationArtifact'];
+
+// Frozen items (the job store's own validated copies) cannot change, so the
+// snapshot reuses them when they carry nothing private instead of copying
+// every item of a large job on each update.
+function publicItem(item) {
+  if (Object.isFrozen(item) && item && typeof item === 'object'
+      && !PRIVATE_SNAPSHOT_KEYS.some((key) => Object.prototype.hasOwnProperty.call(item, key))) return item;
+  const safeItem = clone(item);
+  for (const key of PRIVATE_SNAPSHOT_KEYS) delete safeItem[key];
+  return safeItem;
+}
+
 function publicSnapshot(manifest) {
-  const snapshot = clone(manifest);
-  for (const key of ['ownedPaths', 'ownedArtifacts', 'publicationArtifact']) delete snapshot[key];
-  snapshot.items = (snapshot.items || []).map((item) => {
-    const safeItem = { ...item };
-    for (const key of ['ownedPaths', 'ownedArtifacts', 'publicationArtifact']) delete safeItem[key];
-    return safeItem;
-  });
+  const snapshot = {};
+  for (const [key, value] of Object.entries(manifest)) {
+    if (key === 'items' || PRIVATE_SNAPSHOT_KEYS.includes(key)) continue;
+    snapshot[key] = value && typeof value === 'object' && !Object.isFrozen(value) ? clone(value) : value;
+  }
+  snapshot.items = (manifest.items || []).map(publicItem);
   return deepFreeze(snapshot);
 }
 
@@ -196,14 +208,25 @@ function createConverterJobService(deps) {
   const encodeDecodeBroken = new Set();
   const verifyDecodeFallbacks = new Map();
   const VERIFY_DECODE_FALLBACK_LIMIT = 3;
-  function decodeAccelFor(encoder, purpose) {
-    if (encoder?.hardware !== true || typeof deps.decodeAccel !== 'function') return null;
-    if (purpose === 'encode' && encodeDecodeBroken.has(encoder.codec)) return null;
-    if (purpose === 'verify' && (verifyDecodeFallbacks.get(encoder.codec) || 0) >= VERIFY_DECODE_FALLBACK_LIMIT) return null;
+  function accelArgs(encoder, options) {
     try {
-      const args = deps.decodeAccel(encoder.codec);
+      const args = deps.decodeAccel(encoder.codec, options);
       return Array.isArray(args) && args.length > 0 ? args : null;
     } catch (_) { return null; }
+  }
+  function decodeAccelFor(encoder, purpose) {
+    if (encoder?.hardware !== true || typeof deps.decodeAccel !== 'function') return null;
+    if (purpose === 'verify' && (verifyDecodeFallbacks.get(encoder.codec) || 0) >= VERIFY_DECODE_FALLBACK_LIMIT) return null;
+    return accelArgs(encoder);
+  }
+  // Encode decode tiers, fastest first: GPU frames kept on the GPU (zero-copy),
+  // then GPU decode, then (implicitly, after the list) CPU decode.
+  function encodeDecodeTiers(encoder) {
+    if (encoder?.hardware !== true || typeof deps.decodeAccel !== 'function') return [];
+    return [
+      { key: `${encoder.codec}:zero-copy`, args: accelArgs(encoder, { zeroCopy: true }) },
+      { key: `${encoder.codec}:gpu`, args: accelArgs(encoder) }
+    ].filter((tier) => tier.args && !encodeDecodeBroken.has(tier.key));
   }
   const pathApi = deps.pathApi || require('path');
   const clock = deps.clock || { now: Date.now, sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) };
@@ -674,11 +697,12 @@ function createConverterJobService(deps) {
   }
 
   async function runChild(runtime, itemId, source, target, codec, encoder, bitrate, decodeAccel = null) {
+    const hwFrames = Array.isArray(decodeAccel) && decodeAccel.includes('-hwaccel_output_format');
     const args = [
       '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
       ...(decodeAccel || []),
       '-i', source,
-      ...buildEncodeArgs({ codec, encoder: encoder.codec, bitrate }),
+      ...buildEncodeArgs({ codec, encoder: encoder.codec, bitrate, hwFrames }),
       '-an', '-sn', '-dn',
       '-progress', 'pipe:1', '-nostats',
       '-f', 'mp4', target
@@ -865,12 +889,18 @@ function createConverterJobService(deps) {
 
   async function videoSource(runtime, item) {
     let expectedSource;
-    if (runtime.manifest.config.outputMode === 'replace') {
+    const replacing = runtime.manifest.config.outputMode === 'replace';
+    if (replacing) {
       if (staging.capabilities?.replacement === 'unavailable') throw serviceError('ATOMIC_PROMOTION_UNSUPPORTED');
       if (typeof staging.captureSource !== 'function') throw serviceError('SOURCE_AUTHORITY_REQUIRED');
+    }
+    // Fingerprint the original read-only before anything else touches it. When
+    // it is copied to local staging, the copy itself fingerprints it with the
+    // same identity checks, so a network source is read once instead of twice.
+    const captureAuthority = async () => {
       expectedSource = await staging.captureSource({ source: item.sourcePath, signal: runtime.abortController.signal });
       await itemPatch(runtime, item.id, { expectedSource });
-    }
+    };
     let mode = runtime.manifest.config.networkMode;
     let space;
     if (mode === 'auto') {
@@ -880,7 +910,10 @@ function createConverterJobService(deps) {
       space = await deps.checkStagingSpace({ sourceBytes: item.sourceBytes, outputBytes: item.sourceBytes });
       mode = deps.chooseStagingMode({ networkMode: 'auto', classification, space });
     }
-    if (mode !== 'staging') return { source: item.sourcePath, ownership: null, expectedSource };
+    if (mode !== 'staging') {
+      if (replacing) await captureAuthority();
+      return { source: item.sourcePath, ownership: null, expectedSource };
+    }
     if (!space) {
       if (typeof deps.checkStagingSpace !== 'function') throw serviceError('STAGING_POLICY_UNAVAILABLE');
       space = await deps.checkStagingSpace({ sourceBytes: item.sourceBytes, outputBytes: item.sourceBytes });
@@ -895,10 +928,16 @@ function createConverterJobService(deps) {
       signal: runtime.abortController.signal,
       persistTransaction: transactionPersistence(runtime, item.id)
     });
+    const stagedAuthority = result.expectedSource || expectedSource;
+    if (replacing) {
+      // Replacement and its crash recovery both require this fingerprint.
+      if (!stagedAuthority) throw serviceError('SOURCE_AUTHORITY_REQUIRED');
+      await itemPatch(runtime, item.id, { expectedSource: stagedAuthority });
+    }
     return {
       source: result.stagedSource || result.path,
       ownership: result.ownedPaths ? result : null,
-      expectedSource: result.expectedSource || expectedSource
+      expectedSource: stagedAuthority
     };
   }
 
@@ -942,8 +981,8 @@ function createConverterJobService(deps) {
     let sizeRetryCount = 0;
     let attempts = currentItem(runtime, item.id)?.attempts || 0;
     let latestOwnership = staged.ownership;
-    let encodeAccel = decodeAccelFor(selected, 'encode');
-    let encodeAccelFailedFor = null;
+    let encodeTiers = encodeDecodeTiers(selected);
+    const failedTiers = [];
 
     while (!runtime.cancelRequested && !runtime.stopRequested) {
       attempts += 1;
@@ -959,9 +998,9 @@ function createConverterJobService(deps) {
       });
       latestOwnership = reserved;
       setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), reserved));
-      const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected, bitrate, encodeAccel);
+      const usedTier = encodeTiers[0] || null;
+      const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected, bitrate, usedTier?.args || null);
       timing.mark('encode');
-      const usedEncodeAccel = encodeAccel;
       if (!encoded.ok) {
         let failedOwnership = reserved;
         try {
@@ -983,9 +1022,9 @@ function createConverterJobService(deps) {
         }
         if (encoded.code === 'cancelled') throw serviceError('CANCELLED');
         // Retry the same GPU encoder with CPU decoding before giving up on it.
-        if (usedEncodeAccel) {
-          encodeAccel = null;
-          encodeAccelFailedFor = selected.codec;
+        if (usedTier) {
+          failedTiers.push(usedTier.key);
+          encodeTiers = encodeTiers.slice(1);
           continue;
         }
         if (selected.hardware === true && !usedCpuFallback) {
@@ -995,8 +1034,10 @@ function createConverterJobService(deps) {
         }
         throw Object.assign(new Error('encode failed'), { code: 'ENCODER_FAILED' });
       }
-      // CPU decoding fixed what GPU decoding broke: stop offering it.
-      if (!usedEncodeAccel && encodeAccelFailedFor === selected.codec) encodeDecodeBroken.add(selected.codec);
+      // A slower decode tier fixed what a faster one broke: stop offering those.
+      for (const key of failedTiers.splice(0)) {
+        if (key.startsWith(`${selected.codec}:`)) encodeDecodeBroken.add(key);
+      }
       let adopted = await staging.adoptEncodeOutput({
         jobId: runtime.manifest.id,
         itemId: item.id,
