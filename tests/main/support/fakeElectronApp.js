@@ -19,6 +19,8 @@ const { EventEmitter } = require('events');
 
 const repo = path.resolve(__dirname, '..', '..', '..');
 const scenario = JSON.parse(process.argv[2] || '{}');
+// A packaged app has its resources folder (where FFmpeg is bundled).
+process.resourcesPath = repo;
 const log = (event, detail = {}) => process.stdout.write(`EVENT ${JSON.stringify({ event, ...detail })}\n`);
 
 // The converter needs FFmpeg to exist before the first window opens; answer
@@ -202,7 +204,8 @@ for (const step of scenario.earlySteps || []) {
     alive: windows.filter((window) => !window.destroyed).length,
     visible: windows.filter((window) => window.visible && !window.destroyed).map((window) => window.id),
     trays: trays.length,
-    errors: errors.filter((entry) => /AUTO|TypeError|ReferenceError|SyntaxError/.test(entry)).slice(0, 5)
+    errors: errors.filter((entry) => /AUTO|TypeError|ReferenceError|SyntaxError/.test(entry)).slice(0, 5),
+    converterErrors: errors.filter((entry) => entry.includes('[CONVERTER]')).slice(0, 5)
   });
   fs.rmSync(root, { recursive: true, force: true });
   process.exit(0);

@@ -65,7 +65,12 @@ jobs:
         # Real-FFmpeg suites run in their own job below.
         run: >-
           npx jest --ci --reporters=default --reporters=github-actions
+          --json --outputFile=jest-results.json
           --testPathIgnorePatterns integration studioTelemetry
+
+      - name: List failed main-process tests
+        if: failure()
+        run: node tests/ci/jestFailures.js jest-results.json "Unit tests (${{ matrix.os }})"
 
       - name: Interface tests
         run: >-
@@ -140,7 +145,12 @@ jobs:
       - name: Converter integration and end-to-end tests
         run: >-
           npx jest --ci --reporters=default --reporters=github-actions
+          --json --outputFile=jest-results.json
           --runInBand tests/main/converter/integration
+
+      - name: List failed conversion tests
+        if: failure()
+        run: node tests/ci/jestFailures.js jest-results.json "Real FFmpeg (${{ matrix.os }})"
 
   app-launch:
     name: App launch (${{ matrix.os }})

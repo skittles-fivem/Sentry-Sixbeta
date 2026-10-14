@@ -56,9 +56,10 @@ describe('app start-up and background mode (real main process)', () => {
     for (const [name, result] of entries) results[name] = result;
   });
 
-  test('no scenario logs a programming error', () => {
+  test('no scenario logs a programming error, and the converter starts in each', () => {
     for (const [name, result] of Object.entries(results)) {
-      expect({ name, errors: result.summary.errors }).toEqual({ name, errors: [] });
+      expect({ name, errors: result.summary.errors, converter: result.summary.converterErrors })
+        .toEqual({ name, errors: [], converter: [] });
     }
   });
 
