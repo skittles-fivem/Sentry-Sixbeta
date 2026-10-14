@@ -440,6 +440,16 @@ function defaultFactories() {
   };
 }
 
+async function realTempPath(pfs, pathApi, target) {
+  if (typeof pfs.realpath !== 'function') return target;
+  try {
+    await pfs.mkdir(target, { recursive: true });
+    return pathApi.resolve(await pfs.realpath(target));
+  } catch (_) {
+    return target;
+  }
+}
+
 async function createConverterRuntime(options = {}) {
   const fileSystem = options.fs || nodeFs;
   const pfs = fileSystem.promises || fileSystem;
@@ -456,7 +466,13 @@ async function createConverterRuntime(options = {}) {
   if (typeof options.spawn !== 'function') throw new TypeError('spawn is required');
 
   const jobsRoot = pathApi.join(options.userDataPath, 'converter-jobs');
-  const tempRoot = pathApi.join(options.tempPath, 'sentry-six-converter');
+  // Staging refuses any owned file whose real path differs from the path it
+  // was given, so the temp folder is resolved to its real location first:
+  // macOS reaches it through a link (/var -> /private/var) and Windows may
+  // name it with short 8.3 names (C:\Users\LONGNA~1\...). Otherwise every
+  // clip would fail its safety check on those machines.
+  const tempPath = await realTempPath(pfs, pathApi, options.tempPath);
+  const tempRoot = pathApi.join(tempPath, 'sentry-six-converter');
   await pfs.mkdir(jobsRoot, { recursive: true });
   await pfs.mkdir(tempRoot, { recursive: true });
 
@@ -469,7 +485,7 @@ async function createConverterRuntime(options = {}) {
   const snapshotRegistry = createVerificationSnapshotRegistry({
     createSnapshot: options.createVerificationSnapshot || createVerificationSnapshot,
     pathApi,
-    tempRoot: options.tempPath
+    tempRoot: tempPath
   });
   const store = factories.createJobStore({ rootDir: jobsRoot, fs: pfs });
   const filesystemTransactions = createFilesystemTransactionAdapters({ fs: fileSystem, platform });
@@ -595,11 +611,11 @@ async function createConverterRuntime(options = {}) {
     snapshotSweep = (async () => {
       try {
         if (await hasActiveJob() || benchmarkController) return;
-        const names = await pfs.readdir(options.tempPath);
+        const names = await pfs.readdir(tempPath);
         const cutoff = Date.now() - 60_000; // never a folder that may be in use right now
         for (const name of names) {
           if (!name.startsWith(SNAPSHOT_DIRECTORY_PREFIX)) continue;
-          const folder = pathApi.join(options.tempPath, name);
+          const folder = pathApi.join(tempPath, name);
           const stat = await pfs.stat(folder).catch(() => null);
           if (!stat?.isDirectory() || stat.mtimeMs > cutoff) continue;
           await pfs.rmdir(folder).catch(() => {});
