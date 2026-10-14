@@ -549,7 +549,7 @@ function createFootageConverterController(options = {}) {
     let benchmarkBest = null;
 
     function encoderLabel(entry) {
-        return `${entry.encoder} (${entry.hardware ? 'GPU' : 'CPU'})`;
+        return entry?.codec ? `${entry.codec} (${entry.hardware ? 'GPU' : 'CPU'})` : '—';
     }
 
     function benchmarkErrorText(error) {
@@ -557,20 +557,23 @@ function createFootageConverterController(options = {}) {
         if (code === 'JOB_ACTIVE') return message('benchmarkJobActive', 'Finish or cancel the current conversion before benchmarking.');
         if (code === 'CANCELLED') return message('benchmarkCancelled', 'Benchmark cancelled.');
         if (code === 'BENCHMARK_ACTIVE') return message('benchmarkBusy', 'A benchmark is already running.');
+        if (code === 'BENCHMARK_SOURCE_REQUIRED') return message('benchmarkSourceRequired', 'Choose a source folder with original (unconverted) Tesla clips first.');
         return message('benchmarkFailed', 'Benchmark failed: {code}', { code });
     }
 
+    const formatRate = (value) => String(value >= 100 ? Math.round(value) : value);
+
     function renderBenchmark(result) {
         const rows = Array.isArray(result?.results) ? result.results : [];
-        const top = Math.max(1, ...rows.map((entry) => entry.fps || 0));
+        const top = Math.max(0.001, ...rows.map((entry) => entry.filesPerMinute || 0));
         const doc = elements.benchmarkRows?.ownerDocument || globalThis.document;
         const best = result?.best || null;
         const cells = rows.map((entry) => {
             const row = doc.createElement('tr');
-            const isBest = best && entry.encoder === best.encoder && entry.level === best.level;
-            row.classList?.toggle?.('is-best', Boolean(isBest));
-            const values = [encoderLabel(entry), String(entry.level),
-                entry.ok ? String(entry.fps >= 100 ? Math.round(entry.fps) : entry.fps) : message('benchmarkFailedRun', 'failed')];
+            row.classList?.toggle?.('is-best', Boolean(best && entry.level === best.level));
+            const values = [String(entry.level),
+                entry.ok ? formatRate(entry.filesPerMinute) : message('benchmarkFailedRun', 'failed') + (entry.failures?.length ? ` (${entry.failures[0]})` : ''),
+                entry.ok ? formatRate(entry.fps) : '—'];
             for (const value of values) {
                 const cell = doc.createElement('td');
                 cell.textContent = value;
@@ -579,7 +582,7 @@ function createFootageConverterController(options = {}) {
             const barCell = doc.createElement('td');
             const bar = doc.createElement('div');
             bar.className = 'converter-benchmark-bar';
-            if (bar.style) bar.style.width = `${Math.round(100 * (entry.fps || 0) / top)}%`;
+            if (bar.style) bar.style.width = `${Math.round(100 * (entry.filesPerMinute || 0) / top)}%`;
             barCell.append(bar);
             row.append(barCell);
             return row;
@@ -589,15 +592,14 @@ function createFootageConverterController(options = {}) {
         benchmarkBest = best;
         if (best) {
             setText(elements.benchmarkBest, message('benchmarkBestText',
-                'Fastest for this computer: {count} at once with {encoder} — {fps} fps.',
-                { count: best.level, encoder: encoderLabel(best), fps: best.fps >= 100 ? Math.round(best.fps) : best.fps }));
+                'Fastest for this computer: {count} at once — {rate} files/min.',
+                { count: best.level, rate: formatRate(best.filesPerMinute) }));
             setText(elements.benchmarkApply, message('benchmarkApply', 'Use {count} at once', { count: best.level }));
         }
         setHidden(elements.benchmarkBest, !best);
         setHidden(elements.benchmarkApply, !best);
-        setText(elements.benchmarkStatus, result?.sample === 'clip'
-            ? message('benchmarkDoneClip', 'Done — tested with a clip from your source folder.')
-            : message('benchmarkDoneGenerated', 'Done — tested with a generated sample clip.'));
+        setText(elements.benchmarkStatus, message('benchmarkDone', 'Done — {clips} real clips converted with {encoder}.',
+            { clips: result?.clips ?? 0, encoder: encoderLabel(result?.encoder) }));
     }
 
     async function runBenchmark() {
@@ -607,23 +609,31 @@ function createFootageConverterController(options = {}) {
         setDisabled(elements.benchmarkRun, true);
         setHidden(elements.benchmarkApply, true);
         setHidden(elements.benchmarkBest, true);
-        setText(elements.benchmarkStatus, message('benchmarkPreparing', 'Preparing a sample clip…'));
+        setText(elements.benchmarkStatus, message('benchmarkScanning', 'Finding sample clips in your source folder…'));
         try {
+            const profileId = selectedProfile();
+            const bitrateKbps = profileId === 'custom' ? customBitrateKbps() : undefined;
+            if (profileId === 'custom' && bitrateKbps === null) throw apiError('BITRATE_INVALID');
             const request = {
                 codec: selected(elements.codecOptions, 'converterCodec', 'h265'),
+                profileId,
+                ...(profileId === 'custom' ? { bitrateKbps } : {}),
                 sourceRoot: elements.sourcePath?.value?.trim() || null
             };
             const result = unwrap(await api.runConverterBenchmark(request, (progress) => {
-                if (progress?.step === 'run') {
-                    setText(elements.benchmarkStatus, message('benchmarkTesting',
-                        'Testing {encoder} with {count} at once… ({index} of {total})', {
-                            encoder: encoderLabel(progress), count: progress.level, index: progress.index, total: progress.total
-                        }));
+                if (progress?.step === 'copy') {
+                    setText(elements.benchmarkStatus, message('benchmarkCopying', 'Copying sample clip {index} of {total}…',
+                        { index: progress.index, total: progress.total }));
+                } else if (progress?.step === 'run') {
+                    setText(elements.benchmarkStatus, message('benchmarkTestingLevel',
+                        'Converting with {count} at once… ({index} of {total})',
+                        { count: progress.level, index: progress.index, total: progress.total }));
                 }
             }));
             renderBenchmark(result);
         } catch (error) {
-            setText(elements.benchmarkStatus, benchmarkErrorText(error));
+            setText(elements.benchmarkStatus, error?.code === 'BITRATE_INVALID'
+                ? message('errorBitrateInvalid', 'Enter a bitrate between 0.25 and 100 Mbps.') : benchmarkErrorText(error));
         } finally {
             benchmarkRunning = false;
             setDisabled(elements.benchmarkRun, false);

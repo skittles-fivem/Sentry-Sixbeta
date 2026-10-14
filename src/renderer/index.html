@@ -532,10 +532,10 @@
                             </div>
                             <dialog id="converterBenchmarkDialog" class="converter-benchmark-dialog" aria-labelledby="converterBenchmarkTitle">
                                 <h3 id="converterBenchmarkTitle" data-i18n="ui.converter.benchmarkTitle">Encoding benchmark</h3>
-                                <p class="converter-disclosure" data-i18n="ui.converter.benchmarkIntro">Encodes and verifies a 10-second clip (from your source folder when one is chosen) with each encoder at 1–8 parallel conversions, using the codec selected above. Takes a few minutes; close other heavy apps for accurate results.</p>
+                                <p class="converter-disclosure" data-i18n="ui.converter.benchmarkIntro">Runs real conversions — telemetry, full verification and saving — on copies of up to 8 clips from your source folder, at 1–8 parallel conversions with the codec and compression selected above. Your footage is only read; results go to a temporary folder. Takes a few minutes; close other heavy apps for accurate results.</p>
                                 <p id="converterBenchmarkStatus" class="converter-benchmark-status" role="status" aria-live="polite"></p>
                                 <table id="converterBenchmarkTable" class="converter-benchmark-table" hidden>
-                                    <thead><tr><th data-i18n="ui.converter.benchmarkEncoder">Encoder</th><th data-i18n="ui.converter.benchmarkParallel">At once</th><th data-i18n="ui.converter.benchmarkFps">FPS</th><th aria-hidden="true"></th></tr></thead>
+                                    <thead><tr><th data-i18n="ui.converter.benchmarkParallel">At once</th><th data-i18n="ui.converter.benchmarkFilesPerMinute">Files/min</th><th data-i18n="ui.converter.benchmarkFps">FPS</th><th aria-hidden="true"></th></tr></thead>
                                     <tbody id="converterBenchmarkRows"></tbody>
                                 </table>
                                 <p id="converterBenchmarkBest" class="converter-benchmark-best" hidden></p>

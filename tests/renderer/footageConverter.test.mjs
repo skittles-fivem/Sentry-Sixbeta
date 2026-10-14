@@ -1014,17 +1014,18 @@ test('benchmark: runs from the dialog, shows results and applies the recommended
   const storage = memoryStorage();
   api.runConverterBenchmark = async (request, onProgress) => {
     api.calls.push(['benchmark', request]);
-    onProgress({ step: 'run', encoder: 'hevc_nvenc', hardware: true, level: 2, index: 2, total: 5 });
-    assert.match(elements.benchmarkStatus.textContent, /hevc_nvenc \(GPU\) with 2 at once.*2 of 5/);
+    onProgress({ step: 'copy', index: 3, total: 8 });
+    assert.match(elements.benchmarkStatus.textContent, /sample clip 3 of 8/);
+    onProgress({ step: 'run', level: 2, index: 2, total: 5 });
+    assert.match(elements.benchmarkStatus.textContent, /2 at once.*2 of 5/);
     return { ok: true, value: {
-      sample: 'clip', preferredEncoder: 'hevc_nvenc',
+      encoder: { codec: 'hevc_nvenc', hardware: true }, clips: 8,
       results: [
-        { encoder: 'hevc_nvenc', hardware: true, level: 1, ok: true, fps: 210.5 },
-        { encoder: 'hevc_nvenc', hardware: true, level: 4, ok: true, fps: 640 },
-        { encoder: 'hevc_nvenc', hardware: true, level: 6, ok: false, fps: 0 },
-        { encoder: 'libx265', hardware: false, level: 1, ok: true, fps: 31 }
+        { level: 1, ok: true, filesPerMinute: 4.2, fps: 150.3, failures: [] },
+        { level: 4, ok: true, filesPerMinute: 12.5, fps: 450, failures: [] },
+        { level: 6, ok: false, filesPerMinute: 0, fps: 0, failures: ['encoder-failed'] }
       ],
-      best: { encoder: 'hevc_nvenc', hardware: true, level: 4, ok: true, fps: 640 }
+      best: { level: 4, ok: true, filesPerMinute: 12.5, fps: 450 }
     } };
   };
   await createFootageConverterController({ api, elements, storage }).init();
@@ -1034,17 +1035,25 @@ test('benchmark: runs from the dialog, shows results and applies the recommended
   assert.equal(elements.benchmarkDialog.open, true);
   await elements.benchmarkRun.click();
 
-  assert.deepEqual(api.calls.find(([name]) => name === 'benchmark')[1], { codec: 'h265', sourceRoot: 'D:\\TeslaCam' });
-  assert.equal(elements.benchmarkRows.children.length, 4);
-  assert.equal(elements.benchmarkTable.hidden, false);
-  assert.match(elements.benchmarkBest.textContent, /4 at once with hevc_nvenc \(GPU\).*640 fps/);
-  assert.equal(elements.benchmarkApply.hidden, false);
-  assert.match(elements.benchmarkStatus.textContent, /source folder/);
+  assert.deepEqual(api.calls.find(([name]) => name === 'benchmark')[1], { codec: 'h265', profileId: 'balanced', sourceRoot: 'D:\\TeslaCam' });
+  assert.equal(elements.benchmarkRows.children.length, 3);
+  assert.match(elements.benchmarkRows.children[2].children[1].textContent, /failed \(encoder-failed\)/);
+  assert.match(elements.benchmarkBest.textContent, /4 at once — 12\.5 files\/min/);
+  assert.match(elements.benchmarkStatus.textContent, /8 real clips converted with hevc_nvenc \(GPU\)/);
 
   await elements.benchmarkApply.click();
   assert.equal(elements.concurrency.value, '4');
   assert.equal(storage.values.get('converterConcurrency'), '4');
   assert.equal(elements.benchmarkDialog.open, false);
+});
+
+test('benchmark: asks for a source folder when there are no original clips', async () => {
+  const elements = benchmarkElements();
+  const api = fakeApi();
+  api.runConverterBenchmark = async () => ({ ok: false, error: { code: 'BENCHMARK_SOURCE_REQUIRED', retryable: false } });
+  await createFootageConverterController({ api, elements, storage: memoryStorage() }).init();
+  await elements.benchmarkRun.click();
+  assert.match(elements.benchmarkStatus.textContent, /source folder/);
 });
 
 test('benchmark: explains a refusal while a conversion is running', async () => {

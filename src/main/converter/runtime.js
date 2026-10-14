@@ -473,17 +473,17 @@ async function createConverterRuntime(options = {}) {
   const filesystemTransactions = createFilesystemTransactionAdapters({ fs: fileSystem, platform });
   const removeOwned = options.removeOwned || filesystemTransactions.removeOwned;
   const renameExclusive = options.renameExclusive || filesystemTransactions.renameExclusive;
-  const stagingManager = factories.createFileTransaction({
+  const stagingOptions = {
     // One staged source and one encode output per parallel conversion.
     maxActiveLeases: CONCURRENCY.max,
     fs: fileSystem,
     pathApi,
     platform,
-    tempRoot,
     validatePublicationArtifact: snapshotRegistry.validate,
     removeOwned,
     renameExclusive
-  });
+  };
+  const stagingManager = factories.createFileTransaction({ ...stagingOptions, tempRoot });
   const planner = factories.createEncoderPlanner({
     runProbe: processRunner,
     platform,
@@ -543,11 +543,11 @@ async function createConverterRuntime(options = {}) {
     validateProcessRequest(command, args, spawnOptions);
     return options.spawn(command, args, { ...spawnOptions, shell: false, windowsHide: true });
   };
-  const service = factories.createConverterJobService({
-    store,
+  // Everything a converter service needs besides its job store and staging
+  // area; the benchmark builds an identical, isolated service from this.
+  const serviceDeps = {
     scanner,
     planner,
-    stagingManager,
     inspectVideo,
     readTimeline,
     writers: adapters.writers,
@@ -569,7 +569,8 @@ async function createConverterRuntime(options = {}) {
     ensureDestinationParent: ({ destinationRoot, destination }) => ensureContainedDestinationParent({
       destinationRoot, destination, fs: pfs, pathApi, platform
     })
-  });
+  };
+  const service = factories.createConverterJobService({ ...serviceDeps, store, stagingManager });
 
   // Per-file timing log: one line per converted file showing where its
   // wall-clock time went (<userData>/converter-logs/<jobId>.log). Best effort:
@@ -608,22 +609,75 @@ async function createConverterRuntime(options = {}) {
   let startPromise;
   let shutdownPromise;
   let recoveryPromise;
-  // Encoding benchmark: one at a time, and never while a conversion runs (the
-  // numbers would be meaningless and the encoders shared).
+  // Benchmark: one at a time, never while a conversion runs (the numbers would
+  // be meaningless and the encoders shared). It runs the real converter in an
+  // isolated temporary job store, staging area and output folder.
   let benchmarkController = null;
-  async function findBenchmarkClip(sourceRoot, signal) {
-    if (typeof sourceRoot !== 'string' || sourceRoot.length === 0) return null;
-    let fallback = null;
-    let seen = 0;
+  async function findBenchmarkClips(sourceRoot, signal) {
+    if (typeof sourceRoot !== 'string' || sourceRoot.length === 0) return [];
+    const found = [];
     try {
       for await (const item of scanTeslaFootage({ sourceRoot }, { signal, path: pathApi, platform, concurrency: 16 })) {
-        if (item.kind !== 'video') continue;
-        if (item.camera === 'front' || item.camera === 'back') return item.sourcePath;
-        fallback = fallback || item.sourcePath;
-        if (++seen >= 50) break;
+        if (item.kind === 'video') found.push(item);
+        if (found.length >= 80) break;
       }
-    } catch (_) { /* fall back to a generated sample */ }
-    return fallback;
+    } catch (_) { return []; }
+    // Prefer full-size clips, and only originals: converted clips are skipped.
+    const clips = [];
+    const names = new Set();
+    for (const item of found.sort((left, right) => right.sourceBytes - left.sourceBytes)) {
+      const name = pathApi.basename(item.sourcePath);
+      if (names.has(name)) continue;
+      try {
+        if ((await inspectVideo(item, item.sourcePath, signal)).codec !== 'h264') continue;
+      } catch (_) { continue; }
+      names.add(name);
+      clips.push({ sourcePath: item.sourcePath, name });
+      if (clips.length >= 8) break;
+    }
+    return clips;
+  }
+
+  async function countFrames(target) {
+    const result = await processRunner(options.ffprobePath, [
+      '-v', 'error', '-select_streams', 'v:0', '-count_packets',
+      '-show_entries', 'stream=nb_read_packets', '-of', 'csv=p=0', target
+    ], { shell: false, timeoutMs: 60_000 });
+    const frames = Number.parseInt(String(result?.stdout || '').trim(), 10);
+    return Number.isSafeInteger(frames) && frames > 0 ? frames : 0;
+  }
+
+  function benchmarkLevelRunner(config) {
+    return async ({ level, sourceRoot, workRoot, signal }) => {
+      const stagingRoot = pathApi.join(workRoot, 'staging');
+      await pfs.mkdir(stagingRoot, { recursive: true });
+      await pfs.mkdir(pathApi.join(workRoot, 'output'), { recursive: true });
+      const benchService = factories.createConverterJobService({
+        ...serviceDeps,
+        store: factories.createJobStore({ rootDir: pathApi.join(workRoot, 'jobs'), fs: pfs }),
+        stagingManager: factories.createFileTransaction({ ...stagingOptions, tempRoot: stagingRoot })
+      });
+      const jobId = await benchService.start({
+        sourceRoot,
+        destinationRoot: pathApi.join(workRoot, 'output'),
+        codec: config.codec,
+        profileId: config.profileId,
+        ...(config.profileId === 'custom' ? { bitrateKbps: config.bitrateKbps } : {}),
+        networkMode: 'direct',
+        outputMode: 'separate',
+        includedGroups: ['RecentClips', 'SavedClips', 'SentryClips'],
+        replacementConfirmed: false,
+        concurrency: level
+      });
+      const abort = () => { void benchService.cancel(jobId).catch(() => {}); };
+      signal?.addEventListener('abort', abort, { once: true });
+      try {
+        return await benchService.whenIdle(jobId);
+      } finally {
+        signal?.removeEventListener('abort', abort);
+        await benchService.shutdown().catch(() => {});
+      }
+    };
   }
 
   const runtime = {
@@ -631,7 +685,7 @@ async function createConverterRuntime(options = {}) {
     store,
     stagingManager,
     capabilities,
-    async runBenchmark({ codec, sourceRoot = null, onProgress } = {}) {
+    async runBenchmark({ codec, profileId = 'balanced', bitrateKbps, sourceRoot = null, onProgress } = {}) {
       if (shutdownPromise) throw runtimeError('SERVICE_SHUTDOWN');
       if (benchmarkController) throw runtimeError('BENCHMARK_ACTIVE');
       const active = (await service.list()).some((job) => !['completed', 'failed', 'cancelled'].includes(job.state)
@@ -640,10 +694,14 @@ async function createConverterRuntime(options = {}) {
       const controller = new AbortController();
       benchmarkController = controller;
       try {
-        const sourcePath = await findBenchmarkClip(sourceRoot, controller.signal);
+        onProgress?.({ step: 'scan' });
+        const clips = await findBenchmarkClips(sourceRoot, controller.signal);
+        if (clips.length === 0) throw runtimeError('BENCHMARK_SOURCE_REQUIRED');
+        let encoder = null;
+        try { encoder = await planner.select(codec); } catch (_) { /* reported by the conversions */ }
         return await runConverterBenchmark({
-          runProcess: processRunner, planner, ffmpegPath: options.ffmpegPath, ffprobePath: options.ffprobePath,
-          tempRoot, codec, sourcePath, signal: controller.signal, onProgress, pathApi, fs: pfs
+          clips, countFrames, encoder, tempRoot, signal: controller.signal, onProgress, pathApi, fs: pfs,
+          runLevel: benchmarkLevelRunner({ codec, profileId, bitrateKbps })
         });
       } finally {
         if (benchmarkController === controller) benchmarkController = null;
