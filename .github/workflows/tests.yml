@@ -106,7 +106,7 @@ jobs:
   real-ffmpeg:
     name: Real FFmpeg conversions (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 50
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

@@ -20,7 +20,8 @@ const { assertFullDecode, createTeslaH264Fixture, locateBundledTools,
   measureQuality, probeFramePts, probeRequiredEncodersSync, probeVideo, runProcess } = require('./ffmpegFixtures');
 const { h265Mp4, hevcNal, lengthPrefixedSample } = require('./fixtureBuilders');
 
-jest.setTimeout(180_000);
+// Generous: GitHub's smaller Windows machines are several times slower.
+jest.setTimeout(600_000);
 // The fixtures are tiny (320x180), where encoder rate control is coarse: an
 // occasional clip lands just outside a narrow profile window even after the
 // converter's own correction (the source bytes also vary slightly between
@@ -132,8 +133,14 @@ describeRealEncoders(`real pipeline (${encoderGate.reason || 'required CPU encod
     ['h265', 'balanced', 'parked-to-driving', 'default-refusal']
   ];
 
+  const attemptsByCase = new Map();
+  const freshCase = (name) => {
+    attemptsByCase.set(name, (attemptsByCase.get(name) || 0) + 1);
+    return path.join(root, `${name}-${attemptsByCase.get(name)}`);
+  };
   test.each(cases)('%s/%s preserves %s telemetry through the real runtime (%s)', async (codec, profileId, patternName, filesystemMode) => {
-    const caseRoot = path.join(root, `${codec}-${profileId}-${filesystemMode || 'injected'}`);
+    // A re-run starts in a fresh folder (the first attempt's files stay put).
+    const caseRoot = freshCase(`${codec}-${profileId}-${filesystemMode || 'injected'}`);
     const sourceRoot = path.join(caseRoot, 'source');
     const sourceFolder = path.join(sourceRoot, 'RecentClips');
     const destinationRoot = path.join(caseRoot, 'destination');
@@ -333,7 +340,7 @@ describeRealEncoders(`real pipeline (${encoderGate.reason || 'required CPU encod
   });
 
   test.each([['direct'], ['staging']])('converts several clips in parallel through the real runtime (%s source)', async (networkMode) => {
-    const caseRoot = path.join(root, `parallel-${networkMode}`);
+    const caseRoot = freshCase(`parallel-${networkMode}`);
     const sourceFolder = path.join(caseRoot, 'source', 'RecentClips');
     const destinationRoot = path.join(caseRoot, 'destination');
     const userDataPath = path.join(caseRoot, 'user-data');
@@ -385,7 +392,7 @@ describeRealEncoders(`real pipeline (${encoderGate.reason || 'required CPU encod
   // Atomic replacement of originals is only supported on Windows and macOS.
   // Replacing originals is only available with Windows' native file operations.
   (process.platform === 'win32' ? test : test.skip)('replaces originals in parallel from a staged (network-style) source with one source read each', async () => {
-    const caseRoot = path.join(root, 'parallel-replace-staging');
+    const caseRoot = freshCase('parallel-replace-staging');
     const sourceFolder = path.join(caseRoot, 'source', 'RecentClips');
     const userDataPath = path.join(caseRoot, 'user-data');
     await Promise.all([fs.promises.mkdir(sourceFolder, { recursive: true }), fs.promises.mkdir(userDataPath, { recursive: true })]);
@@ -432,7 +439,7 @@ describeRealEncoders(`real pipeline (${encoderGate.reason || 'required CPU encod
   });
 
   test('copies event assets, skips real H265/AV1 inputs, and resumes after a simulated share reconnect', async () => {
-    const caseRoot = path.join(root, 'assets-skips-reconnect');
+    const caseRoot = freshCase('assets-skips-reconnect');
     const sourceRoot = path.join(caseRoot, 'source');
     const eventRoot = path.join(sourceRoot, 'SentryClips', '2026-08-30_12-00-00');
     const destinationRoot = path.join(caseRoot, 'destination');
