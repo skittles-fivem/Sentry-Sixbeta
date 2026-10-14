@@ -62,7 +62,8 @@ function isValidQualityLevel(value) {
 //   full  - quick checks plus a complete decode of every output frame;
 //   quick - stream/duration/frame/dimension checks against the source, the
 //           per-frame telemetry comparison and size rules (no full decode);
-//   off   - only the integrity hash and "smaller than the original" rule.
+//   off   - only the integrity hash, "smaller than the original" and the size
+//           profile's window (so a profile still compresses as promised).
 // Replacing originals always uses at least quick. Jobs saved before this
 // setting existed keep running full.
 const VERIFY_MODES = deepFreeze(['off', 'quick', 'full']);

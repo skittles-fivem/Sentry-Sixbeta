@@ -758,7 +758,9 @@ async function readSourceAuthority(options, readFile, sourceBytes, outputBytes) 
 }
 
 // Verification off: the saved file must still be exactly the encoded file and
-// smaller than its original; nothing about the video itself is inspected.
+// smaller than its original, and a size profile's window still applies (its
+// retry keeps the promised compression); nothing about the video itself is
+// inspected.
 async function verifyIntegrityOnly({ options, profileId, sourceBytes, outputBytes, outputSha256, snapshot }) {
   try {
     await readExactSnapshot(snapshot, outputBytes, outputSha256);
@@ -767,6 +769,19 @@ async function verifyIntegrityOnly({ options, profileId, sourceBytes, outputByte
   }
   if (outputBytes >= sourceBytes) {
     return failure(VERIFICATION_REASONS.NOT_SMALLER, sourceBytes, outputBytes, { savedBytes: sourceBytes - outputBytes });
+  }
+  if (hasSizeTarget(profileId)) {
+    // Same short-clip allowance as the full checks, from the duration the
+    // converter already measured (no extra read of the original).
+    const durationUs = Number.isFinite(options.sourceDurationUs) ? options.sourceDurationUs : null;
+    const shortClipWithSavings = sourceBytes >= 500_000 && durationUs !== null && durationUs <= SHORT_CLIP_PROFILE_MAX_US;
+    if (!shortClipWithSavings && !isWithinProfile(sourceBytes, outputBytes, profileId)) {
+      return failure(VERIFICATION_REASONS.PROFILE_SIZE, sourceBytes, outputBytes, {
+        profileId,
+        targetBytes: targetOutputBytes(sourceBytes, profileId),
+        toleranceBytes: sourceBytes * PROFILES[profileId].tolerance
+      });
+    }
   }
   return {
     ok: true, reason: null, retryable: false, sourceBytes, outputBytes,

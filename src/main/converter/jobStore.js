@@ -52,7 +52,7 @@ const DIRECTORY_SYNC_UNSUPPORTED = new Set(['EISDIR', 'EINVAL', 'EPERM', 'EACCES
 const TOP_FIELDS = new Set([
   'schemaVersion', 'id', 'state', 'revision', 'config', 'items', 'counters',
   'summary', 'summaryDismissed', 'discoveryComplete', 'createdAt', 'updatedAt', 'activeItemId', 'ownedPaths',
-  'ownedArtifacts', 'publicationArtifact', 'replacementPhase', 'recovery', 'failure', 'timings'
+  'ownedArtifacts', 'publicationArtifact', 'replacementPhase', 'recovery', 'failure', 'timings', 'pausedMs'
 ]);
 const CONFIG_FIELDS = new Set([
   'sourceRoot', 'destinationRoot', 'codec', 'profileId', 'networkMode',
@@ -672,6 +672,7 @@ function normalizeManifest(value, cache = null) {
   }
   optional(result, value, 'createdAt', (entry) => safeInteger(entry));
   optional(result, value, 'updatedAt', (entry) => safeInteger(entry));
+  optional(result, value, 'pausedMs', (entry) => safeInteger(entry));
   optional(result, value, 'activeItemId', portableItemId);
   optional(result, value, 'ownedPaths', normalizeOwnedPaths);
   optional(result, value, 'ownedArtifacts', (entry) => normalizeOwnedArtifacts(entry, result.ownedPaths));

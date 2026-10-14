@@ -14,6 +14,18 @@ const CONCURRENCY_STORAGE_KEY = 'converterConcurrency';
 const VERIFY_STORAGE_KEY = 'converterVerifyMode';
 const VERIFY_MODES = ['off', 'quick', 'full'];
 
+const PAUSED_STATES = new Set(['paused', 'paused_network']);
+
+// Time the job has spent working: paused periods (also while the app was
+// closed) and the gap before a retry are left out. updatedAt marks the last
+// state change, so a paused or finished job's clock stops there.
+function workingMs(job, at = Date.now()) {
+    if (!job || !Number.isFinite(job.createdAt)) return 0;
+    const stopped = !ACTIVE_STATES.has(job.state) || PAUSED_STATES.has(job.state);
+    const end = stopped ? (Number.isFinite(job.updatedAt) ? job.updatedAt : job.createdAt) : at;
+    return Math.max(0, end - job.createdAt - (Number.isFinite(job.pausedMs) ? job.pausedMs : 0));
+}
+
 function normalizeConcurrency(value) {
     const number = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
     return Number.isSafeInteger(number) && number >= MIN_CONCURRENCY && number <= MAX_CONCURRENCY ? number : null;
@@ -295,8 +307,8 @@ function createFootageConverterController(options = {}) {
         let perMinute = null;
         if (speedSamples.length > 1 && time - first.time >= SPEED_MIN_SPAN_MS && done > first.done) {
             perMinute = (done - first.done) / ((time - first.time) / 60000);
-        } else if (snapshot?.createdAt && done > 0 && time - snapshot.createdAt >= SPEED_MIN_SPAN_MS) {
-            perMinute = done / ((time - snapshot.createdAt) / 60000);
+        } else if (snapshot?.createdAt && done > 0 && workingMs(snapshot, time) >= SPEED_MIN_SPAN_MS) {
+            perMinute = done / (workingMs(snapshot, time) / 60000);
         }
         if (!perMinute || !Number.isFinite(perMinute)) return { perMinute: null, remainingMs: null };
         return { perMinute, remainingMs: remaining > 0 ? (remaining / perMinute) * 60000 : 0 };
@@ -529,7 +541,7 @@ function createFootageConverterController(options = {}) {
         setText(elements.summarySaved, renderBytes(summary.savedBytes));
         setText(elements.summaryPercent, `${percent}%`);
         setText(elements.summaryAssets, renderBytes(summary.copiedAssetBytes));
-        setText(elements.summaryElapsed, formatDuration((snapshot.updatedAt || 0) - (snapshot.createdAt || 0)));
+        setText(elements.summaryElapsed, formatDuration(workingMs(snapshot, now())));
         renderRows(elements.summaryGroups, GROUPS.map((group) => {
             const counters = summary.groups?.[group] || { files: 0, savedBytes: 0 };
             return [group, message('summaryGroup', '{count} files · {bytes} video size reduction', {
@@ -565,8 +577,7 @@ function createFootageConverterController(options = {}) {
             ? message('progressEncoded', '{duration} encoded', { duration: formatDuration(progress.outTimeUs / 1000) })
             : activeItem ? message('progressWorking', 'Working on current file') : '—');
         elements.currentProgressFill?.classList?.toggle('is-live', Boolean(activeItem && active));
-        const elapsedEnd = active ? Date.now() : (snapshot?.updatedAt || snapshot?.createdAt || 0);
-        setText(elements.elapsed, snapshot ? formatDuration(elapsedEnd - (snapshot.createdAt || 0)) : '00:00');
+        setText(elements.elapsed, snapshot ? formatDuration(workingMs(snapshot, now())) : '00:00');
         setText(elements.countDiscovered, snapshot?.itemCount ?? items.length);
         setText(elements.countCompleted, stateCount('completed'));
         setText(elements.countSkipped, stateCount('skipped'));
@@ -575,10 +586,13 @@ function createFootageConverterController(options = {}) {
         setText(elements.processedBytes, renderBytes(counters.sourceVideoBytes || 0));
         const finished = stateCount('completed') + stateCount('skipped') + stateCount('failed');
         const remaining = stateCount('queued') + converting;
+        // A pause starts the recent-speed window over (paused time is not speed).
+        if (PAUSED_STATES.has(snapshot?.state)) speedSamples = [];
         let pace = active && !paused ? throughput(finished, remaining) : { perMinute: null, remainingMs: null };
-        // A finished run keeps showing its overall average speed.
-        if (!active && snapshot?.state === 'completed' && finished > 0 && snapshot.updatedAt > snapshot.createdAt) {
-            const minutes = (snapshot.updatedAt - snapshot.createdAt) / 60000;
+        // A finished run keeps showing its overall average speed (working
+        // time only, so pauses do not drag it down).
+        if (!active && snapshot?.state === 'completed' && finished > 0) {
+            const minutes = workingMs(snapshot, now()) / 60000;
             if (minutes > 0) pace = { perMinute: finished / minutes, remainingMs: null };
         }
         setText(elements.speed, pace.perMinute === null ? '—'
@@ -612,6 +626,7 @@ function createFootageConverterController(options = {}) {
         renderGroupOrder(active);
         renderPipeline();
         renderSummary(items);
+        renderAutoStatus();
     }
 
     let lastFps = null;
@@ -892,6 +907,14 @@ function createFootageConverterController(options = {}) {
         if (elements.autoLogin) elements.autoLogin.checked = settings.openAtLogin === true;
         for (const control of [elements.autoStart, elements.autoEnd]) setDisabled(control, !settings.window);
         setDisabled(elements.autoCheckNow, !settings.enabled || status.checking === true);
+        renderAutoStatus();
+    }
+
+    // Status line only (also refreshed with job updates, e.g. a pause).
+    function renderAutoStatus() {
+        const settings = autoState?.settings;
+        const status = autoState?.status || {};
+        if (!settings) return;
         let text;
         if (!settings.enabled) text = message('autoOff', 'Off');
         else if (status.checking) text = message('autoChecking', 'Checking for new clips…');
@@ -899,6 +922,9 @@ function createFootageConverterController(options = {}) {
             text = message('autoPausedWindow', 'Paused outside the time window — resumes at {time}', {
                 time: clockTime(new Date().setHours(settings.window?.startHour ?? 0, 0, 0, 0))
             });
+        } else if (status.activeJobId && snapshot?.id === status.activeJobId && snapshot.state === 'paused') {
+            // Paused by the user: it waits for them.
+            text = message('autoJobPaused', 'Automatic conversion is paused — resume or cancel it above');
         } else if (status.activeJobId) text = message('autoConverting', 'Converting new clips…');
         else {
             const parts = [];

@@ -1029,6 +1029,16 @@ describe('verifyCandidate size and valid results', () => {
       expectFailure(await verifyCandidate({ ...bigger.options, verifyMode: 'off' }), 'not-smaller');
     });
 
+    test('off still applies a size profile window (with its retry), using the measured duration for short clips', async () => {
+      const candidateBytes = buildCandidate('h265');
+      const sourceBytes = candidateBytes.length + 2_000; // far less than Balanced's ~20% saving
+      const outside = await verifyCandidate({ ...harness({ candidateBytes, sourceBytes, profileId: 'balanced' }).options, verifyMode: 'off' });
+      expectFailure(outside, 'profile-size', true);
+      const inside = harness({ profileId: 'balanced' });
+      expect((await verifyCandidate({ ...inside.options, verifyMode: 'off' })).ok).toBe(true);
+      expect((await verifyCandidate({ ...harness({ candidateBytes, sourceBytes, profileId: 'quality' }).options, verifyMode: 'off' })).ok).toBe(true);
+    });
+
     test('rejects an unknown mode', async () => {
       expectFailure(await verifyCandidate({ ...harness().options, verifyMode: 'fast' }), 'invalid-input');
     });

@@ -227,6 +227,9 @@ function createAutoConverter(options = {}) {
       changed();
       return;
     }
+    // Turned off: no more automatic pausing or resuming; the job stays as it
+    // is for the user to resume or cancel (finished clips are still recorded).
+    if (!settings.enabled) return;
     if (!insideWindow && !status.pausedForWindow && job.state !== 'paused') {
       await service.pause(job.id);
       await setPausedForWindow(job.id);

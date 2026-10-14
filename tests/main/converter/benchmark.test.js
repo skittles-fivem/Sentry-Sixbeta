@@ -57,7 +57,7 @@ describe('converter real-pipeline benchmark', () => {
     expect((await fs.promises.readdir(root)).sort()).toEqual(['footage']);
   });
 
-  test('compares verification modes at the recommended setting, reusing the sweep for the selected mode', async () => {
+  test('compares verification modes at the recommended setting, measuring every mode the same way', async () => {
     let now = 0;
     const verifyCost = { off: 0, quick: 400, full: 4000 }; // ms per clip
     const runLevel = jest.fn(async ({ level, sourceRoot, verifyMode = 'quick' }) => {
@@ -74,14 +74,16 @@ describe('converter real-pipeline benchmark', () => {
       compareVerifyModes: ['off', 'quick', 'full'], onProgress: (entry) => progress.push(entry) });
     expect(result.best.level).toBe(4);
     const extra = runLevel.mock.calls.filter(([options]) => options.verifyMode);
-    expect(extra.map(([options]) => [options.level, options.verifyMode])).toEqual([[4, 'off'], [4, 'full']]);
+    // Every mode is measured fresh, back to back, on all sample clips.
+    expect(extra.map(([options]) => [options.level, options.verifyMode])).toEqual([[4, 'off'], [4, 'quick'], [4, 'full']]);
+    expect(result.verifyComparison.every((entry) => entry.clips === 8)).toBe(true);
     expect(result.verifyComparison.map((entry) => [entry.verifyMode, entry.verifySecondsPerClip, entry.ok]))
       .toEqual([['off', 0, true], ['quick', 0.4, true], ['full', 4, true]]);
     const [off, quick, full] = result.verifyComparison.map((entry) => entry.filesPerMinute);
     expect(off).toBeGreaterThan(quick);
     expect(quick).toBeGreaterThan(full);
     expect(progress.filter((entry) => entry.step === 'verify').map((entry) => [entry.verifyMode, entry.index, entry.total]))
-      .toEqual([['off', 1, 2], ['full', 2, 2]]);
+      .toEqual([['off', 1, 3], ['quick', 2, 3], ['full', 3, 3]]);
     expect((await fs.promises.readdir(root)).sort()).toEqual(['footage']);
   });
 

@@ -187,6 +187,25 @@ describe('automatic conversion', () => {
     h.cleanup();
   });
 
+  test('turned off, it no longer pauses or resumes its job, but still records finished clips', async () => {
+    const h = harness({ files: [clip('a.mp4')], hour: 2 });
+    await h.auto.start();
+    await h.auto.configure(enabled({ window: { startHour: 1, endHour: 6 } }));
+    await h.auto.tick();
+    h.state.hour = 8;
+    await h.auto.tick();
+    expect(h.state.jobs.get('job-1').state).toBe('paused');
+    await h.auto.configure({ ...enabled({ window: { startHour: 1, endHour: 6 } }), enabled: false, config: null });
+    h.state.hour = 2;
+    await h.auto.tick();
+    expect(h.service.resume).not.toHaveBeenCalled();
+    h.finish('job-1', [{ ...clip('a.mp4'), state: 'completed' }]);
+    await h.auto.tick();
+    expect(h.auto.isKnown({ ...CONFIG, autoConvert: true }, clip('a.mp4'))).toBe(true);
+    expect(h.auto.getState().status.activeJobId).toBeNull();
+    h.cleanup();
+  });
+
   test('gives up on a clip after it fails three automatic runs', async () => {
     const h = harness({ files: [clip('bad.mp4')] });
     await h.auto.start();

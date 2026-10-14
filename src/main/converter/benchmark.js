@@ -126,23 +126,16 @@ async function runConverterBenchmark(options = {}) {
     const best = successful.filter((entry) => entry.filesPerMinute >= top * 0.95)
       .sort((left, right) => left.level - right.level)[0] || null;
 
-    // Verification modes side by side: re-run the recommended setting with
-    // each other mode (the sweep itself used `verifyMode`).
+    // Verification modes side by side: all modes run back to back at the
+    // recommended setting on the full set of sample clips, so the numbers are
+    // measured the same way (the sweep's own runs are not reused).
     const verifyComparison = [];
     const compareModes = Array.isArray(options.compareVerifyModes) ? options.compareVerifyModes : [];
     if (best && compareModes.length) {
-      const mainMode = options.verifyMode || 'quick';
-      const extraRuns = compareModes.filter((mode) => mode !== mainMode).length;
-      let runIndex = 0;
-      for (const mode of compareModes) {
+      for (const [index, mode] of compareModes.entries()) {
         checkAborted();
-        if (mode === mainMode) {
-          verifyComparison.push({ verifyMode: mode, ...best });
-          continue;
-        }
-        runIndex += 1;
-        onProgress({ step: 'verify', verifyMode: mode, level: best.level, index: runIndex, total: extraRuns });
-        verifyComparison.push({ verifyMode: mode, ...await measure(best.level, batchFor(best.level), `verify-${mode}`, { verifyMode: mode }) });
+        onProgress({ step: 'verify', verifyMode: mode, level: best.level, index: index + 1, total: compareModes.length });
+        verifyComparison.push({ verifyMode: mode, ...await measure(best.level, samples, `verify-${mode}`, { verifyMode: mode }) });
       }
     }
     return { encoder, clips: samples.length, results, best, verifyComparison };

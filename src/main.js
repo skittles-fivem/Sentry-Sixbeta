@@ -149,8 +149,17 @@ let appQuitting = false;
 let tray = null;
 let autoConvertApi = null;
 
+// The converter starts before the first window is created. Until startup has
+// made that window, nothing else may create one (it would be a duplicate).
+let mainWindowEverCreated = false;
+// Asked for during start-up (a second launch, a tray click): shown when made.
+let showWhenCreated = false;
 function showMainWindow() {
-  if (!mainWindow || mainWindow.isDestroyed()) { createWindow(); return; }
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (mainWindowEverCreated) createWindow();
+    else showWhenCreated = true;
+    return;
+  }
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
@@ -176,17 +185,25 @@ function createAppTray() {
 }
 
 let autoSettingsApplied = false;
+let appliedAutoAppSettings = null;
 function applyAutoConvertAppSettings(settings) {
+  // Status updates arrive often; only act when these settings change.
+  const key = JSON.stringify([settings?.enabled === true, settings?.keepRunning === true, settings?.openAtLogin === true]);
+  if (key === appliedAutoAppSettings) return;
+  appliedAutoAppSettings = key;
   keepRunningInBackground = settings?.enabled === true && settings?.keepRunning === true;
   if (keepRunningInBackground) createAppTray();
   else if (tray) { tray.destroy(); tray = null; }
   try {
     if (app.isPackaged) {
-      app.setLoginItemSettings({ openAtLogin: settings?.openAtLogin === true, openAsHidden: true, args: ['--background'] });
+      // Like background mode, starting at sign-in belongs to automatic conversion.
+      app.setLoginItemSettings({ openAtLogin: settings?.enabled === true && settings?.openAtLogin === true, openAsHidden: true, args: ['--background'] });
     }
   } catch (_) { /* not supported on this platform */ }
-  // A background launch without background mode still needs a visible window.
-  if (!autoSettingsApplied && launchedInBackground && !keepRunningInBackground) showMainWindow();
+  // A background launch without background mode still needs a visible window
+  // (normally the window does not exist yet and shows itself when ready).
+  if (!autoSettingsApplied && launchedInBackground && !keepRunningInBackground
+      && mainWindow && !mainWindow.isDestroyed()) showMainWindow();
   autoSettingsApplied = true;
 }
 
@@ -264,6 +281,7 @@ function getEffectiveMapLabels() {
 }
 
 function createWindow() {
+  mainWindowEverCreated = true;
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -285,6 +303,11 @@ function createWindow() {
   });
   mainWindow.once('ready-to-show', () => {
     if (mainWindow.isDestroyed()) return;
+    if (showWhenCreated) {
+      showWhenCreated = false;
+      mainWindow.show();
+      return;
+    }
     // Started at sign-in for automatic conversion: stay in the tray.
     if (launchedInBackground && !autoSettingsApplied) {
       setTimeout(() => { if (!autoSettingsApplied || !keepRunningInBackground) showMainWindow(); }, 15_000);

@@ -44,6 +44,9 @@ class ConverterJobServiceError extends Error {
 }
 
 const MAX_RECORDED_ATTEMPTS = 3; // jobStore rejects more
+// States in which a job is not working: time spent in them is left out of its
+// elapsed time and average speed (a retry restarts a finished job).
+const IDLE_JOB_STATES = new Set(['paused', 'paused_network', 'completed', 'skipped', 'failed', 'cancelled']);
 
 function serviceError(code) {
   return new ConverterJobServiceError(code);
@@ -355,7 +358,16 @@ function createConverterJobService(deps) {
       // Stamp state changes so a finished job knows when it finished (elapsed
       // time and average speed after completion).
       if (patch && typeof patch.state === 'string' && patch.state !== runtime.manifest.state && !('updatedAt' in patch)) {
-        patch = { ...patch, updatedAt: clock.now() };
+        const at = clock.now();
+        patch = { ...patch, updatedAt: at };
+        // Leaving a pause (including one across an app restart) or retrying a
+        // finished job: that time was not working time. updatedAt marks when
+        // the idle state began.
+        const previous = runtime.manifest;
+        if (IDLE_JOB_STATES.has(previous.state) && Number.isSafeInteger(previous.updatedAt)
+            && Number.isSafeInteger(at) && at > previous.updatedAt) {
+          patch.pausedMs = (Number.isSafeInteger(previous.pausedMs) ? previous.pausedMs : 0) + (at - previous.updatedAt);
+        }
       }
       runtime.manifest = await store.transition(runtime.manifest.id, patch);
       if (listeners.size > 0) emit(runtime, 'snapshot', { snapshot: publicSnapshot(runtime.manifest) });
@@ -1115,6 +1127,7 @@ function createConverterJobService(deps) {
         codec,
         profileId: runtime.manifest.config.profileId,
         sourceTimeline: timeline,
+        sourceDurationUs: Math.round((inspected.durationSeconds || 0) * 1_000_000) || undefined,
         signal: runtime.abortController.signal,
         // Off / quick / full; replacing originals is never below quick.
         verifyMode: effectiveVerifyMode(runtime.manifest.config),

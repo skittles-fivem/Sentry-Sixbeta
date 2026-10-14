@@ -596,9 +596,13 @@ async function createConverterRuntime(options = {}) {
       try {
         if (await hasActiveJob() || benchmarkController) return;
         const names = await pfs.readdir(options.tempPath);
+        const cutoff = Date.now() - 60_000; // never a folder that may be in use right now
         for (const name of names) {
           if (!name.startsWith(SNAPSHOT_DIRECTORY_PREFIX)) continue;
-          await pfs.rmdir(pathApi.join(options.tempPath, name)).catch(() => {});
+          const folder = pathApi.join(options.tempPath, name);
+          const stat = await pfs.stat(folder).catch(() => null);
+          if (!stat?.isDirectory() || stat.mtimeMs > cutoff) continue;
+          await pfs.rmdir(folder).catch(() => {});
         }
       } catch (_) { /* best effort */ }
     })().finally(() => { snapshotSweep = null; });

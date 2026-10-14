@@ -122,6 +122,7 @@ const converterEnglish = Object.freeze({
     autoChecking: "Checking for new clips…",
     autoPausedWindow: "Paused outside the time window — resumes at {time}",
     autoConverting: "Converting new clips…",
+    autoJobPaused: "Automatic conversion is paused — resume or cancel it above",
     autoError: "Last check failed: {code}",
     autoNoneNew: "No new clips at {time}",
     autoFoundNew: "{count} new clips found at {time}",

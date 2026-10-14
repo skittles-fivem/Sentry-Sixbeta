@@ -264,7 +264,7 @@ function harness(options = {}) {
   service.subscribe((event) => events.push(event));
   return { service, store, scanner, planner, stagingManager, inspectVideo, readTimeline, writers,
     verifier, spawnProcess, children, active, events, log, sleeps, network, timelines,
-    ensureDestinationParent, revalidateDestinationParent };
+    ensureDestinationParent, revalidateDestinationParent, clock };
 }
 
 const CONFIG = Object.freeze({
@@ -1052,6 +1052,27 @@ describe('converter job orchestration', () => {
     await h.service.resume(id);
     await h.service.whenIdle(id);
     expect((await h.service.get(id)).items.map((item) => item.state)).toEqual(['completed', 'completed']);
+  });
+
+  test('time spent paused is recorded so elapsed time and average speed can leave it out', async () => {
+    const gate = deferred();
+    const h = harness({ items: [video('one'), video('two')], spawnActions: [{ hold: { resolveChild: gate.resolve } }, {}] });
+    const id = await h.service.start(CONFIG);
+    const child = await gate.promise;
+    await h.service.pause(id);
+    child.emit('close', 0, null);
+    await flush();
+    const paused = await h.service.get(id);
+    expect(paused.state).toBe('paused');
+    expect(paused.pausedMs).toBeUndefined();
+    let later = paused.updatedAt + 3_600_000; // an hour later
+    h.clock.now.mockImplementation(() => later++);
+    await h.service.resume(id);
+    await h.service.whenIdle(id);
+    const done = await h.service.get(id);
+    expect(done.state).toBe('completed');
+    expect(done.pausedMs).toBe(3_600_000);
+    expect(done.updatedAt - done.createdAt - done.pausedMs).toBeLessThan(10_000);
   });
 
   test('cancels only its active child and delegates exact owned cleanup to staging', async () => {

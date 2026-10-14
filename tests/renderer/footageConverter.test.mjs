@@ -925,6 +925,25 @@ test('shows files per minute and time remaining from finished files over time', 
   assert.equal(elements.eta.textContent, '9m 35s');
 });
 
+test('elapsed time and the finished average leave out time spent paused', async () => {
+  const hour = 3_600_000;
+  // Ran 1 h, then waited 16 h paused for the automatic-conversion window.
+  const finished = activeSnapshot({
+    state: 'completed', revision: 20, createdAt: 0, updatedAt: 17 * hour, pausedMs: 16 * hour,
+    itemCount: 120, itemStateCounts: { queued: 0, completed: 110, skipped: 5, failed: 5, active: 0 }
+  });
+  const elements = { ...makeElements(), speed: new FakeElement(), eta: new FakeElement() };
+  await createFootageConverterController({ api: fakeApi({ current: finished }), elements, storage: memoryStorage(), now: () => 20 * hour }).init();
+  assert.equal(elements.elapsed.textContent, '01:00:00');
+  assert.equal(elements.speed.textContent, '2.0 files/min');
+
+  // While paused the clock stops at the moment the pause began.
+  const paused = activeSnapshot({ state: 'paused', revision: 5, createdAt: 0, updatedAt: 2 * hour, pausedMs: hour });
+  const pausedElements = makeElements();
+  await createFootageConverterController({ api: fakeApi({ current: paused }), elements: pausedElements, storage: memoryStorage(), now: () => 9 * hour }).init();
+  assert.equal(pausedElements.elapsed.textContent, '01:00:00');
+});
+
 test('lists where the time goes, largest average first', async () => {
   const snapshot = activeSnapshot({
     timings: { files: 4, totalMs: { inspect: 400, source: 0, timeline: 2_000, encode: 48_000, metadata: 1_200,
@@ -1176,6 +1195,20 @@ test('automatic conversion: turning it on saves the current job settings and sch
   assert.equal(saved.config.destinationRoot, 'E:\\Converted');
   assert.match(elements.autoStatus.textContent, /Next check/);
   assert.equal(elements.autoCheckNow.disabled, false);
+});
+
+test('automatic conversion: a paused automatic job says it is paused, then converting again once resumed', async () => {
+  const elements = autoElements();
+  const api = autoApi({ enabled: true, intervalMinutes: 60, window: null, keepRunning: false, openAtLogin: false, config: {} });
+  api.getConverterAuto = async () => ({ ok: true, value: {
+    settings: { enabled: true, intervalMinutes: 60, window: null, keepRunning: false, openAtLogin: false, config: {} },
+    status: { activeJobId: 'job-auto', pausedForWindow: false }
+  } });
+  api.getCurrentConverterJob = async () => ({ ok: true, value: activeSnapshot({ id: 'job-auto', state: 'paused', revision: 3 }) });
+  await createFootageConverterController({ api, elements, storage: memoryStorage(), autoPollMs: 0 }).init();
+  assert.equal(elements.autoStatus.textContent, 'Automatic conversion is paused — resume or cancel it above');
+  await elements.resumeButton.click();
+  assert.equal(elements.autoStatus.textContent, 'Converting new clips…');
 });
 
 test('automatic conversion: cannot be turned on without a source folder', async () => {
