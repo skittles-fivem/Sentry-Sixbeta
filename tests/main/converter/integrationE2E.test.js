@@ -110,7 +110,8 @@ describeReal('real converter end-to-end', () => {
     for (let index = 0; index < 5; index += 1) await fs.promises.copyFile(seed, path.join(folder, clipName(index)));
     let hour = 2;
     const autoClock = { now: Date.now, hourOf: () => hour };
-    const config = baseConfig(root, { concurrency: 1, verifyMode: 'quick' });
+    // A fixed bitrate (no size window): this test is about pausing, not size.
+    const config = baseConfig(root, { profileId: 'custom', bitrateKbps: 600, concurrency: 1, verifyMode: 'quick' });
 
     let runtime = await start(root, { autoClock });
     await runtime.auto.configure({ enabled: true, intervalMinutes: 60, window: { startHour: 1, endHour: 6 }, keepRunning: false, openAtLogin: false, config });
@@ -200,7 +201,8 @@ describeReal('real converter end-to-end', () => {
     for (let index = 0; index < 2; index += 1) await makeClip(tools, path.join(folder, clipName(index)), { seconds: 4, noise: 16 });
     const runtime = await start(root, { autoConvert: false });
     const steps = [];
-    const result = await runtime.runBenchmark({ codecs: ['h265', 'av1'], profileId: 'balanced', verifyMode: 'quick',
+    // A fixed bitrate keeps tiny sample clips from missing a size window.
+    const result = await runtime.runBenchmark({ codecs: ['h265', 'av1'], profileId: 'custom', bitrateKbps: 600, verifyMode: 'quick',
       sourceRoot: path.join(root, 'TeslaCam'), onProgress: (progress) => steps.push(progress) });
     expect(result.codecs.map((run) => run.codec)).toEqual(['h265', 'av1']);
     for (const run of result.codecs) {
@@ -234,7 +236,7 @@ describeReal('real converter end-to-end', () => {
     await fs.promises.symlink(realTemp, linkedTemp, 'dir');
     await makeClip(tools, path.join(root, 'TeslaCam', 'RecentClips', clipName(0)), { seconds: 2 });
     const runtime = await start(root, { tempPath: linkedTemp, autoConvert: false });
-    const job = await runtime.service.whenIdle(await runtime.service.start(baseConfig(root)));
+    const job = await runtime.service.whenIdle(await runtime.service.start(baseConfig(root, { profileId: 'custom', bitrateKbps: 600 })));
     expect(job.items).toEqual([expect.objectContaining({ state: 'completed', resultCode: 'converted' })]);
   });
 
@@ -261,7 +263,8 @@ describeReal('real converter end-to-end', () => {
     const received = [];
     const sender = { send: (channel, payload) => received.push(payload), once: () => {}, isDestroyed: () => false };
     expect((await handlers['converter:subscribeProgress']({ sender })).ok).toBe(true);
-    const started = await handlers['converter:start']({ sender }, baseConfig(root, { networkMode: 'auto', concurrency: 4 }));
+    const started = await handlers['converter:start']({ sender }, baseConfig(root, { networkMode: 'auto', concurrency: 4,
+      profileId: 'custom', bitrateKbps: 300 }));
     expect(started.ok).toBe(true);
     const job = await runtime.service.whenIdle(started.value.jobId);
     expect(job.items.filter((item) => item.state === 'completed')).toHaveLength(count);

@@ -142,12 +142,11 @@ jobs:
           "$FF" -hide_banner -version | head -1
           "$FF" -hide_banner -encoders | grep -E "libx265|libsvtav1|libaom-av1"
 
-      - name: Debug (temporary)
-        run: |
-          node tests/ci/debugRealRuntime.js
-          npx jest --ci tests/main/converter/integrationDebug
-
       - name: Converter integration and end-to-end tests
+        env:
+          # The real scanner loads a shared ES module with import(); Jest
+          # only allows that with this flag (the app itself needs nothing).
+          NODE_OPTIONS: --experimental-vm-modules
         run: >-
           npx jest --ci --reporters=default --reporters=github-actions
           --json --outputFile=jest-results.json
