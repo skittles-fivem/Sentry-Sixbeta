@@ -370,7 +370,8 @@ describeRealEncoders(`real pipeline (${encoderGate.reason || 'required CPU encod
   });
 
   // Atomic replacement of originals is only supported on Windows and macOS.
-  (process.platform === 'linux' ? test.skip : test)('replaces originals in parallel from a staged (network-style) source with one source read each', async () => {
+  // Replacing originals is only available with Windows' native file operations.
+  (process.platform === 'win32' ? test : test.skip)('replaces originals in parallel from a staged (network-style) source with one source read each', async () => {
     const caseRoot = path.join(root, 'parallel-replace-staging');
     const sourceFolder = path.join(caseRoot, 'source', 'RecentClips');
     const userDataPath = path.join(caseRoot, 'user-data');
@@ -381,15 +382,17 @@ describeRealEncoders(`real pipeline (${encoderGate.reason || 'required CPU encod
       durationSeconds: 16, spatialNoise: 16 })));
     const timelines = new Map();
     for (const name of names) timelines.set(name, extractH264TelemetryTimeline(await fs.promises.readFile(path.join(sourceFolder, name))));
+    // Replacing originals uses the platform's own atomic file operations
+    // (the injected test adapters above cannot replace).
     const runtime = await createConverterRuntime({
       userDataPath, tempPath: caseRoot, ffmpegPath: tools.ffmpegPath, ffprobePath: tools.ffprobePath,
       spawn, processTimeoutMs: 120_000,
-      removeOwned: ownedFileRemover(), renameExclusive: noReplacePromoter(),
       factories: { createEncoderPlanner(options) {
         const real = createEncoderPlanner(options);
         return { select: real.selectCpuFallback, selectCpuFallback: real.selectCpuFallback };
       } }
     });
+    expect(runtime.capabilities.replacement).toBe('available');
     const jobId = await runtime.service.start({ sourceRoot: path.join(caseRoot, 'source'), destinationRoot: null,
       codec: 'h265', profileId: 'balanced', networkMode: 'staging', outputMode: 'replace', replacementConfirmed: true,
       includedGroups: ['RecentClips'], concurrency: 3 });
