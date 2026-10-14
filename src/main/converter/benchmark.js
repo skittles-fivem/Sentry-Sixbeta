@@ -132,13 +132,16 @@ async function runConverterBenchmark(options = {}) {
     const compareModes = Array.isArray(options.compareVerifyModes) ? options.compareVerifyModes : [];
     if (best && compareModes.length) {
       const mainMode = options.verifyMode || 'quick';
-      for (const [index, mode] of compareModes.entries()) {
+      const extraRuns = compareModes.filter((mode) => mode !== mainMode).length;
+      let runIndex = 0;
+      for (const mode of compareModes) {
         checkAborted();
         if (mode === mainMode) {
           verifyComparison.push({ verifyMode: mode, ...best });
           continue;
         }
-        onProgress({ step: 'verify', verifyMode: mode, level: best.level, index: index + 1, total: compareModes.length });
+        runIndex += 1;
+        onProgress({ step: 'verify', verifyMode: mode, level: best.level, index: runIndex, total: extraRuns });
         verifyComparison.push({ verifyMode: mode, ...await measure(best.level, batchFor(best.level), `verify-${mode}`, { verifyMode: mode }) });
       }
     }

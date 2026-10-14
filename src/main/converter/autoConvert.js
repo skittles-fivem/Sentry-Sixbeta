@@ -15,6 +15,9 @@ const nodePath = require('path');
 
 const INTERVAL_MINUTES = Object.freeze([15, 30, 60, 180, 360, 720, 1440]);
 const SETTINGS_FILE = 'settings.json';
+// Which job this feature paused for the time window (survives restarts, so a
+// job the user paused themselves is never resumed automatically).
+const STATE_FILE = 'state.json';
 const MAX_FAILED_SWEEPS = 3;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 
@@ -200,6 +203,11 @@ function createAutoConverter(options = {}) {
     await saveIndex(index);
   }
 
+  async function setPausedForWindow(jobId) {
+    status.pausedForWindow = Boolean(jobId);
+    try { await writeJson(STATE_FILE, { pausedForWindowJobId: jobId || null }); } catch (_) { /* best effort */ }
+  }
+
   function changed() {
     try { onChange(getState()); } catch (_) { /* observers are advisory */ }
   }
@@ -209,23 +217,23 @@ function createAutoConverter(options = {}) {
     try { job = await service.get(status.activeJobId); } catch (_) { job = null; }
     if (!job) {
       status.activeJobId = null;
-      status.pausedForWindow = false;
+      if (status.pausedForWindow) await setPausedForWindow(null);
       return;
     }
     if (TERMINAL.has(job.state)) {
       await recordFinishedJob(job);
       status.activeJobId = null;
-      status.pausedForWindow = false;
+      if (status.pausedForWindow) await setPausedForWindow(null);
       changed();
       return;
     }
     if (!insideWindow && !status.pausedForWindow && job.state !== 'paused') {
       await service.pause(job.id);
-      status.pausedForWindow = true;
+      await setPausedForWindow(job.id);
       changed();
     } else if (insideWindow && status.pausedForWindow) {
       if (job.state === 'paused') await service.resume(job.id);
-      status.pausedForWindow = false;
+      await setPausedForWindow(null);
       changed();
     }
   }
@@ -300,7 +308,9 @@ function createAutoConverter(options = {}) {
         if (running) {
           await loadIndex(running.config);
           status.activeJobId = running.id;
-          status.pausedForWindow = running.state === 'paused';
+          // Only a pause this feature made is undone automatically.
+          const saved = await readJson(STATE_FILE);
+          status.pausedForWindow = running.state === 'paused' && saved?.pausedForWindowJobId === running.id;
         }
       } catch (_) { /* nothing to adopt */ }
       if (!timer) {

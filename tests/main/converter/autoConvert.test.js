@@ -158,6 +158,35 @@ describe('automatic conversion', () => {
     h.cleanup();
   });
 
+  test('after a restart, resumes only a job it paused itself, never one the user paused', async () => {
+    const h = harness({ files: [clip('a.mp4')], hour: 2 });
+    await h.auto.start();
+    await h.auto.configure(enabled({ window: { startHour: 1, endHour: 6 } }));
+    await h.auto.tick();
+    h.state.hour = 8;
+    await h.auto.tick(); // paused for the window
+    expect(h.state.jobs.get('job-1').state).toBe('paused');
+    const restart = () => createAutoConverter({ service: h.service, scanner: async function* s() {}, fs: fs.promises, pathApi: path,
+      directory: path.join(h.root, 'auto'), now: () => h.state.time, hourOf: () => h.state.hour,
+      timers: { setInterval: () => null, clearInterval: () => {} } });
+    const again = restart();
+    await again.start();
+    await again.tick(); // let the start-up check settle
+    h.state.hour = 2;
+    await again.tick();
+    expect(h.service.resume).toHaveBeenCalledWith('job-1');
+
+    // Now the user pauses it themselves, then the app restarts inside the window.
+    h.state.jobs.get('job-1').state = 'paused';
+    h.service.resume.mockClear();
+    const userPaused = restart();
+    await userPaused.start();
+    await userPaused.tick();
+    await userPaused.tick();
+    expect(h.service.resume).not.toHaveBeenCalled();
+    h.cleanup();
+  });
+
   test('gives up on a clip after it fails three automatic runs', async () => {
     const h = harness({ files: [clip('bad.mp4')] });
     await h.auto.start();

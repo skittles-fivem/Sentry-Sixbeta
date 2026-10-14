@@ -1,8 +1,9 @@
 'use strict';
 
 // Clip filmstrips: six small frames spread across a clip, in one JPEG.
-// Only keyframes are decoded, so a one-minute clip takes a fraction of a
-// second. Strips live in the app's cache folder, named by a hash of the clip's
+// FFmpeg jumps straight to six points in the clip and decodes one keyframe at
+// each, so only small parts of the file are read (about a tenth of a full
+// read) — this matters for clips on network shares. Strips live in the app's cache folder, named by a hash of the clip's
 // path, size and modification time, so a changed clip never shows a stale
 // strip. Converted clips get one right after they are saved; any other clip
 // gets one the first time it is previewed.
@@ -84,23 +85,35 @@ function createClipThumbnails(options = {}) {
     const probe = await run(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', videoPath]);
     const duration = Number(String(probe.stdout).trim());
     if (probe.status !== 0 || !Number.isFinite(duration) || duration <= 0) return null;
-    // Take the first keyframe at or after each fixed target (0, 1/6, 2/6 ... of
-    // the clip). Fixed targets keep the picks spread across the whole clip
-    // however far apart the keyframes are.
-    const step = Math.max(0.05, duration / FRAMES).toFixed(3);
     const temporary = `${target}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp.jpg`;
-    const result = await run(ffmpegPath, [
-      '-nostdin', '-hide_banner', '-loglevel', 'error',
-      '-skip_frame', 'nokey', '-i', videoPath, '-an', '-sn', '-dn',
-      '-vf', `select='gte(t\\,selected_n*${step})',scale=${FRAME_WIDTH}:-2,tile=${FRAMES}x1`,
-      '-fps_mode', 'passthrough', '-frames:v', '1', '-q:v', '5', '-y', temporary
-    ]);
-    if (result.status !== 0 || !await exists(temporary)) {
-      await fs.unlink(temporary).catch(() => {});
-      return null;
+    const made = async (args) => {
+      const result = await run(ffmpegPath, ['-nostdin', '-hide_banner', '-loglevel', 'error', ...args, '-q:v', '5', '-y', temporary]);
+      return result.status === 0 && await exists(temporary);
+    };
+    // Seek to 0, 1/6, 2/6 ... of the clip (each input jumps to its point and
+    // yields its nearest earlier keyframe), then place the six side by side.
+    const seekInputs = [];
+    const filters = [];
+    for (let index = 0; index < FRAMES; index += 1) {
+      seekInputs.push('-threads', '1', '-ss', ((duration * index) / FRAMES).toFixed(3), '-noaccurate_seek', '-i', videoPath);
+      filters.push(`[${index}:v:0]trim=end_frame=1,scale=${FRAME_WIDTH}:-2,setsar=1[f${index}]`);
     }
-    await fs.rename(temporary, target);
-    return target;
+    const stack = `${filters.join(';')};${Array.from({ length: FRAMES }, (_, index) => `[f${index}]`).join('')}hstack=inputs=${FRAMES}[strip]`;
+    let ok = await made([...seekInputs, '-filter_complex', stack, '-map', '[strip]', '-frames:v', '1']);
+    if (!ok) {
+      // Fallback: scan the keyframes (reads the whole file).
+      const step = Math.max(0.05, duration / FRAMES).toFixed(3);
+      ok = await made(['-skip_frame', 'nokey', '-i', videoPath, '-an', '-sn', '-dn',
+        '-vf', `select='gte(t\\,selected_n*${step})',scale=${FRAME_WIDTH}:-2,tile=${FRAMES}x1`,
+        '-fps_mode', 'passthrough', '-frames:v', '1']);
+    }
+    try {
+      if (!ok) return null;
+      await fs.rename(temporary, target);
+      return target;
+    } finally {
+      await fs.unlink(temporary).catch(() => {}); // gone after a successful rename
+    }
   }
 
   function pump() {

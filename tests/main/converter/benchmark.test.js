@@ -80,7 +80,8 @@ describe('converter real-pipeline benchmark', () => {
     const [off, quick, full] = result.verifyComparison.map((entry) => entry.filesPerMinute);
     expect(off).toBeGreaterThan(quick);
     expect(quick).toBeGreaterThan(full);
-    expect(progress.filter((entry) => entry.step === 'verify').map((entry) => entry.verifyMode)).toEqual(['off', 'full']);
+    expect(progress.filter((entry) => entry.step === 'verify').map((entry) => [entry.verifyMode, entry.index, entry.total]))
+      .toEqual([['off', 1, 2], ['full', 2, 2]]);
     expect((await fs.promises.readdir(root)).sort()).toEqual(['footage']);
   });
 
