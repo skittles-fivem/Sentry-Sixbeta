@@ -318,7 +318,9 @@ export function createGridResizer({ grid, getLayoutId, getColumns }) {
             const move = document.createElement('div');
             move.className = 'tile-move-handle';
             move.title = 'Drag to move this camera';
-            move.innerHTML = '<span class="material-symbols-outlined">open_with</span>';
+            // Inline icon: the bundled icon font is a subset without a move glyph.
+            move.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">'
+                + '<path fill="currentColor" d="M12 2l3 3h-2v4h-2V5H9l3-3zm0 20l-3-3h2v-4h2v4h2l-3 3zM2 12l3-3v2h4v2H5v2l-3-3zm20 0l-3 3v-2h-4v-2h4V9l3 3z"/></svg>';
             for (const handle of [resize, move]) {
                 handle.setAttribute('draggable', 'false');
                 // Never start a camera swap or toggle focus from a handle.
