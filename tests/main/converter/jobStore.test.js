@@ -305,6 +305,13 @@ describe('converter job store', () => {
     }
   });
 
+  test('persists a verification mode and rejects unknown ones', async () => {
+    const store = createJobStore({ rootDir, fs: fs.promises });
+    await store.save(job('verify-mode', { config: validConfig({ verifyMode: 'off' }) }));
+    await expect(store.load('verify-mode')).resolves.toMatchObject({ config: { verifyMode: 'off' } });
+    await expect(store.save(job('verify-bad', { config: validConfig({ verifyMode: 'fast' }) }))).rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
+  });
+
   test('defaults an absent group order when reading an old manifest', async () => {
     const store = createJobStore({ rootDir, fs: fs.promises });
     const oldManifest = job('old-order');

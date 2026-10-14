@@ -9,7 +9,8 @@ const {
   addCompletedFile,
   serializeSummary,
   targetOutputBytes,
-  hasSizeTarget
+  hasSizeTarget,
+  effectiveVerifyMode
 } = require('./contracts');
 const {
   SAFE_VIDEO_BITRATE_FLOORS,
@@ -1115,7 +1116,9 @@ function createConverterJobService(deps) {
         profileId: runtime.manifest.config.profileId,
         sourceTimeline: timeline,
         signal: runtime.abortController.signal,
-        ...(verifyAccel ? {
+        // Off / quick / full; replacing originals is never below quick.
+        verifyMode: effectiveVerifyMode(runtime.manifest.config),
+        ...(verifyAccel && effectiveVerifyMode(runtime.manifest.config) === 'full' ? {
           decodeAccel: verifyAccel,
           onDecodeAccelFallback: () => verifyDecodeFallbacks.set(verifiedEncoder, (verifyDecodeFallbacks.get(verifiedEncoder) || 0) + 1)
         } : {})

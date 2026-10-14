@@ -2,7 +2,7 @@
 
 const path = require('path');
 const { randomUUID } = require('crypto');
-const { createEmptyCounters, isValidConcurrency, isValidCustomBitrate, isValidQualityLevel, TIMING_PHASES } = require('./contracts');
+const { createEmptyCounters, isValidConcurrency, isValidCustomBitrate, isValidQualityLevel, isValidVerifyMode, TIMING_PHASES } = require('./contracts');
 
 const MANIFEST_VERSION = 1;
 const MANIFEST_NAME = 'job.json';
@@ -56,7 +56,7 @@ const TOP_FIELDS = new Set([
 ]);
 const CONFIG_FIELDS = new Set([
   'sourceRoot', 'destinationRoot', 'codec', 'profileId', 'networkMode',
-  'outputMode', 'includedGroups', 'groupOrder', 'replacementConfirmed', 'concurrency', 'bitrateKbps', 'qualityLevel', 'autoConvert'
+  'outputMode', 'includedGroups', 'groupOrder', 'replacementConfirmed', 'concurrency', 'bitrateKbps', 'qualityLevel', 'autoConvert', 'verifyMode'
 ]);
 const ITEM_FIELDS = new Set([
   'id', 'state', 'kind', 'group', 'eventId', 'relativePath', 'sourcePath',
@@ -498,6 +498,10 @@ function normalizeConfig(value) {
     if (!isValidQualityLevel(value.qualityLevel)) throw storeError('INVALID_MANIFEST');
     result.qualityLevel = value.qualityLevel;
   } else if (value.qualityLevel !== undefined) throw storeError('INVALID_MANIFEST');
+  if (value.verifyMode !== undefined) {
+    if (!isValidVerifyMode(value.verifyMode)) throw storeError('INVALID_MANIFEST');
+    result.verifyMode = value.verifyMode;
+  }
   // Started by automatic conversion (only clips it has not handled before).
   if (value.autoConvert !== undefined) {
     if (value.autoConvert !== true) throw storeError('INVALID_MANIFEST');

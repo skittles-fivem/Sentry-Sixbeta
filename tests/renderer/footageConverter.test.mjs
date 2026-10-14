@@ -294,7 +294,8 @@ test('builds the exact start DTO from selected controls', async () => {
     includedGroups: ['RecentClips', 'SentryClips'],
     groupOrder: ['SavedClips', 'SentryClips', 'RecentClips'],
     replacementConfirmed: false,
-    concurrency: 5
+    concurrency: 5,
+    verifyMode: 'quick'
   });
 });
 
@@ -374,7 +375,8 @@ test('requires both explicit replacement acknowledgement and confirmation', asyn
     includedGroups: ['RecentClips', 'SavedClips', 'SentryClips'],
     groupOrder: ['SavedClips', 'SentryClips', 'RecentClips'],
     replacementConfirmed: true,
-    concurrency: 5
+    concurrency: 5,
+    verifyMode: 'quick'
   });
 });
 
@@ -1070,7 +1072,7 @@ test('benchmark: compares H.265 and AV1 side by side and applies either pick', a
   await elements.benchmarkRun.click();
 
   assert.deepEqual(api.calls.find(([name]) => name === 'benchmark')[1],
-    { codecs: ['h265', 'av1'], profileId: 'balanced', sourceRoot: 'D:\\TeslaCam' });
+    { codecs: ['h265', 'av1'], verifyMode: 'quick', profileId: 'balanced', sourceRoot: 'D:\\TeslaCam' });
   const head = elements.benchmarkHead.children[0].children.map((node) => node.textContent);
   assert.deepEqual(head, ['At once', 'H.265 Files/min', 'FPS', 'Saved', 'AV1 Files/min', 'FPS', 'Saved']);
   assert.deepEqual(elements.benchmarkRows.children.map((row) => row.children[0].textContent), ['1', '2', '4', '6']);
@@ -1212,4 +1214,84 @@ test('a different job never replaces one that is still running', async () => {
   await controller.init();
   api.emit({ jobId: 'job-other', revision: 1, snapshot: activeSnapshot({ id: 'job-other', state: 'encoding', revision: 1 }) });
   assert.equal(controller.snapshot.id, 'job-live');
+});
+
+
+function verifyElements() {
+  const select = new FakeElement({ value: 'quick' });
+  select.options = ['off', 'quick', 'full'].map((value) => ({ value, disabled: false }));
+  return { ...makeElements(), verifyMode: select, verifyReplaceNote: new FakeElement() };
+}
+
+test('verification: defaults to Quick, sends the chosen mode and remembers it', async () => {
+  const elements = verifyElements();
+  const api = fakeApi();
+  const storage = memoryStorage();
+  await createFootageConverterController({ api, elements, storage }).init();
+  assert.equal(elements.verifyMode.value, 'quick');
+  assert.equal(elements.verifyReplaceNote.hidden, true);
+  elements.verifyMode.value = 'full';
+  await elements.verifyMode.dispatch('change');
+  assert.equal(storage.values.get('converterVerifyMode'), 'full');
+  const config = await startWith(elements, api);
+  assert.equal(config.verifyMode, 'full');
+
+  const next = verifyElements();
+  await createFootageConverterController({ api: fakeApi(), elements: next, storage }).init();
+  assert.equal(next.verifyMode.value, 'full');
+});
+
+test('verification: Off is unavailable while replacing originals (Quick is used)', async () => {
+  const elements = verifyElements();
+  const api = fakeApi();
+  await createFootageConverterController({ api, elements, storage: memoryStorage(), confirm: () => true }).init();
+  elements.verifyMode.value = 'off';
+  await elements.verifyMode.dispatch('change');
+  elements.outputOptions[0].checked = false;
+  elements.outputOptions[1].checked = true;
+  await elements.outputOptions[1].dispatch('change');
+  assert.equal(elements.verifyMode.options.find((option) => option.value === 'off').disabled, true);
+  assert.equal(elements.verifyMode.value, 'quick');
+  assert.equal(elements.verifyReplaceNote.hidden, false);
+  elements.replacementConfirmation.checked = true;
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  await elements.startButton.click();
+  assert.equal(api.calls.find(([name]) => name === 'start')[1].verifyMode, 'quick');
+  // Back to separate output: Off is offered again.
+  elements.outputOptions[1].checked = false;
+  elements.outputOptions[0].checked = true;
+  await elements.outputOptions[0].dispatch('change');
+  assert.equal(elements.verifyMode.options.find((option) => option.value === 'off').disabled, false);
+});
+
+test('verification: a job saved before the setting existed shows Full', async () => {
+  const elements = verifyElements();
+  await createFootageConverterController({ api: fakeApi({ current: activeSnapshot() }), elements, storage: memoryStorage() }).init();
+  assert.equal(elements.verifyMode.value, 'full');
+});
+
+test('benchmark: shows Off / Quick / Full side by side at the recommended setting', async () => {
+  const elements = { ...benchmarkElements(), benchmarkVerifyTable: new FakeElement(), benchmarkVerifyHead: new FakeElement(), benchmarkVerifyRows: new FakeElement() };
+  const api = fakeApi();
+  api.runConverterBenchmark = async (_request, onProgress) => {
+    onProgress({ step: 'verify', codec: 'h265', verifyMode: 'full', level: 4, index: 3, total: 3 });
+    assert.match(elements.benchmarkStatus.textContent, /H\.265: timing verification Full at 4 at once… \(3 of 3\)/);
+    const best = { level: 4, ok: true, filesPerMinute: 40, fps: 400 };
+    const h265 = { codec: 'h265', encoder: { codec: 'hevc_nvenc', hardware: true }, clips: 8,
+      results: [{ ...best, savedPercent: 20, verifySecondsPerClip: 0.4, failures: [] }], best,
+      verifyComparison: [
+        { verifyMode: 'off', level: 4, ok: true, filesPerMinute: 42, verifySecondsPerClip: 0.1 },
+        { verifyMode: 'quick', level: 4, ok: true, filesPerMinute: 40, verifySecondsPerClip: 0.4 },
+        { verifyMode: 'full', level: 4, ok: true, filesPerMinute: 27.5, verifySecondsPerClip: 4.1 }
+      ] };
+    return { ok: true, value: { ...h265, codecs: [h265] } };
+  };
+  await createFootageConverterController({ api, elements, storage: memoryStorage() }).init();
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  await elements.benchmarkRun.click();
+  assert.equal(elements.benchmarkVerifyTable.hidden, false);
+  assert.deepEqual(elements.benchmarkVerifyHead.children[0].children.map((node) => node.textContent), ['Verification', 'Off', 'Quick', 'Full']);
+  assert.deepEqual(elements.benchmarkVerifyRows.children[0].children.map((node) => node.textContent), [
+    'H.265 · 4 at once', '42 (0.1 s)', '40 (0.4 s)', '27.5 (4.1 s)'
+  ]);
 });

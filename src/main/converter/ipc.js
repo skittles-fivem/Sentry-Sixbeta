@@ -2,7 +2,7 @@
 
 const nodeFs = require('fs');
 const nodePath = require('path');
-const { isValidConcurrency, isValidCustomBitrate, isValidQualityLevel } = require('./contracts');
+const { isValidConcurrency, isValidCustomBitrate, isValidQualityLevel, isValidVerifyMode } = require('./contracts');
 
 const PROFILE_IDS = Object.freeze(['conservative', 'balanced', 'aggressive', 'custom', 'quality']);
 
@@ -287,14 +287,16 @@ async function validateStartConfig(payload, dependencies, capabilities) {
   const hasConcurrency = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'concurrency');
   const hasBitrate = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'bitrateKbps');
   const hasQuality = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'qualityLevel');
+  const hasVerify = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'verifyMode');
   const expectedKeys = [...keys, ...(hasGroupOrder ? ['groupOrder'] : []), ...(hasConcurrency ? ['concurrency'] : []),
-    ...(hasBitrate ? ['bitrateKbps'] : []), ...(hasQuality ? ['qualityLevel'] : [])];
+    ...(hasBitrate ? ['bitrateKbps'] : []), ...(hasQuality ? ['qualityLevel'] : []), ...(hasVerify ? ['verifyMode'] : [])];
   if (!exactKeys(payload, expectedKeys)) fail('INVALID_REQUEST');
   // Custom profile: an explicit bitrate is required; size profiles take none.
   if (payload.profileId === 'custom' ? !isValidCustomBitrate(payload.bitrateKbps) : hasBitrate) fail('INVALID_BITRATE');
   // Constant quality: a named level is required; other profiles take none.
   if (payload.profileId === 'quality' ? !isValidQualityLevel(payload.qualityLevel) : hasQuality) fail('INVALID_QUALITY');
   if (hasConcurrency && !isValidConcurrency(payload.concurrency)) fail('INVALID_CONCURRENCY');
+  if (hasVerify && !isValidVerifyMode(payload.verifyMode)) fail('INVALID_VERIFY_MODE');
   if (!['h265', 'av1'].includes(payload.codec)) fail('INVALID_CODEC');
   if (!PROFILE_IDS.includes(payload.profileId)) fail('INVALID_PROFILE');
   if (!['auto', 'staging', 'direct'].includes(payload.networkMode)) fail('INVALID_NETWORK_MODE');
@@ -311,7 +313,9 @@ async function validateStartConfig(payload, dependencies, capabilities) {
     if (payload.destinationRoot !== null) fail('INVALID_PATH');
     if (payload.replacementConfirmed !== true) fail('REPLACEMENT_CONFIRMATION_REQUIRED');
     if (capabilities.replacement !== 'available') fail('REPLACEMENT_UNAVAILABLE');
-    return { ...payload, sourceRoot: source.real };
+    // Originals are replaced: never without at least the quick checks.
+    const verifyMode = hasVerify && payload.verifyMode === 'off' ? { verifyMode: 'quick' } : {};
+    return { ...payload, ...verifyMode, sourceRoot: source.real };
   }
   if (payload.replacementConfirmed !== false) fail('INVALID_REPLACEMENT_CONFIRMATION');
   const destination = await canonicalFutureDirectory(payload.destinationRoot, dependencies);
@@ -458,7 +462,8 @@ function registerConverterIpc(options = {}) {
     'converter:runBenchmark': wrapped(async (event, payload) => {
       if (typeof options.benchmark?.run !== 'function') fail('BENCHMARK_UNAVAILABLE');
       if (!isPlainObject(payload) || Object.keys(payload)
-        .some((key) => !['codec', 'codecs', 'sourceRoot', 'profileId', 'bitrateKbps', 'qualityLevel'].includes(key))) fail('INVALID_REQUEST');
+        .some((key) => !['codec', 'codecs', 'sourceRoot', 'profileId', 'bitrateKbps', 'qualityLevel', 'verifyMode'].includes(key))) fail('INVALID_REQUEST');
+      if (payload.verifyMode !== undefined && !isValidVerifyMode(payload.verifyMode)) fail('INVALID_VERIFY_MODE');
       const codecs = payload.codecs === undefined ? [payload.codec] : payload.codecs;
       if (!Array.isArray(codecs) || codecs.length === 0 || codecs.length > 2 || new Set(codecs).size !== codecs.length
           || codecs.some((entry) => !['h265', 'av1'].includes(entry))) fail('INVALID_CODEC');
@@ -479,6 +484,7 @@ function registerConverterIpc(options = {}) {
         profileId,
         ...(profileId === 'custom' ? { bitrateKbps: payload.bitrateKbps } : {}),
         ...(profileId === 'quality' ? { qualityLevel: payload.qualityLevel } : {}),
+        verifyMode: payload.verifyMode ?? 'quick',
         sourceRoot,
         onProgress: (progress) => {
           try {

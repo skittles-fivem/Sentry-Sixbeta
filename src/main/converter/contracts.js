@@ -58,6 +58,25 @@ function isValidQualityLevel(value) {
   return QUALITY_LEVELS.includes(value);
 }
 
+// Post-conversion verification depth:
+//   full  - quick checks plus a complete decode of every output frame;
+//   quick - stream/duration/frame/dimension checks against the source, the
+//           per-frame telemetry comparison and size rules (no full decode);
+//   off   - only the integrity hash and "smaller than the original" rule.
+// Replacing originals always uses at least quick. Jobs saved before this
+// setting existed keep running full.
+const VERIFY_MODES = deepFreeze(['off', 'quick', 'full']);
+const DEFAULT_VERIFY_MODE = 'quick';
+
+function isValidVerifyMode(value) {
+  return VERIFY_MODES.includes(value);
+}
+
+function effectiveVerifyMode(config = {}) {
+  const mode = isValidVerifyMode(config.verifyMode) ? config.verifyMode : 'full';
+  return config.outputMode === 'replace' && mode === 'off' ? 'quick' : mode;
+}
+
 // Profiles without a byte target (the verifier only requires real savings).
 function hasSizeTarget(profileId) {
   return profileId !== CUSTOM_PROFILE_ID && profileId !== QUALITY_PROFILE_ID;
@@ -153,4 +172,4 @@ function serializeSummary(counters) {
   };
 }
 
-module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, CUSTOM_PROFILE_ID, CUSTOM_BITRATE_KBPS, isValidCustomBitrate, QUALITY_PROFILE_ID, QUALITY_LEVELS, isValidQualityLevel, hasSizeTarget, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };
+module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, CUSTOM_PROFILE_ID, CUSTOM_BITRATE_KBPS, isValidCustomBitrate, QUALITY_PROFILE_ID, QUALITY_LEVELS, isValidQualityLevel, hasSizeTarget, VERIFY_MODES, DEFAULT_VERIFY_MODE, isValidVerifyMode, effectiveVerifyMode, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };

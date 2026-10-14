@@ -2651,6 +2651,31 @@ describe('parallel conversion workers', () => {
     expect(done.items[0]).toMatchObject({ state: 'failed' });
   });
 
+  test.each([
+    [{}, 'full'],
+    [{ verifyMode: 'off' }, 'off'],
+    [{ verifyMode: 'quick' }, 'quick'],
+    [{ verifyMode: 'full' }, 'full']
+  ])('passes the verification mode to the verifier (%p)', async (overrides, expected) => {
+    const h = harness({ items: clips(1), queueLimit: 10 });
+    await h.service.whenIdle(await h.service.start({ ...CONFIG, ...overrides }));
+    expect(h.verifier.mock.calls[0][0].verifyMode).toBe(expected);
+  });
+
+  test('replacing originals with verification off is upgraded to quick by the converter itself', async () => {
+    const h = harness({ items: clips(1), queueLimit: 10 });
+    await h.service.whenIdle(await h.service.start({ ...CONFIG, destinationRoot: null, outputMode: 'replace',
+      replacementConfirmed: true, verifyMode: 'off' }));
+    expect(h.verifier.mock.calls[0][0].verifyMode).toBe('quick');
+  });
+
+  test('GPU decoding for verify is only offered to a full verification', async () => {
+    const accel = (encoder) => (encoder.endsWith('_nvenc') ? ['-hwaccel', 'cuda'] : null);
+    const h = harness({ items: clips(1), queueLimit: 10, deps: { decodeAccel: accel } });
+    await h.service.whenIdle(await h.service.start({ ...CONFIG, verifyMode: 'quick' }));
+    expect(h.verifier.mock.calls[0][0].decodeAccel).toBeUndefined();
+  });
+
   test('progress events report the combined encoder fps', async () => {
     const h = harness({ items: clips(1), queueLimit: 10,
       spawnActions: [{ chunks: ['fps=123.4\nout_time_ms=500000\nprogress=continue\n', 'progress=end\n'] }] });

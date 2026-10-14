@@ -1180,3 +1180,15 @@ body.converter-mode #driveList {
 .converter-config [hidden] {
     display: none !important;
 }
+
+.converter-benchmark-verify {
+    margin-top: 10px;
+}
+
+.converter-benchmark-verify caption {
+    caption-side: top;
+    text-align: left;
+    padding: 0 0 6px;
+    color: var(--text-muted);
+    font-size: 11px;
+}

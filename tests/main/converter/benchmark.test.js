@@ -57,6 +57,33 @@ describe('converter real-pipeline benchmark', () => {
     expect((await fs.promises.readdir(root)).sort()).toEqual(['footage']);
   });
 
+  test('compares verification modes at the recommended setting, reusing the sweep for the selected mode', async () => {
+    let now = 0;
+    const verifyCost = { off: 0, quick: 400, full: 4000 }; // ms per clip
+    const runLevel = jest.fn(async ({ level, sourceRoot, verifyMode = 'quick' }) => {
+      const names = await fs.promises.readdir(path.join(sourceRoot, 'RecentClips'));
+      const perClip = 1000 + verifyCost[verifyMode];
+      now += Math.ceil(names.length / Math.min(level, 4)) * perClip;
+      return {
+        items: names.map((name) => ({ relativePath: `RecentClips/${name}`, state: 'completed' })),
+        timings: { files: names.length, totalMs: { verify: verifyCost[verifyMode] * names.length } }
+      };
+    });
+    const progress = [];
+    const result = await runConverterBenchmark({ ...base(), clips, runLevel, now: () => now, verifyMode: 'quick',
+      compareVerifyModes: ['off', 'quick', 'full'], onProgress: (entry) => progress.push(entry) });
+    expect(result.best.level).toBe(4);
+    const extra = runLevel.mock.calls.filter(([options]) => options.verifyMode);
+    expect(extra.map(([options]) => [options.level, options.verifyMode])).toEqual([[4, 'off'], [4, 'full']]);
+    expect(result.verifyComparison.map((entry) => [entry.verifyMode, entry.verifySecondsPerClip, entry.ok]))
+      .toEqual([['off', 0, true], ['quick', 0.4, true], ['full', 4, true]]);
+    const [off, quick, full] = result.verifyComparison.map((entry) => entry.filesPerMinute);
+    expect(off).toBeGreaterThan(quick);
+    expect(quick).toBeGreaterThan(full);
+    expect(progress.filter((entry) => entry.step === 'verify').map((entry) => entry.verifyMode)).toEqual(['off', 'full']);
+    expect((await fs.promises.readdir(root)).sort()).toEqual(['footage']);
+  });
+
   test('stops at a failing level and reports its failure codes', async () => {
     const m = machine({ capacity: 8, sessionLimit: 2 });
     const result = await runConverterBenchmark({ ...base(), clips, runLevel: m.runLevel, now: m.now });

@@ -59,22 +59,16 @@ async function runConverterBenchmark(options = {}) {
       samples.push({ name: clip.name, path: target, frames: await countFrames(target) });
     }
 
-    const levels = LEVELS.filter((level) => level <= CONCURRENCY.max && level <= samples.length);
-    const results = [];
-    let previous = 0;
-    for (const [index, level] of levels.entries()) {
-      checkAborted();
-      onProgress({ step: 'run', level, index: index + 1, total: levels.length, encoder: encoder?.codec, hardware: encoder?.hardware === true });
-      // Give every parallel slot real work: at least two clips, else one per slot.
-      const batch = samples.slice(0, Math.min(samples.length, Math.max(level, 2)));
-      const levelRoot = pathApi.join(workRoot, `level-${level}`);
+    // One real conversion run of `batch` at `level` parallel conversions.
+    async function measure(level, batch, runKey, variant = {}) {
+      const levelRoot = pathApi.join(workRoot, runKey);
       const sourceRoot = pathApi.join(levelRoot, 'source');
       const clipDir = pathApi.join(sourceRoot, 'RecentClips');
       await fs.mkdir(clipDir, { recursive: true });
       for (const sample of batch) await placeClip(fs, sample.path, pathApi.join(clipDir, sample.name));
 
       const started = now();
-      const job = await runLevel({ level, sourceRoot, workRoot: levelRoot, signal });
+      const job = await runLevel({ level, sourceRoot, workRoot: levelRoot, signal, ...variant });
       const seconds = Math.max(0.001, (now() - started) / 1000);
       checkAborted();
       const items = Array.isArray(job?.items) ? job.items : [];
@@ -90,7 +84,13 @@ async function runConverterBenchmark(options = {}) {
       const sourceTotal = completed.reduce((sum, item) => sum + (item.sourceBytes || 0), 0);
       const outputTotal = completed.reduce((sum, item) => sum + (item.outputBytes || 0), 0);
       const savedPercent = sourceTotal > 0 && outputTotal > 0 ? Math.round(1000 - (outputTotal / sourceTotal) * 1000) / 10 : null;
-      const result = {
+      // Average time each clip spent in post-conversion verification.
+      const timedFiles = job?.timings?.files;
+      const verifyMs = job?.timings?.totalMs?.verify;
+      const verifySecondsPerClip = Number.isSafeInteger(timedFiles) && timedFiles > 0 && Number.isFinite(verifyMs)
+        ? Math.round(verifyMs / timedFiles / 100) / 10 : null;
+      await fs.rm(levelRoot, { recursive: true, force: true }).catch(() => {});
+      return {
         level,
         clips: batch.length,
         completed: completed.length,
@@ -99,22 +99,50 @@ async function runConverterBenchmark(options = {}) {
         seconds: Math.round(seconds * 10) / 10,
         filesPerMinute,
         savedPercent,
+        verifySecondsPerClip,
         fps: Math.round((frames / seconds) * 10) / 10,
         ok: completed.length === batch.length
       };
+    }
+    // Give every parallel slot real work: at least two clips, else one per slot.
+    const batchFor = (level) => samples.slice(0, Math.min(samples.length, Math.max(level, 2)));
+
+    const levels = LEVELS.filter((level) => level <= CONCURRENCY.max && level <= samples.length);
+    const results = [];
+    let previous = 0;
+    for (const [index, level] of levels.entries()) {
+      checkAborted();
+      onProgress({ step: 'run', level, index: index + 1, total: levels.length, encoder: encoder?.codec, hardware: encoder?.hardware === true });
+      const result = await measure(level, batchFor(level), `level-${level}`);
       results.push(result);
-      await fs.rm(levelRoot, { recursive: true, force: true }).catch(() => {});
       // A failing level usually means the hardware refused another session;
       // a level that barely helps means the machine is saturated.
-      if (!result.ok || (previous > 0 && filesPerMinute < previous * MIN_GAIN)) break;
-      previous = filesPerMinute;
+      if (!result.ok || (previous > 0 && result.filesPerMinute < previous * MIN_GAIN)) break;
+      previous = result.filesPerMinute;
     }
     // Recommend the lightest setting within 5% of the fastest.
     const successful = results.filter((entry) => entry.ok);
     const top = Math.max(0, ...successful.map((entry) => entry.filesPerMinute));
     const best = successful.filter((entry) => entry.filesPerMinute >= top * 0.95)
       .sort((left, right) => left.level - right.level)[0] || null;
-    return { encoder, clips: samples.length, results, best };
+
+    // Verification modes side by side: re-run the recommended setting with
+    // each other mode (the sweep itself used `verifyMode`).
+    const verifyComparison = [];
+    const compareModes = Array.isArray(options.compareVerifyModes) ? options.compareVerifyModes : [];
+    if (best && compareModes.length) {
+      const mainMode = options.verifyMode || 'quick';
+      for (const [index, mode] of compareModes.entries()) {
+        checkAborted();
+        if (mode === mainMode) {
+          verifyComparison.push({ verifyMode: mode, ...best });
+          continue;
+        }
+        onProgress({ step: 'verify', verifyMode: mode, level: best.level, index: index + 1, total: compareModes.length });
+        verifyComparison.push({ verifyMode: mode, ...await measure(best.level, batchFor(best.level), `verify-${mode}`, { verifyMode: mode }) });
+      }
+    }
+    return { encoder, clips: samples.length, results, best, verifyComparison };
   } finally {
     await fs.rm(workRoot, { recursive: true, force: true }).catch(() => {});
   }

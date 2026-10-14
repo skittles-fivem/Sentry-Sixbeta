@@ -532,11 +532,16 @@
                             </div>
                             <dialog id="converterBenchmarkDialog" class="converter-benchmark-dialog" aria-labelledby="converterBenchmarkTitle">
                                 <h3 id="converterBenchmarkTitle" data-i18n="ui.converter.benchmarkTitle">Encoding benchmark</h3>
-                                <p class="converter-disclosure" data-i18n="ui.converter.benchmarkIntro">Runs real conversions — telemetry, full verification and saving — on copies of up to 8 clips from your source folder with H.265 and then AV1 (when this computer can encode it), at 1–8 parallel conversions with the compression selected above, so you can compare them side by side. Your footage is only read; results go to a temporary folder. Takes several minutes; close other heavy apps for accurate results.</p>
+                                <p class="converter-disclosure" data-i18n="ui.converter.benchmarkIntro">Runs real conversions — telemetry, verification and saving — on copies of up to 8 clips from your source folder with H.265 and then AV1 (when this computer can encode it), at 1–8 parallel conversions with the compression selected above, then repeats the fastest setting with each verification mode (Off, Quick, Full), so you can compare everything side by side. Your footage is only read; results go to a temporary folder. Takes several minutes; close other heavy apps for accurate results.</p>
                                 <p id="converterBenchmarkStatus" class="converter-benchmark-status" role="status" aria-live="polite"></p>
                                 <table id="converterBenchmarkTable" class="converter-benchmark-table" hidden>
                                     <thead id="converterBenchmarkHead"><tr><th data-i18n="ui.converter.benchmarkParallel">At once</th><th data-i18n="ui.converter.benchmarkFilesPerMinute">Files/min</th><th data-i18n="ui.converter.benchmarkFps">FPS</th></tr></thead>
                                     <tbody id="converterBenchmarkRows"></tbody>
+                                </table>
+                                <table id="converterBenchmarkVerifyTable" class="converter-benchmark-table converter-benchmark-verify" hidden>
+                                    <caption data-i18n="ui.converter.benchmarkVerifyCaption">Verification modes at each codec's fastest setting: files per minute (verification time per clip)</caption>
+                                    <thead id="converterBenchmarkVerifyHead"></thead>
+                                    <tbody id="converterBenchmarkVerifyRows"></tbody>
                                 </table>
                                 <p id="converterBenchmarkBest" class="converter-benchmark-best" hidden></p>
                                 <div class="converter-benchmark-actions">
@@ -633,6 +638,17 @@
                                     <option value="8">8</option>
                                 </select>
                                 <p id="converterConcurrencyHint" class="converter-disclosure" data-i18n="ui.converter.parallelConversionsHint">How many clips are converted at the same time. Hardware encoders may limit simultaneous sessions; software encoding uses more CPU and memory.</p>
+                            </fieldset>
+
+                            <fieldset class="converter-fieldset">
+                                <legend data-i18n="ui.converter.verification">Verification</legend>
+                                <select id="converterVerifyMode" class="converter-select" aria-describedby="converterVerifyHint" aria-label="Verification" data-i18n="ui.converter.verification" data-i18n-attr="aria-label">
+                                    <option value="off" data-i18n="ui.converter.verifyOff">Off — fastest, no checks of the converted video</option>
+                                    <option value="quick" selected data-i18n="ui.converter.verifyQuick">Quick — checks streams, length, frames and telemetry against the original (recommended)</option>
+                                    <option value="full" data-i18n="ui.converter.verifyFull">Full — also decodes every frame (slowest)</option>
+                                </select>
+                                <p id="converterVerifyHint" class="converter-disclosure" data-i18n="ui.converter.verifyHint">Full decoding is most of the verification time — run the benchmark to see the difference on this computer. Replacing originals always uses at least Quick.</p>
+                                <p id="converterVerifyReplaceNote" class="converter-disclosure converter-verify-note" hidden data-i18n="ui.converter.verifyReplaceNote">Off isn't available while replacing originals, so Quick is used.</p>
                             </fieldset>
 
                             <fieldset class="converter-fieldset converter-output-fieldset">

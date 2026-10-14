@@ -987,6 +987,53 @@ describe('verifyCandidate size and valid results', () => {
     expect(testHarness.snapshot.cleanup).toHaveBeenCalledTimes(1);
   });
 
+  describe('verification modes', () => {
+    test('quick runs every check except the full decode', async () => {
+      const testHarness = harness();
+      const result = await verifyCandidate({ ...testHarness.options, verifyMode: 'quick' });
+      expect(result.ok).toBe(true);
+      expect(result.details.verifyMode).toBe('quick');
+      expect(testHarness.runFullDecode).not.toHaveBeenCalled();
+      expect(testHarness.runFfprobe).toHaveBeenCalledTimes(1);
+      expect(testHarness.readFile).toHaveBeenCalledWith(SOURCE);
+    });
+
+    test('quick still rejects telemetry, frame-count and codec problems', async () => {
+      expectFailure(await verifyCandidate({ ...harness({ sourceEvents: [[RECORD_B], [], [RECORD_A]] }).options, verifyMode: 'quick' }), 'telemetry-mismatch');
+      expectFailure(await verifyCandidate({ ...harness({ candidateProbe: { frameCount: 2 } }).options, verifyMode: 'quick' }), 'frame-count-mismatch');
+      expectFailure(await verifyCandidate({ ...harness({ candidateProbe: { codecName: 'h264', tag: 'avc1' } }).options, verifyMode: 'quick' }), 'codec-mismatch');
+    });
+
+    test('full also decodes every frame (and is the default for older callers)', async () => {
+      const testHarness = harness();
+      expect((await verifyCandidate({ ...testHarness.options, verifyMode: 'full' })).ok).toBe(true);
+      expect(testHarness.runFullDecode).toHaveBeenCalledTimes(1);
+      const legacy = harness();
+      expect((await verifyCandidate(legacy.options)).details.verifyMode).toBe('full');
+      expect(legacy.runFullDecode).toHaveBeenCalledTimes(1);
+    });
+
+    test('off inspects nothing but still requires the exact file and real savings', async () => {
+      const testHarness = harness();
+      const result = await verifyCandidate({ ...testHarness.options, verifyMode: 'off' });
+      expect(result).toEqual(expect.objectContaining({ ok: true, publicationArtifact: expect.objectContaining({ path: SNAPSHOT }) }));
+      expect(testHarness.runFfprobe).not.toHaveBeenCalled();
+      expect(testHarness.runFullDecode).not.toHaveBeenCalled();
+      expect(testHarness.readFile).not.toHaveBeenCalledWith(SOURCE);
+
+      const tampered = harness({ onSnapshotCreate: async (_bytes, snapshotState) => { snapshotState.bytes = Buffer.from('changed'); } });
+      expectFailure(await verifyCandidate({ ...tampered.options, verifyMode: 'off' }), 'snapshot-failed');
+
+      const candidateBytes = buildCandidate('h265');
+      const bigger = harness({ candidateBytes, sourceBytes: candidateBytes.length - 10 });
+      expectFailure(await verifyCandidate({ ...bigger.options, verifyMode: 'off' }), 'not-smaller');
+    });
+
+    test('rejects an unknown mode', async () => {
+      expectFailure(await verifyCandidate({ ...harness().options, verifyMode: 'fast' }), 'invalid-input');
+    });
+  });
+
   test('constant quality needs only real savings, not a profile size target', async () => {
     const candidateBytes = buildCandidate('h265');
     const sourceBytes = candidateBytes.length + 2_000;

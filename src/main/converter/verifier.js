@@ -103,6 +103,9 @@ function validateOptions(options) {
       || !options.decodeAccel.every((arg) => typeof arg === 'string' && arg.length > 0 && arg.length < 256))) {
     throw new TypeError('decodeAccel must be a short argument list');
   }
+  if (options.verifyMode !== undefined && !['off', 'quick', 'full'].includes(options.verifyMode)) {
+    throw new TypeError('verifyMode must be off, quick or full');
+  }
   if (options.onDecodeAccelFallback !== undefined && typeof options.onDecodeAccelFallback !== 'function') {
     throw new TypeError('onDecodeAccelFallback must be a function');
   }
@@ -754,7 +757,26 @@ async function readSourceAuthority(options, readFile, sourceBytes, outputBytes) 
   return { sourceTimeline, sourceTiming };
 }
 
+// Verification off: the saved file must still be exactly the encoded file and
+// smaller than its original; nothing about the video itself is inspected.
+async function verifyIntegrityOnly({ options, profileId, sourceBytes, outputBytes, outputSha256, snapshot }) {
+  try {
+    await readExactSnapshot(snapshot, outputBytes, outputSha256);
+  } catch (_error) {
+    return failure(VERIFICATION_REASONS.SNAPSHOT_FAILED, sourceBytes, outputBytes, { kind: 'integrity-failed' });
+  }
+  if (outputBytes >= sourceBytes) {
+    return failure(VERIFICATION_REASONS.NOT_SMALLER, sourceBytes, outputBytes, { savedBytes: sourceBytes - outputBytes });
+  }
+  return {
+    ok: true, reason: null, retryable: false, sourceBytes, outputBytes,
+    details: { codec: EXPECTED_VIDEO[options.codec].codec, tag: EXPECTED_VIDEO[options.codec].tag, profileId, verifyMode: 'off' }
+  };
+}
+
 async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputBytes, outputSha256, snapshot, readFile }) {
+  const verifyMode = options.verifyMode || 'full';
+  if (verifyMode === 'off') return verifyIntegrityOnly({ options, profileId, sourceBytes, outputBytes, outputSha256, snapshot });
   const source = await readSourceAuthority(options, readFile, sourceBytes, outputBytes);
   if (source.error) return source.error;
 
@@ -769,8 +791,9 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
     });
   }
 
-  const decoded = await runCompleteDecode(options, snapshot.path);
-  if (decoded.error) return failure(VERIFICATION_REASONS.DECODE_FAILED, sourceBytes, outputBytes, decoded.error);
+  // Full only: decode every frame (the slow part, ~90% of verification time).
+  const decoded = verifyMode === 'full' ? await runCompleteDecode(options, snapshot.path) : null;
+  if (decoded?.error) return failure(VERIFICATION_REASONS.DECODE_FAILED, sourceBytes, outputBytes, decoded.error);
 
   let candidateSnapshotBytes;
   try {
@@ -793,7 +816,7 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
       containerSamples: outputTiming.samples.length
     });
   }
-  if (decoded.frames !== outputTiming.samples.length) {
+  if (decoded && decoded.frames !== outputTiming.samples.length) {
     return failure(VERIFICATION_REASONS.FRAME_COUNT_MISMATCH, sourceBytes, outputBytes, {
       kind: 'decode-container',
       decodedFrames: decoded.frames,
@@ -914,6 +937,7 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
       codec: expectedVideo.codec,
       tag: expectedVideo.tag,
       profileId,
+      verifyMode,
       targetBytes,
       sourceDurationUs: source.sourceTiming.durationUs,
       outputDurationUs: outputTiming.durationUs,

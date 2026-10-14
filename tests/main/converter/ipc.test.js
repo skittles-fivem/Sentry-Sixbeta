@@ -304,6 +304,23 @@ describe('converter IPC', () => {
     });
   });
 
+  test('accepts a verification mode and rejects unknown ones', async () => {
+    const h = setup();
+    await expect(h.invoke('converter:start', { ...CONFIG, verifyMode: 'off' })).resolves.toMatchObject({ ok: true });
+    expect(h.service.start).toHaveBeenLastCalledWith(expect.objectContaining({ verifyMode: 'off' }));
+    await expect(h.invoke('converter:start', { ...CONFIG, verifyMode: 'fast' })).resolves.toEqual({
+      ok: false, error: { code: 'INVALID_VERIFY_MODE', retryable: false }
+    });
+  });
+
+  test('replacing originals never runs with verification off', async () => {
+    const h = setup({ capabilities: { separatePublication: 'hardlink-cleanup-pending', ownershipCleanup: 'atomic-expected-ownership',
+      replacement: 'available', destinationContainment: 'pathname-revalidated-non-atomic' } });
+    await expect(h.invoke('converter:start', { ...CONFIG, destinationRoot: null, outputMode: 'replace', replacementConfirmed: true, verifyMode: 'off' }))
+      .resolves.toMatchObject({ ok: true });
+    expect(h.service.start).toHaveBeenLastCalledWith(expect.objectContaining({ outputMode: 'replace', verifyMode: 'quick' }));
+  });
+
   test('accepts constant quality and forwards qualityLevel', async () => {
     const h = setup();
     await expect(h.invoke('converter:start', { ...CONFIG, profileId: 'quality', qualityLevel: 'balanced' }))

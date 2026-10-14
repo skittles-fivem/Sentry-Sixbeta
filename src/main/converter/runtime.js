@@ -707,7 +707,7 @@ async function createConverterRuntime(options = {}) {
   }
 
   function benchmarkLevelRunner(config) {
-    return async ({ level, sourceRoot, workRoot, signal }) => {
+    return async ({ level, sourceRoot, workRoot, signal, verifyMode }) => {
       const stagingRoot = pathApi.join(workRoot, 'staging');
       await pfs.mkdir(stagingRoot, { recursive: true });
       await pfs.mkdir(pathApi.join(workRoot, 'output'), { recursive: true });
@@ -723,6 +723,7 @@ async function createConverterRuntime(options = {}) {
         profileId: config.profileId,
         ...(config.profileId === 'custom' ? { bitrateKbps: config.bitrateKbps } : {}),
         ...(config.profileId === 'quality' ? { qualityLevel: config.qualityLevel } : {}),
+        verifyMode: verifyMode || config.verifyMode || 'quick',
         networkMode: 'direct',
         outputMode: 'separate',
         includedGroups: ['RecentClips', 'SavedClips', 'SentryClips'],
@@ -748,7 +749,7 @@ async function createConverterRuntime(options = {}) {
     // Runs the benchmark for each requested codec in turn (H.265 then AV1 by
     // default) so the results can be compared side by side. A codec this
     // computer cannot encode is reported as unsupported instead of failing.
-    async runBenchmark({ codec, codecs, profileId = 'balanced', bitrateKbps, qualityLevel, sourceRoot = null, onProgress } = {}) {
+    async runBenchmark({ codec, codecs, profileId = 'balanced', bitrateKbps, qualityLevel, verifyMode = 'quick', sourceRoot = null, onProgress } = {}) {
       const requested = Array.isArray(codecs) && codecs.length > 0 ? codecs : [codec || 'h265'];
       if (shutdownPromise) throw runtimeError('SERVICE_SHUTDOWN');
       if (benchmarkController) throw runtimeError('BENCHMARK_ACTIVE');
@@ -769,8 +770,9 @@ async function createConverterRuntime(options = {}) {
           try {
             const result = await runConverterBenchmark({
               clips, countFrames, encoder, tempRoot, signal: controller.signal, pathApi, fs: pfs,
+              verifyMode, compareVerifyModes: ['off', 'quick', 'full'],
               onProgress: (progress) => onProgress?.({ ...progress, codec: current, codecIndex: index + 1, codecTotal: requested.length }),
-              runLevel: benchmarkLevelRunner({ codec: current, profileId, bitrateKbps, qualityLevel })
+              runLevel: benchmarkLevelRunner({ codec: current, profileId, bitrateKbps, qualityLevel, verifyMode })
             });
             runs.push({ codec: current, ...result });
           } catch (error) {

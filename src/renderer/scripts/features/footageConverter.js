@@ -11,6 +11,8 @@ const MIN_CONCURRENCY = 1;
 const MAX_CONCURRENCY = 8;
 const DEFAULT_CONCURRENCY = 5;
 const CONCURRENCY_STORAGE_KEY = 'converterConcurrency';
+const VERIFY_STORAGE_KEY = 'converterVerifyMode';
+const VERIFY_MODES = ['off', 'quick', 'full'];
 
 function normalizeConcurrency(value) {
     const number = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
@@ -162,6 +164,11 @@ function collectElements(root) {
         customBitrateRow: byId('converterCustomBitrateRow'),
         qualityLevel: byId('converterQualityLevel'),
         qualityRow: byId('converterQualityRow'),
+        verifyMode: byId('converterVerifyMode'),
+        verifyReplaceNote: byId('converterVerifyReplaceNote'),
+        benchmarkVerifyTable: byId('converterBenchmarkVerifyTable'),
+        benchmarkVerifyHead: byId('converterBenchmarkVerifyHead'),
+        benchmarkVerifyRows: byId('converterBenchmarkVerifyRows'),
         autoEnabled: byId('converterAutoEnabled'),
         autoInterval: byId('converterAutoInterval'),
         autoWindowEnabled: byId('converterAutoWindowEnabled'),
@@ -366,6 +373,32 @@ function createFootageConverterController(options = {}) {
         setHidden(elements.qualityRow, selectedProfile() !== 'quality');
     }
 
+    function storedVerifyMode() {
+        try {
+            const value = storage?.getItem?.(VERIFY_STORAGE_KEY);
+            return VERIFY_MODES.includes(value) ? value : null;
+        } catch (_) { return null; }
+    }
+
+    function replacingSelected() {
+        return selected(elements.outputOptions, 'converterOutput', 'separate') === 'replace';
+    }
+
+    // Quick is the default. Replacing originals never runs without checks.
+    function selectedVerifyMode() {
+        const value = VERIFY_MODES.includes(elements.verifyMode?.value) ? elements.verifyMode.value : 'quick';
+        return value === 'off' && replacingSelected() ? 'quick' : value;
+    }
+
+    function updateVerifyOptions() {
+        const replacing = replacingSelected();
+        const offOption = [...(elements.verifyMode?.options || [])].find((option) => option.value === 'off');
+        if (offOption) offOption.disabled = replacing;
+        const forced = replacing && elements.verifyMode?.value === 'off';
+        if (forced) elements.verifyMode.value = 'quick';
+        setHidden(elements.verifyReplaceNote, !replacing);
+    }
+
     function selectedConcurrency() {
         return normalizeConcurrency(elements.concurrency?.value) ?? storedConcurrency() ?? DEFAULT_CONCURRENCY;
     }
@@ -398,6 +431,8 @@ function createFootageConverterController(options = {}) {
         if (elements.qualityLevel && ['high', 'balanced', 'small'].includes(config.qualityLevel)) {
             elements.qualityLevel.value = config.qualityLevel;
         }
+        // Jobs saved before the setting existed ran full verification.
+        if (elements.verifyMode) elements.verifyMode.value = VERIFY_MODES.includes(config.verifyMode) ? config.verifyMode : 'full';
         updateCustomBitrateVisibility();
         setChecked(elements.outputOptions, 'converterOutput', config.outputMode);
         const included = new Set(config.includedGroups || []);
@@ -452,6 +487,7 @@ function createFootageConverterController(options = {}) {
         setHidden(elements.replacementConfirmationRow, !replacing);
         setDisabled(elements.destinationPath, replacing);
         setDisabled(elements.destinationButton, replacing);
+        updateVerifyOptions();
         const sourceRoot = elements.sourcePath?.value?.trim() || message('sourcePlaceholder', 'the selected source folder');
         setText(elements.replacementWarning, message(
             'replacementWarning',
@@ -598,6 +634,42 @@ function createFootageConverterController(options = {}) {
     const formatRate = (value) => String(value >= 100 ? Math.round(value) : value);
 
     const CODEC_LABELS = { h265: 'H.265', av1: 'AV1' };
+    const verifyLabel = (mode) => ({
+        off: message('verifyLabelOff', 'Off'), quick: message('verifyLabelQuick', 'Quick'), full: message('verifyLabelFull', 'Full')
+    })[mode] || mode;
+
+    // Off / Quick / Full at each codec's recommended setting.
+    function renderVerifyComparison(runs, doc, cell) {
+        const compared = runs.filter((run) => Array.isArray(run.verifyComparison) && run.verifyComparison.length);
+        if (elements.benchmarkVerifyHead) {
+            const head = doc.createElement('tr');
+            head.append(cell('th', message('verification', 'Verification')),
+                ...VERIFY_MODES.map((mode) => cell('th', verifyLabel(mode))));
+            elements.benchmarkVerifyHead.replaceChildren(head);
+        }
+        const rows = compared.map((run) => {
+            const row = doc.createElement('tr');
+            row.append(cell('td', message('benchmarkVerifyTitle', '{codec} · {count} at once',
+                { codec: CODEC_LABELS[run.codec] || run.codec, count: run.best?.level ?? '—' })));
+            for (const mode of VERIFY_MODES) {
+                const entry = run.verifyComparison.find((candidate) => candidate.verifyMode === mode);
+                if (!entry) row.append(cell('td', '—'));
+                else if (!entry.ok) {
+                    const failed = cell('td', message('benchmarkFailedRun', 'failed'));
+                    if (entry.failures?.length) failed.title = entry.failures.join(', ');
+                    row.append(failed);
+                } else {
+                    row.append(cell('td', message('benchmarkVerifyCell', '{rate} ({seconds} s)', {
+                        rate: formatRate(entry.filesPerMinute),
+                        seconds: Number.isFinite(entry.verifySecondsPerClip) ? entry.verifySecondsPerClip.toFixed(1) : '—'
+                    })));
+                }
+            }
+            return row;
+        });
+        elements.benchmarkVerifyRows?.replaceChildren(...rows);
+        setHidden(elements.benchmarkVerifyTable, rows.length === 0);
+    }
     let benchmarkPicks = [];
 
     // One entry per codec tested; older single-codec results become one run.
@@ -651,6 +723,7 @@ function createFootageConverterController(options = {}) {
         });
         elements.benchmarkRows?.replaceChildren(...rows);
         setHidden(elements.benchmarkTable, rows.length === 0);
+        renderVerifyComparison(runs, doc, cell);
 
         const lines = [];
         benchmarkPicks = [];
@@ -692,6 +765,7 @@ function createFootageConverterController(options = {}) {
         setDisabled(elements.benchmarkRun, true);
         setHidden(elements.benchmarkApply, true);
         setHidden(elements.benchmarkApplyAlt, true);
+        setHidden(elements.benchmarkVerifyTable, true);
         setHidden(elements.benchmarkBest, true);
         setText(elements.benchmarkStatus, message('benchmarkScanning', 'Finding sample clips in your source folder…'));
         try {
@@ -700,6 +774,7 @@ function createFootageConverterController(options = {}) {
             if (profileId === 'custom' && bitrateKbps === null) throw apiError('BITRATE_INVALID');
             const request = {
                 codecs: ['h265', 'av1'],
+                verifyMode: selectedVerifyMode(),
                 profileId,
                 ...profileSettings(profileId),
                 sourceRoot: elements.sourcePath?.value?.trim() || null
@@ -708,6 +783,11 @@ function createFootageConverterController(options = {}) {
                 if (progress?.step === 'copy') {
                     setText(elements.benchmarkStatus, message('benchmarkCopying', 'Copying sample clip {index} of {total}…',
                         { index: progress.index, total: progress.total }));
+                } else if (progress?.step === 'verify') {
+                    setText(elements.benchmarkStatus, message('benchmarkVerifyProgress',
+                        '{codec}: timing verification {mode} at {count} at once… ({index} of {total})',
+                        { codec: CODEC_LABELS[progress.codec] || progress.codec || '', mode: verifyLabel(progress.verifyMode),
+                            count: progress.level, index: progress.index, total: progress.total }));
                 } else if (progress?.step === 'run' && progress.codec) {
                     setText(elements.benchmarkStatus, message('benchmarkCodecProgress',
                         '{codec} ({codecIndex} of {codecTotal}): converting with {count} at once… ({index} of {total})',
@@ -930,7 +1010,8 @@ function createFootageConverterController(options = {}) {
             includedGroups,
             groupOrder: [...groupOrder],
             replacementConfirmed: outputMode === 'replace',
-            concurrency: selectedConcurrency()
+            concurrency: selectedConcurrency(),
+            verifyMode: selectedVerifyMode()
         };
     }
 
@@ -998,6 +1079,12 @@ function createFootageConverterController(options = {}) {
             item.down?.addEventListener('click', () => moveGroup(item.group, 'down'));
         }
         setConcurrency(storedConcurrency() ?? DEFAULT_CONCURRENCY);
+        if (elements.verifyMode) elements.verifyMode.value = storedVerifyMode() ?? 'quick';
+        elements.verifyMode?.addEventListener?.('change', () => {
+            updateVerifyOptions();
+            try { storage?.setItem?.(VERIFY_STORAGE_KEY, selectedVerifyMode()); } catch (_) { /* preference only */ }
+        });
+        updateVerifyOptions();
         elements.profileSelect?.addEventListener?.('change', updateCustomBitrateVisibility);
         updateCustomBitrateVisibility();
         elements.concurrency?.addEventListener?.('change', () => {
