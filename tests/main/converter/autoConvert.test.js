@@ -127,6 +127,18 @@ describe('automatic conversion', () => {
     h.cleanup();
   });
 
+  test('a manual job that started during a check is not reported as a failure', async () => {
+    const h = harness({ files: [clip('a.mp4')] });
+    await h.auto.start();
+    await h.auto.configure(enabled());
+    h.service.start.mockImplementationOnce(async () => { throw Object.assign(new Error('busy'), { code: 'JOB_ACTIVE' }); });
+    await h.auto.tick();
+    expect(h.auto.getState().status).toMatchObject({ error: null, nextCheckAt: null, activeJobId: null });
+    await h.auto.tick();
+    expect(h.service.start).toHaveBeenCalledTimes(2);
+    h.cleanup();
+  });
+
   test('only checks inside the time window, and pauses / resumes its job at the window edges', async () => {
     const h = harness({ files: [clip('a.mp4')], hour: 12 });
     await h.auto.start();

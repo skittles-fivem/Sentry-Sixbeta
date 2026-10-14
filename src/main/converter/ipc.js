@@ -515,7 +515,9 @@ function registerConverterIpc(options = {}) {
         window = { startHour, endHour };
       }
       // The saved job settings pass the same validation as a manual start.
-      const config = payload.config === undefined || payload.config === null
+      // Turning it off never validates them, so an unplugged drive or offline
+      // share can always be switched off.
+      const config = !payload.enabled || payload.config === undefined || payload.config === null
         ? null : await validateStartConfig(payload.config, dependencies, capabilities);
       if (payload.enabled && !config) fail('AUTO_CONFIG_REQUIRED');
       return boundedJsonValue(await options.auto.configure({

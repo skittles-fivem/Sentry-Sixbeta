@@ -42,6 +42,8 @@ class ConverterJobServiceError extends Error {
   }
 }
 
+const MAX_RECORDED_ATTEMPTS = 3; // jobStore rejects more
+
 function serviceError(code) {
   return new ConverterJobServiceError(code);
 }
@@ -998,9 +1000,14 @@ function createConverterJobService(deps) {
     let latestOwnership = staged.ownership;
     let encodeTiers = encodeDecodeTiers(selected);
     const failedTiers = [];
+    let decodeTierRetry = false;
 
     while (!runtime.cancelRequested && !runtime.stopRequested) {
-      attempts += 1;
+      // Retrying the same encoder with a slower decode tier is not a new
+      // attempt; the job file allows at most 3 recorded attempts per clip.
+      if (!decodeTierRetry) attempts += 1;
+      decodeTierRetry = false;
+      attempts = Math.min(attempts, MAX_RECORDED_ATTEMPTS);
       await itemPatch(runtime, item.id, { attempts, encoder: selected.codec }, {
         state: 'encoding', activeItemId: item.id
       });
@@ -1040,6 +1047,7 @@ function createConverterJobService(deps) {
         if (usedTier) {
           failedTiers.push(usedTier.key);
           encodeTiers = encodeTiers.slice(1);
+          decodeTierRetry = true;
           continue;
         }
         if (selected.hardware === true && !usedCpuFallback) {

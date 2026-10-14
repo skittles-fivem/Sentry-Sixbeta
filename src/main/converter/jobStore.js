@@ -868,21 +868,31 @@ function createJobStore(options) {
     }
   }
 
+  // Returns true when no journal remains. Windows scanners can briefly lock
+  // the file, so retry like the manifest rename does. A journal that cannot
+  // be removed is harmless: job.json is already newer than every record in
+  // it, so loading skips them; the next full write tries again.
   async function removeJournal(paths) {
-    try {
-      await fileSystem.unlink(paths.journal);
-    } catch (error) {
-      if (error && error.code === 'ENOENT') return;
-      throw storeError('MANIFEST_WRITE_FAILED');
+    const retryable = new Set(['EACCES', 'EBUSY', 'EPERM']);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        await fileSystem.unlink(paths.journal);
+        await syncDirectory(paths.directory).catch(() => undefined);
+        return true;
+      } catch (error) {
+        if (error && error.code === 'ENOENT') return true;
+        if (!retryable.has(error?.code) || attempt === 3) return false;
+        await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+      }
     }
-    await syncDirectory(paths.directory).catch(() => { throw storeError('MANIFEST_WRITE_FAILED'); });
+    return false;
   }
 
   // A full manifest write supersedes every journal record (they all carry a
   // revision no newer than it), so the journal is removed right after.
   async function writeFull(paths, manifest) {
     await atomicWrite(paths, manifest);
-    await removeJournal(paths);
+    return removeJournal(paths);
   }
 
   async function appendJournal(paths, line, existingBytes) {
@@ -1215,11 +1225,15 @@ function createJobStore(options) {
       if (line && journal.bytes + lineBytes <= JOURNAL_LIMIT.bytes) {
         await appendJournal(paths, line, journal.bytes);
         written = { records: journal.records + 1, bytes: journal.bytes + lineBytes };
-      } else {
-        await writeFull(paths, next);
+      } else if (await writeFull(paths, next)) {
         written = { records: 0, bytes: 0 };
+      } else {
+        // Stale journal still present: keep writing full saves until the next
+        // one can remove it (appends would land after the stale records).
+        written = null;
       }
-      await rememberWritten(id, paths, next, written);
+      if (written) await rememberWritten(id, paths, next, written);
+      else lastWritten.delete(id);
       // Returned frozen (it is the store's own cached copy); callers build new
       // objects for changes, and reusing its items keeps the next save cheap.
       return next;

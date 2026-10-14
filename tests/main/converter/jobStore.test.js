@@ -1793,6 +1793,38 @@ describe('per-clip progress journal', () => {
     expect((await readBase('journal-compact')).items).toHaveLength(3);
   });
 
+  test('a journal locked by a scanner never fails a save and is cleaned up later', async () => {
+    let locked = true;
+    const lockingFs = new Proxy(fs.promises, {
+      get(target, property) {
+        if (property === 'unlink') {
+          return async (file) => {
+            if (locked && String(file).endsWith('job.journal') && fs.existsSync(file)) throw Object.assign(new Error('locked'), { code: 'EPERM' });
+            return target.unlink(file);
+          };
+        }
+        const value = target[property];
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    });
+    const store = createJobStore({ rootDir, fs: lockingFs });
+    let current = await started(store, 'journal-locked', 2);
+    for (let step = 0; step < 205; step += 1) {
+      current = await store.transition('journal-locked', { items: setItem(current, step % 2, { attempts: step % 3 }) });
+    }
+    // The compaction could not delete the journal; saves kept working.
+    await fs.promises.access(journalPath('journal-locked'));
+    expect((await createJobStore({ rootDir, fs: fs.promises }).load('journal-locked')).revision).toBe(current.revision);
+    current = await store.transition('journal-locked', { items: setItem(current, 0, { state: 'processing' }) });
+    expect((await createJobStore({ rootDir, fs: fs.promises }).load('journal-locked')).items[0].state).toBe('processing');
+    locked = false;
+    current = await store.transition('journal-locked', { items: setItem(current, 1, { state: 'processing' }) });
+    await expect(fs.promises.access(journalPath('journal-locked'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const reloaded = await createJobStore({ rootDir, fs: fs.promises }).load('journal-locked');
+    expect(reloaded.revision).toBe(current.revision);
+    expect(reloaded.items.map((item) => item.state)).toEqual(['processing', 'processing']);
+  });
+
   test('save and recovery writes supersede the journal', async () => {
     const store = createJobStore({ rootDir, fs: fs.promises });
     let current = await started(store, 'journal-save');

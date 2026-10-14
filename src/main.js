@@ -293,6 +293,7 @@ function createWindow() {
     if (launchedInBackground && keepRunningInBackground) return;
     mainWindow.show();
   });
+  mainWindow.on('session-end', () => { appQuitting = true; });
   mainWindow.on('close', (event) => {
     if (keepRunningInBackground && !appQuitting) {
       event.preventDefault();
@@ -2104,7 +2105,21 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
   }
 }
 
+// One copy of the app at a time: a second launch (e.g. from the Start menu
+// while it runs in the tray) just brings the existing window forward, so two
+// converters never work on the same job files.
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
+else app.on('second-instance', () => showMainWindow());
+
+// Updates and Windows shutdown/sign-out must be able to close a window that
+// is otherwise hidden to the tray.
+try {
+  require('electron').autoUpdater?.on?.('before-quit-for-update', () => { appQuitting = true; });
+} catch (_) { /* no built-in updater on this platform */ }
+
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return;
   // Check for new packages after update (dev mode only)
   // This runs before window creation to ensure packages are installed
   const packageResult = await checkAndInstallPackages();
@@ -2154,6 +2169,7 @@ app.whenReady().then(async () => {
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    else if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) showMainWindow(); // hidden to the tray
   });
 });
 

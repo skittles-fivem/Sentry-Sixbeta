@@ -612,6 +612,25 @@ describe('converter job orchestration', () => {
       expect(tier(h.spawnProcess.mock.calls[3][1])).toBe('cpu');
     });
 
+    test('the full fallback chain stays within the job file attempt limit (real store)', async () => {
+      const fsMod = require('fs');
+      const osMod = require('os');
+      const { createJobStore } = require('../../../src/main/converter/jobStore');
+      const root = fsMod.mkdtempSync(path.join(osMod.tmpdir(), 'attempts-'));
+      try {
+        const h = harness({ store: createJobStore({ rootDir: root, fs: fsMod.promises }), deps: { decodeAccel: zeroCopyAccel },
+          spawnActions: [{ status: 1 }, { status: 1 }, { status: 1 }, { status: 0 }] });
+        const id = await h.service.start(CONFIG);
+        await h.service.whenIdle(id);
+        const job = await h.service.get(id);
+        expect(h.spawnProcess.mock.calls.map(([, args]) => tier(args))).toEqual(['zero-copy', 'gpu', 'cpu', 'cpu']);
+        expect(job.items[0]).toMatchObject({ state: 'completed', encoder: 'libx265' });
+        expect(job.items[0].attempts).toBeLessThanOrEqual(3);
+      } finally {
+        fsMod.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     test('a GPU encoder failure does not disable GPU decoding for later clips', async () => {
       const h = harness({ deps: { decodeAccel: zeroCopyAccel },
         spawnActions: [{ status: 1 }, { status: 1 }, { status: 1 }, { status: 0 }, { status: 0 }] });

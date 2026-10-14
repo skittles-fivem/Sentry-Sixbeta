@@ -253,12 +253,22 @@ function createAutoConverter(options = {}) {
         status.lastJobId = jobId;
       }
     } catch (error) {
+      if (error?.code === 'JOB_ACTIVE') {
+        // Another conversion started while this check ran: not a failure;
+        // check again as soon as it is finished.
+        status.checking = false;
+        status.nextCheckAt = null;
+        changed();
+        return;
+      }
       status.error = typeof error?.code === 'string' ? error.code : 'AUTO_CHECK_FAILED';
       status.lastCheckAt = now();
     } finally {
-      status.checking = false;
-      status.nextCheckAt = status.lastCheckAt + settings.intervalMinutes * 60_000;
-      changed();
+      if (status.checking) {
+        status.checking = false;
+        status.nextCheckAt = status.lastCheckAt + settings.intervalMinutes * 60_000;
+        changed();
+      }
     }
   }
 

@@ -586,6 +586,25 @@ async function createConverterRuntime(options = {}) {
   };
   const service = factories.createConverterJobService({ ...serviceDeps, store, stagingManager });
 
+  // Each verified clip leaves its (now empty) private snapshot folder behind
+  // once the snapshot is published. Remove empty ones while nothing is
+  // converting; rmdir never removes a folder that still holds a file.
+  let snapshotSweep = null;
+  function sweepEmptySnapshotFolders() {
+    if (snapshotSweep) return snapshotSweep;
+    snapshotSweep = (async () => {
+      try {
+        if (await hasActiveJob() || benchmarkController) return;
+        const names = await pfs.readdir(options.tempPath);
+        for (const name of names) {
+          if (!name.startsWith(SNAPSHOT_DIRECTORY_PREFIX)) continue;
+          await pfs.rmdir(pathApi.join(options.tempPath, name)).catch(() => {});
+        }
+      } catch (_) { /* best effort */ }
+    })().finally(() => { snapshotSweep = null; });
+    return snapshotSweep;
+  }
+
   async function hasActiveJob() {
     return (await service.list()).some((job) => !['completed', 'failed', 'cancelled'].includes(job.state)
       && !(job.state === 'paused' && job.recovery?.action === 'manual-intervention'));
@@ -612,6 +631,9 @@ async function createConverterRuntime(options = {}) {
   let timingLogChain = Promise.resolve();
   const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
   if (typeof service.subscribe === 'function') service.subscribe((event) => {
+    if (event?.type === 'snapshot' && ['completed', 'failed', 'cancelled'].includes(event.snapshot?.state)) {
+      setTimeout(() => { void sweepEmptySnapshotFolders(); }, 1000)?.unref?.();
+    }
     if (event?.type !== 'item_timing' || typeof event.jobId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(event.jobId)) return;
     // Let the app pre-make a preview filmstrip for the newly saved clip.
     if (typeof options.onClipConverted === 'function' && typeof event.outputPath === 'string') {
@@ -782,6 +804,7 @@ async function createConverterRuntime(options = {}) {
           // Load automatic-conversion settings and its file index before any
           // recovered automatic job resumes discovering files.
           if (options.autoConvert !== false) await auto.start().catch(() => undefined);
+          void sweepEmptySnapshotFolders();
           // No queue or reconnect starts until every manifest safely reconciles.
           // Serial execution preserves the singleton worker across saved jobs.
           recoveryPromise = (async () => {

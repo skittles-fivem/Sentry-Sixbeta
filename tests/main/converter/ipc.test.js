@@ -290,6 +290,14 @@ describe('converter IPC', () => {
       await expect(h.invoke('converter:setAuto', payload)).resolves.toMatchObject({ ok: false, error: { code } });
     });
 
+    test('turning it off never validates the saved folders (drive may be unplugged)', async () => {
+      const a = auto();
+      const h = setup({ auto: a });
+      await expect(h.invoke('converter:setAuto', { ...valid, enabled: false, config: { ...CONFIG, sourceRoot: 'Z:\\Gone' } }))
+        .resolves.toMatchObject({ ok: true });
+      expect(a.configure).toHaveBeenCalledWith(expect.objectContaining({ enabled: false, config: null }));
+    });
+
     test('turning it off needs no job settings', async () => {
       const h = setup({ auto: auto() });
       await expect(h.invoke('converter:setAuto', { ...valid, enabled: false, config: null })).resolves.toMatchObject({ ok: true });

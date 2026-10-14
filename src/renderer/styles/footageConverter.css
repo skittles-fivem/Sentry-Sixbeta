@@ -1173,3 +1173,10 @@ body.converter-mode #driveList {
 .converter-confirm-row[hidden] {
     display: none;
 }
+
+/* Anything the converter hides stays hidden, whatever display its own class
+   sets (several rows above use grid/flex/block, which override [hidden]). */
+.converter-workspace [hidden],
+.converter-config [hidden] {
+    display: none !important;
+}
