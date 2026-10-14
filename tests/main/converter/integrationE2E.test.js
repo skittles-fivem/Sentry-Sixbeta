@@ -225,6 +225,19 @@ describeReal('real converter end-to-end', () => {
     expect(left).toEqual([]);
   });
 
+  // macOS reaches its temp folder through a link (/var -> /private/var).
+  (process.platform === 'win32' ? test.skip : test)('a temp folder reached through a link still converts', async () => {
+    const root = await newRoot('link');
+    const realTemp = path.join(root, 'real-temp');
+    const linkedTemp = path.join(root, 'linked-temp');
+    await fs.promises.mkdir(realTemp);
+    await fs.promises.symlink(realTemp, linkedTemp, 'dir');
+    await makeClip(tools, path.join(root, 'TeslaCam', 'RecentClips', clipName(0)), { seconds: 2 });
+    const runtime = await start(root, { tempPath: linkedTemp, autoConvert: false });
+    const job = await runtime.service.whenIdle(await runtime.service.start(baseConfig(root)));
+    expect(job.items).toEqual([expect.objectContaining({ state: 'completed', resultCode: 'converted' })]);
+  });
+
   test('a long job keeps the window updated to the end (fractional file times, many clips)', async () => {
     const root = await newRoot('ipc');
     const folder = path.join(root, 'TeslaCam', 'RecentClips');

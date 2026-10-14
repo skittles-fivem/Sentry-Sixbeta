@@ -36,9 +36,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-24.04, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
+
+      - name: Use a plain temp folder
+        # Many unit tests build expected paths from the temp folder they
+        # create; give them one without links (macOS /var) or short 8.3 names
+        # (Windows runners). The app itself resolves such folders - the jobs
+        # below keep the runner's default temp folder to prove it.
+        run: |
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v5
         with:
@@ -68,7 +78,7 @@ jobs:
     # Upstream telemetry-format tests with known failures of their own; run
     # and reported, but they do not block a build.
     name: Studio telemetry tests (informational)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     continue-on-error: true
     steps:
@@ -89,9 +99,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-latest]
     steps:
       - uses: actions/checkout@v5
+
+      - name: Use a plain temp folder
+        # These tests start jobs directly with folders under the temp folder;
+        # in the app those folders always come from the folder picker, which
+        # gives their real names. (App launch below keeps the default.)
+        run: |
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v5
         with:
@@ -109,8 +128,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg > /dev/null
-          cp "$(command -v ffmpeg)" ffmpeg_bin/ffmpeg
-          cp "$(command -v ffprobe)" ffmpeg_bin/ffprobe
+          install -m 0755 "$(command -v ffmpeg)" ffmpeg_bin/ffmpeg
+          install -m 0755 "$(command -v ffprobe)" ffmpeg_bin/ffprobe
 
       - name: FFmpeg in use
         run: |
@@ -130,7 +149,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-latest]
     steps:
       - uses: actions/checkout@v5
 
@@ -147,8 +166,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg > /dev/null
-          cp "$(command -v ffmpeg)" ffmpeg_bin/ffmpeg
-          cp "$(command -v ffprobe)" ffmpeg_bin/ffprobe
+          install -m 0755 "$(command -v ffmpeg)" ffmpeg_bin/ffmpeg
+          install -m 0755 "$(command -v ffprobe)" ffmpeg_bin/ffprobe
 
       - name: Start the app, convert through it, and quit
         run: |
