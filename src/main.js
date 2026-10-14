@@ -59,6 +59,7 @@ const { createConverterLifecycle, createConverterRuntime, startConverterWithReco
 const { calculateMinimapSize, downloadStaticMapBackground, preRenderMinimap } = require('./main/minimap');
 const { createSentryUsbCache } = require('./main/sentryUsbCache');
 const { createClipThumbnails } = require('./main/clipThumbnails');
+const { createSmokeTest } = require('./main/smokeTest');
 const MapProviders = require('./shared/mapProviders');
 const crypto = require('crypto');
 
@@ -152,6 +153,8 @@ let autoConvertApi = null;
 // The converter starts before the first window is created. Until startup has
 // made that window, nothing else may create one (it would be a duplicate).
 let mainWindowEverCreated = false;
+// Automated launch check (GitHub tests only; inactive otherwise).
+const smokeTest = createSmokeTest({ app });
 // Asked for during start-up (a second launch, a tray click): shown when made.
 let showWhenCreated = false;
 function showMainWindow() {
@@ -301,6 +304,7 @@ function createWindow() {
       webSecurity: false, // Required for file:// video playback from local TeslaCam folders
     },
   });
+  smokeTest?.attachWindow(mainWindow);
   mainWindow.once('ready-to-show', () => {
     if (mainWindow.isDestroyed()) return;
     if (showWhenCreated) {
@@ -2169,7 +2173,7 @@ app.whenReady().then(async () => {
   const converterRuntime = await startConverterWithRecoveryPrompt({
     lifecycle: converterLifecycle,
     createWindow,
-    dialog,
+    dialog: smokeTest?.dialog || dialog,
     app,
     onError: (error) => console.error(
       '[CONVERTER] Runtime initialization failed:',
@@ -2257,8 +2261,8 @@ ipcMain.handle('app:relaunch', () => {
  * @returns {Promise<{needed: boolean, installed: boolean, error?: string}>}
  */
 async function checkAndInstallPackages() {
-  // Only run for dev mode (npm start users)
-  if (app.isPackaged) {
+  // Only run for dev mode (npm start users), never during the launch check
+  if (app.isPackaged || smokeTest) {
     return { needed: false, installed: false };
   }
 

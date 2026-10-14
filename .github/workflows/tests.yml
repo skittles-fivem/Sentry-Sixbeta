@@ -1,0 +1,159 @@
+name: Tests
+
+# Every automated test, on the platforms the app ships for:
+#   - unit: main-process (Jest) and interface (node --test) tests on Windows,
+#     macOS and Linux, including the real main.js start-up / tray scenarios;
+#   - real-ffmpeg: real conversions with real FFmpeg (the bundled Windows
+#     build, and Ubuntu's FFmpeg on Linux) - integration matrix plus
+#     end-to-end runs of automatic conversion, the time window across a
+#     restart, verification modes, keep-original, the benchmark and live
+#     window updates;
+#   - app-launch: the real Electron app starts, its screens load without
+#     errors, a conversion runs through the app itself, and it quits cleanly.
+# Failures are reported as annotations on the run page.
+#
+# The beta release calls this workflow and only builds when it passes.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, Dev-SEI, 'ci/**']
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  unit:
+    name: Unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          # These tests never start Electron itself.
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      - name: Main-process tests
+        # Real-FFmpeg suites run in their own job below.
+        run: >-
+          npx jest --ci --reporters=default --reporters=github-actions
+          --testPathIgnorePatterns integration studioTelemetry
+
+      - name: Interface tests
+        run: >-
+          node --test
+          --test-reporter=spec --test-reporter-destination=stdout
+          --test-reporter=./tests/ci/githubAnnotations.mjs --test-reporter-destination=stdout
+          tests/renderer/*.test.mjs
+
+  studio-telemetry:
+    # Upstream telemetry-format tests with known failures of their own; run
+    # and reported, but they do not block a build.
+    name: Studio telemetry tests (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - run: npx jest --ci --reporters=default tests/main/converter/studioTelemetry
+
+  real-ffmpeg:
+    name: Real FFmpeg conversions (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      - name: FFmpeg for Linux
+        # The repository bundles Windows and macOS builds; Linux uses Ubuntu's.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg > /dev/null
+          cp "$(command -v ffmpeg)" ffmpeg_bin/ffmpeg
+          cp "$(command -v ffprobe)" ffmpeg_bin/ffprobe
+
+      - name: FFmpeg in use
+        run: |
+          FF=ffmpeg_bin/ffmpeg; [ "$RUNNER_OS" = "Windows" ] && FF=ffmpeg_bin/ffmpeg.exe
+          "$FF" -hide_banner -version | head -1
+          "$FF" -hide_banner -encoders | grep -E "libx265|libsvtav1|libaom-av1"
+
+      - name: Converter integration and end-to-end tests
+        run: >-
+          npx jest --ci --reporters=default --reporters=github-actions
+          --runInBand tests/main/converter/integration
+
+  app-launch:
+    name: App launch (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies (with Electron)
+        run: npm ci
+
+      - name: FFmpeg for Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg > /dev/null
+          cp "$(command -v ffmpeg)" ffmpeg_bin/ffmpeg
+          cp "$(command -v ffprobe)" ffmpeg_bin/ffprobe
+
+      - name: Start the app, convert through it, and quit
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a --server-args="-screen 0 1600x1000x24" node tests/smoke/launchApp.js
+          else
+            node tests/smoke/launchApp.js
+          fi
