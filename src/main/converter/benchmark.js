@@ -86,6 +86,10 @@ async function runConverterBenchmark(options = {}) {
         return sum + (sample?.frames || 0);
       }, 0);
       const filesPerMinute = Math.round((completed.length / seconds) * 600) / 10;
+      // Space saved by this codec/profile on these clips (converted ones only).
+      const sourceTotal = completed.reduce((sum, item) => sum + (item.sourceBytes || 0), 0);
+      const outputTotal = completed.reduce((sum, item) => sum + (item.outputBytes || 0), 0);
+      const savedPercent = sourceTotal > 0 && outputTotal > 0 ? Math.round(1000 - (outputTotal / sourceTotal) * 1000) / 10 : null;
       const result = {
         level,
         clips: batch.length,
@@ -94,6 +98,7 @@ async function runConverterBenchmark(options = {}) {
         failures,
         seconds: Math.round(seconds * 10) / 10,
         filesPerMinute,
+        savedPercent,
         fps: Math.round((frames / seconds) * 10) / 10,
         ok: completed.length === batch.length
       };

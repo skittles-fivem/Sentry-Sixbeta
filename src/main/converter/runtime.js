@@ -723,7 +723,11 @@ async function createConverterRuntime(options = {}) {
     store,
     stagingManager,
     capabilities,
-    async runBenchmark({ codec, profileId = 'balanced', bitrateKbps, qualityLevel, sourceRoot = null, onProgress } = {}) {
+    // Runs the benchmark for each requested codec in turn (H.265 then AV1 by
+    // default) so the results can be compared side by side. A codec this
+    // computer cannot encode is reported as unsupported instead of failing.
+    async runBenchmark({ codec, codecs, profileId = 'balanced', bitrateKbps, qualityLevel, sourceRoot = null, onProgress } = {}) {
+      const requested = Array.isArray(codecs) && codecs.length > 0 ? codecs : [codec || 'h265'];
       if (shutdownPromise) throw runtimeError('SERVICE_SHUTDOWN');
       if (benchmarkController) throw runtimeError('BENCHMARK_ACTIVE');
       if (await hasActiveJob()) throw runtimeError('JOB_ACTIVE');
@@ -733,12 +737,29 @@ async function createConverterRuntime(options = {}) {
         onProgress?.({ step: 'scan' });
         const clips = await findBenchmarkClips(sourceRoot, controller.signal);
         if (clips.length === 0) throw runtimeError('BENCHMARK_SOURCE_REQUIRED');
-        let encoder = null;
-        try { encoder = await planner.select(codec); } catch (_) { /* reported by the conversions */ }
-        return await runConverterBenchmark({
-          clips, countFrames, encoder, tempRoot, signal: controller.signal, onProgress, pathApi, fs: pfs,
-          runLevel: benchmarkLevelRunner({ codec, profileId, bitrateKbps, qualityLevel })
-        });
+        const runs = [];
+        for (const [index, current] of requested.entries()) {
+          let encoder;
+          try { encoder = await planner.select(current); } catch (_) {
+            runs.push({ codec: current, error: 'UNSUPPORTED', encoder: null, results: [], best: null, clips: 0 });
+            continue;
+          }
+          try {
+            const result = await runConverterBenchmark({
+              clips, countFrames, encoder, tempRoot, signal: controller.signal, pathApi, fs: pfs,
+              onProgress: (progress) => onProgress?.({ ...progress, codec: current, codecIndex: index + 1, codecTotal: requested.length }),
+              runLevel: benchmarkLevelRunner({ codec: current, profileId, bitrateKbps, qualityLevel })
+            });
+            runs.push({ codec: current, ...result });
+          } catch (error) {
+            if (error?.code === 'CANCELLED' || controller.signal.aborted) throw error;
+            runs.push({ codec: current, error: typeof error?.code === 'string' ? error.code : 'BENCHMARK_FAILED',
+              encoder, results: [], best: null, clips: 0 });
+          }
+        }
+        // Single-codec shape kept for older callers; codecs[] holds every run.
+        const first = runs.find((run) => !run.error) || runs[0];
+        return { ...first, codecs: runs };
       } finally {
         if (benchmarkController === controller) benchmarkController = null;
       }

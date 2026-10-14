@@ -1032,11 +1032,12 @@ function benchmarkElements() {
     concurrency: new FakeElement({ value: '5' }),
     benchmarkButton: new FakeElement(), benchmarkDialog: dialog, benchmarkStatus: new FakeElement(),
     benchmarkTable: new FakeElement(), benchmarkRows: new FakeElement(), benchmarkBest: new FakeElement(),
-    benchmarkRun: new FakeElement(), benchmarkApply: new FakeElement(), benchmarkClose: new FakeElement()
+    benchmarkRun: new FakeElement(), benchmarkApply: new FakeElement(), benchmarkClose: new FakeElement(),
+    benchmarkApplyAlt: new FakeElement(), benchmarkHead: new FakeElement()
   };
 }
 
-test('benchmark: runs from the dialog, shows results and applies the recommended setting', async () => {
+test('benchmark: compares H.265 and AV1 side by side and applies either pick', async () => {
   const elements = benchmarkElements();
   const api = fakeApi();
   const storage = memoryStorage();
@@ -1044,17 +1045,22 @@ test('benchmark: runs from the dialog, shows results and applies the recommended
     api.calls.push(['benchmark', request]);
     onProgress({ step: 'copy', index: 3, total: 8 });
     assert.match(elements.benchmarkStatus.textContent, /sample clip 3 of 8/);
-    onProgress({ step: 'run', level: 2, index: 2, total: 5 });
-    assert.match(elements.benchmarkStatus.textContent, /2 at once.*2 of 5/);
-    return { ok: true, value: {
-      encoder: { codec: 'hevc_nvenc', hardware: true }, clips: 8,
+    onProgress({ step: 'run', level: 2, index: 2, total: 5, codec: 'av1', codecIndex: 2, codecTotal: 2 });
+    assert.match(elements.benchmarkStatus.textContent, /AV1 \(2 of 2\).*2 at once.*2 of 5/);
+    const h265 = { codec: 'h265', encoder: { codec: 'hevc_nvenc', hardware: true }, clips: 8,
       results: [
-        { level: 1, ok: true, filesPerMinute: 4.2, fps: 150.3, failures: [] },
-        { level: 4, ok: true, filesPerMinute: 12.5, fps: 450, failures: [] },
+        { level: 1, ok: true, filesPerMinute: 4.2, fps: 150.3, savedPercent: 21.5, failures: [] },
+        { level: 4, ok: true, filesPerMinute: 12.5, fps: 450, savedPercent: 21.4, failures: [] },
         { level: 6, ok: false, filesPerMinute: 0, fps: 0, failures: ['encoder-failed'] }
       ],
-      best: { level: 4, ok: true, filesPerMinute: 12.5, fps: 450 }
-    } };
+      best: { level: 4, ok: true, filesPerMinute: 12.5, fps: 450 } };
+    const av1 = { codec: 'av1', encoder: { codec: 'av1_nvenc', hardware: true }, clips: 8,
+      results: [
+        { level: 1, ok: true, filesPerMinute: 3.1, fps: 120, savedPercent: 48.2, failures: [] },
+        { level: 2, ok: true, filesPerMinute: 6.4, fps: 240, savedPercent: 48, failures: [] }
+      ],
+      best: { level: 2, ok: true, filesPerMinute: 6.4, fps: 240 } };
+    return { ok: true, value: { ...h265, codecs: [h265, av1] } };
   };
   await createFootageConverterController({ api, elements, storage }).init();
   elements.sourcePath.value = 'D:\\TeslaCam';
@@ -1063,16 +1069,44 @@ test('benchmark: runs from the dialog, shows results and applies the recommended
   assert.equal(elements.benchmarkDialog.open, true);
   await elements.benchmarkRun.click();
 
-  assert.deepEqual(api.calls.find(([name]) => name === 'benchmark')[1], { codec: 'h265', profileId: 'balanced', sourceRoot: 'D:\\TeslaCam' });
-  assert.equal(elements.benchmarkRows.children.length, 3);
-  assert.match(elements.benchmarkRows.children[2].children[1].textContent, /failed \(encoder-failed\)/);
-  assert.match(elements.benchmarkBest.textContent, /4 at once — 12\.5 files\/min/);
-  assert.match(elements.benchmarkStatus.textContent, /8 real clips converted with hevc_nvenc \(GPU\)/);
+  assert.deepEqual(api.calls.find(([name]) => name === 'benchmark')[1],
+    { codecs: ['h265', 'av1'], profileId: 'balanced', sourceRoot: 'D:\\TeslaCam' });
+  const head = elements.benchmarkHead.children[0].children.map((node) => node.textContent);
+  assert.deepEqual(head, ['At once', 'H.265 Files/min', 'FPS', 'Saved', 'AV1 Files/min', 'FPS', 'Saved']);
+  assert.deepEqual(elements.benchmarkRows.children.map((row) => row.children[0].textContent), ['1', '2', '4', '6']);
+  const level4 = elements.benchmarkRows.children[2].children.map((node) => node.textContent);
+  assert.deepEqual(level4, ['4', '12.5', '450', '21.4%', '—', '—', '—']);
+  assert.equal(elements.benchmarkRows.children[3].children[1].textContent, 'failed');
+  assert.equal(elements.benchmarkRows.children[3].children[1].title, 'encoder-failed');
+  assert.match(elements.benchmarkBest.textContent, /H\.265: fastest at 4 at once — 12\.5 files\/min, saves 21\.4%/);
+  assert.match(elements.benchmarkBest.textContent, /AV1: fastest at 2 at once — 6\.4 files\/min, saves 48%/);
+  assert.match(elements.benchmarkStatus.textContent, /H\.265 on hevc_nvenc \(GPU\), AV1 on av1_nvenc \(GPU\)/);
+  assert.equal(elements.benchmarkApply.textContent, 'Use H.265 · 4 at once');
+  assert.equal(elements.benchmarkApplyAlt.textContent, 'Use AV1 · 2 at once');
 
-  await elements.benchmarkApply.click();
-  assert.equal(elements.concurrency.value, '4');
-  assert.equal(storage.values.get('converterConcurrency'), '4');
+  await elements.benchmarkApplyAlt.click();
+  assert.equal(elements.concurrency.value, '2');
+  assert.equal(storage.values.get('converterConcurrency'), '2');
+  assert.equal(elements.codecOptions.find((option) => option.checked).dataset.converterCodec, 'av1');
   assert.equal(elements.benchmarkDialog.open, false);
+});
+
+test('benchmark: reports a codec this computer cannot encode and offers only the other', async () => {
+  const elements = benchmarkElements();
+  const api = fakeApi();
+  api.runConverterBenchmark = async () => {
+    const h265 = { codec: 'h265', encoder: { codec: 'libx265', hardware: false }, clips: 2,
+      results: [{ level: 1, ok: true, filesPerMinute: 2, fps: 60, savedPercent: 20, failures: [] }],
+      best: { level: 1, ok: true, filesPerMinute: 2, fps: 60 } };
+    return { ok: true, value: { ...h265, codecs: [h265, { codec: 'av1', error: 'UNSUPPORTED', results: [], best: null }] } };
+  };
+  await createFootageConverterController({ api, elements, storage: memoryStorage() }).init();
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  await elements.benchmarkRun.click();
+  assert.match(elements.benchmarkBest.textContent, /AV1: not supported on this computer/);
+  assert.equal(elements.benchmarkApply.hidden, false);
+  assert.equal(elements.benchmarkApplyAlt.hidden, true);
+  assert.deepEqual(elements.benchmarkHead.children[0].children.map((node) => node.textContent), ['At once', 'H.265 Files/min', 'FPS', 'Saved']);
 });
 
 test('benchmark: asks for a source folder when there are no original clips', async () => {

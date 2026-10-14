@@ -207,6 +207,8 @@ function collectElements(root) {
         benchmarkBest: byId('converterBenchmarkBest'),
         benchmarkRun: byId('converterBenchmarkRun'),
         benchmarkApply: byId('converterBenchmarkApply'),
+        benchmarkApplyAlt: byId('converterBenchmarkApplyAlt'),
+        benchmarkHead: byId('converterBenchmarkHead'),
         benchmarkClose: byId('converterBenchmarkClose'),
         eta: byId('converterEta'),
         timings: byId('converterTimings'),
@@ -537,7 +539,12 @@ function createFootageConverterController(options = {}) {
         setText(elements.processedBytes, renderBytes(counters.sourceVideoBytes || 0));
         const finished = stateCount('completed') + stateCount('skipped') + stateCount('failed');
         const remaining = stateCount('queued') + converting;
-        const pace = active && !paused ? throughput(finished, remaining) : { perMinute: null, remainingMs: null };
+        let pace = active && !paused ? throughput(finished, remaining) : { perMinute: null, remainingMs: null };
+        // A finished run keeps showing its overall average speed.
+        if (!active && snapshot?.state === 'completed' && finished > 0 && snapshot.updatedAt > snapshot.createdAt) {
+            const minutes = (snapshot.updatedAt - snapshot.createdAt) / 60000;
+            if (minutes > 0) pace = { perMinute: finished / minutes, remainingMs: null };
+        }
         setText(elements.speed, pace.perMinute === null ? '—'
             : message('speedValue', '{rate} files/min', { rate: pace.perMinute.toFixed(pace.perMinute < 10 ? 1 : 0) }));
         // Full snapshots carry no progress; keep the last reading briefly.
@@ -590,43 +597,92 @@ function createFootageConverterController(options = {}) {
 
     const formatRate = (value) => String(value >= 100 ? Math.round(value) : value);
 
+    const CODEC_LABELS = { h265: 'H.265', av1: 'AV1' };
+    let benchmarkPicks = [];
+
+    // One entry per codec tested; older single-codec results become one run.
+    function benchmarkRuns(result) {
+        if (Array.isArray(result?.codecs) && result.codecs.length) return result.codecs;
+        if (!result) return [];
+        return [{ codec: selected(elements.codecOptions, 'converterCodec', 'h265'), ...result }];
+    }
+
     function renderBenchmark(result) {
-        const rows = Array.isArray(result?.results) ? result.results : [];
-        const top = Math.max(0.001, ...rows.map((entry) => entry.filesPerMinute || 0));
+        const runs = benchmarkRuns(result);
         const doc = elements.benchmarkRows?.ownerDocument || globalThis.document;
-        const best = result?.best || null;
-        const cells = rows.map((entry) => {
-            const row = doc.createElement('tr');
-            row.classList?.toggle?.('is-best', Boolean(best && entry.level === best.level));
-            const values = [String(entry.level),
-                entry.ok ? formatRate(entry.filesPerMinute) : message('benchmarkFailedRun', 'failed') + (entry.failures?.length ? ` (${entry.failures[0]})` : ''),
-                entry.ok ? formatRate(entry.fps) : '—'];
-            for (const value of values) {
-                const cell = doc.createElement('td');
-                cell.textContent = value;
-                row.append(cell);
+        const cell = (tag, text, className) => {
+            const node = doc.createElement(tag);
+            node.textContent = text;
+            if (className) node.className = className;
+            return node;
+        };
+        const tested = runs.filter((run) => !run.error && Array.isArray(run.results) && run.results.length);
+        // Header: At once | per codec: Files/min, FPS, Saved
+        if (elements.benchmarkHead) {
+            const head = doc.createElement('tr');
+            head.append(cell('th', message('benchmarkParallel', 'At once')));
+            for (const run of tested) {
+                const label = CODEC_LABELS[run.codec] || run.codec;
+                head.append(cell('th', `${label} ${message('benchmarkFilesPerMinute', 'Files/min')}`, 'codec-start'),
+                    cell('th', message('benchmarkFps', 'FPS')), cell('th', message('benchmarkSaved', 'Saved')));
             }
-            const barCell = doc.createElement('td');
-            const bar = doc.createElement('div');
-            bar.className = 'converter-benchmark-bar';
-            if (bar.style) bar.style.width = `${Math.round(100 * (entry.filesPerMinute || 0) / top)}%`;
-            barCell.append(bar);
-            row.append(barCell);
+            elements.benchmarkHead.replaceChildren(head);
+        }
+        const levels = [...new Set(tested.flatMap((run) => run.results.map((entry) => entry.level)))].sort((a, b) => a - b);
+        const rows = levels.map((level) => {
+            const row = doc.createElement('tr');
+            row.append(cell('td', String(level)));
+            for (const run of tested) {
+                const entry = run.results.find((candidate) => candidate.level === level);
+                const best = run.best && run.best.level === level;
+                if (!entry) {
+                    row.append(cell('td', '—', 'codec-start'), cell('td', '—'), cell('td', '—'));
+                } else if (!entry.ok) {
+                    const failedCell = cell('td', message('benchmarkFailedRun', 'failed'), 'codec-start');
+                    if (entry.failures?.length) failedCell.title = entry.failures.join(', ');
+                    row.append(failedCell, cell('td', '—'), cell('td', '—'));
+                } else {
+                    row.append(cell('td', formatRate(entry.filesPerMinute), `codec-start${best ? ' is-best' : ''}`),
+                        cell('td', formatRate(entry.fps), best ? 'is-best' : ''),
+                        cell('td', Number.isFinite(entry.savedPercent) ? `${entry.savedPercent}%` : '—', best ? 'is-best' : ''));
+                }
+            }
             return row;
         });
-        elements.benchmarkRows?.replaceChildren(...cells);
-        setHidden(elements.benchmarkTable, cells.length === 0);
-        benchmarkBest = best;
-        if (best) {
-            setText(elements.benchmarkBest, message('benchmarkBestText',
-                'Fastest for this computer: {count} at once — {rate} files/min.',
-                { count: best.level, rate: formatRate(best.filesPerMinute) }));
-            setText(elements.benchmarkApply, message('benchmarkApply', 'Use {count} at once', { count: best.level }));
+        elements.benchmarkRows?.replaceChildren(...rows);
+        setHidden(elements.benchmarkTable, rows.length === 0);
+
+        const lines = [];
+        benchmarkPicks = [];
+        for (const run of runs) {
+            const codec = CODEC_LABELS[run.codec] || run.codec;
+            if (run.error === 'UNSUPPORTED') lines.push(message('benchmarkCodecUnsupported', '{codec}: not supported on this computer', { codec }));
+            else if (run.error) lines.push(message('benchmarkCodecFailed', '{codec}: benchmark failed ({code})', { codec, code: run.error }));
+            else if (run.best) {
+                const saved = run.results.find((entry) => entry.level === run.best.level)?.savedPercent;
+                lines.push(message('benchmarkCodecBest', '{codec}: fastest at {count} at once — {rate} files/min, saves {saved}', {
+                    codec, count: run.best.level, rate: formatRate(run.best.filesPerMinute),
+                    saved: Number.isFinite(saved) ? `${saved}%` : '—'
+                }));
+                benchmarkPicks.push({ codec: run.codec, level: run.best.level });
+            }
         }
-        setHidden(elements.benchmarkBest, !best);
-        setHidden(elements.benchmarkApply, !best);
+        benchmarkBest = benchmarkPicks[0] || null;
+        setText(elements.benchmarkBest, lines.join('\n'));
+        setHidden(elements.benchmarkBest, lines.length === 0);
+        [elements.benchmarkApply, elements.benchmarkApplyAlt].forEach((button, index) => {
+            const pick = benchmarkPicks[index];
+            setHidden(button, !pick);
+            if (pick) {
+                setText(button, message('benchmarkUseCodec', 'Use {codec} · {count} at once',
+                    { codec: CODEC_LABELS[pick.codec] || pick.codec, count: pick.level }));
+            }
+        });
+        const encoders = runs.filter((run) => !run.error && run.encoder)
+            .map((run) => message('benchmarkCodecEncoder', '{codec} on {encoder}', { codec: CODEC_LABELS[run.codec] || run.codec, encoder: encoderLabel(run.encoder) }));
+        const clips = Math.max(0, ...runs.map((run) => run.clips || 0));
         setText(elements.benchmarkStatus, message('benchmarkDone', 'Done — {clips} real clips converted with {encoder}.',
-            { clips: result?.clips ?? 0, encoder: encoderLabel(result?.encoder) }));
+            { clips, encoder: encoders.join(', ') || '—' }));
     }
 
     async function runBenchmark() {
@@ -635,6 +691,7 @@ function createFootageConverterController(options = {}) {
         benchmarkBest = null;
         setDisabled(elements.benchmarkRun, true);
         setHidden(elements.benchmarkApply, true);
+        setHidden(elements.benchmarkApplyAlt, true);
         setHidden(elements.benchmarkBest, true);
         setText(elements.benchmarkStatus, message('benchmarkScanning', 'Finding sample clips in your source folder…'));
         try {
@@ -642,7 +699,7 @@ function createFootageConverterController(options = {}) {
             const bitrateKbps = profileId === 'custom' ? customBitrateKbps() : undefined;
             if (profileId === 'custom' && bitrateKbps === null) throw apiError('BITRATE_INVALID');
             const request = {
-                codec: selected(elements.codecOptions, 'converterCodec', 'h265'),
+                codecs: ['h265', 'av1'],
                 profileId,
                 ...profileSettings(profileId),
                 sourceRoot: elements.sourcePath?.value?.trim() || null
@@ -651,6 +708,11 @@ function createFootageConverterController(options = {}) {
                 if (progress?.step === 'copy') {
                     setText(elements.benchmarkStatus, message('benchmarkCopying', 'Copying sample clip {index} of {total}…',
                         { index: progress.index, total: progress.total }));
+                } else if (progress?.step === 'run' && progress.codec) {
+                    setText(elements.benchmarkStatus, message('benchmarkCodecProgress',
+                        '{codec} ({codecIndex} of {codecTotal}): converting with {count} at once… ({index} of {total})',
+                        { codec: CODEC_LABELS[progress.codec] || progress.codec, codecIndex: progress.codecIndex, codecTotal: progress.codecTotal,
+                            count: progress.level, index: progress.index, total: progress.total }));
                 } else if (progress?.step === 'run') {
                     setText(elements.benchmarkStatus, message('benchmarkTestingLevel',
                         'Converting with {count} at once… ({index} of {total})',
@@ -672,11 +734,14 @@ function createFootageConverterController(options = {}) {
         elements.benchmarkDialog?.close?.();
     }
 
-    function applyBenchmark() {
-        if (!benchmarkBest) return;
-        setConcurrency(benchmarkBest.level);
-        rememberConcurrency(benchmarkBest.level);
-        notify(message('benchmarkApplied', 'Parallel conversions set to {count}.', { count: benchmarkBest.level }), { type: 'info' });
+    function applyBenchmark(index = 0) {
+        const pick = benchmarkPicks[index];
+        if (!pick) return;
+        setConcurrency(pick.level);
+        rememberConcurrency(pick.level);
+        for (const option of elements.codecOptions || []) option.checked = option.dataset?.converterCodec === pick.codec;
+        notify(message('benchmarkAppliedCodec', 'Set to {codec} with {count} parallel conversions.',
+            { codec: CODEC_LABELS[pick.codec] || pick.codec, count: pick.level }), { type: 'info' });
         elements.benchmarkDialog?.close?.();
     }
 
@@ -941,7 +1006,8 @@ function createFootageConverterController(options = {}) {
         });
         elements.benchmarkButton?.addEventListener?.('click', () => elements.benchmarkDialog?.showModal?.());
         elements.benchmarkRun?.addEventListener?.('click', runBenchmark);
-        elements.benchmarkApply?.addEventListener?.('click', applyBenchmark);
+        elements.benchmarkApply?.addEventListener?.('click', () => applyBenchmark(0));
+        elements.benchmarkApplyAlt?.addEventListener?.('click', () => applyBenchmark(1));
         elements.benchmarkClose?.addEventListener?.('click', closeBenchmark);
         elements.benchmarkDialog?.addEventListener?.('cancel', () => {
             if (benchmarkRunning) void Promise.resolve(api.cancelConverterBenchmark?.()).catch(() => {});

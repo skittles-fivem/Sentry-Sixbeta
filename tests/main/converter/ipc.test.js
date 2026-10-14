@@ -243,6 +243,26 @@ describe('converter IPC', () => {
     expect(h.service.start).not.toHaveBeenCalled();
   });
 
+  describe('benchmark codecs', () => {
+    const benchmark = () => ({ run: jest.fn(async () => ({ codecs: [] })), cancel: jest.fn() });
+
+    test('forwards a two-codec comparison and keeps the single-codec form', async () => {
+      const bench = benchmark();
+      const h = setup({ benchmark: bench });
+      await expect(h.invoke('converter:runBenchmark', { codecs: ['h265', 'av1'], profileId: 'balanced' })).resolves.toMatchObject({ ok: true });
+      expect(bench.run).toHaveBeenLastCalledWith(expect.objectContaining({ codec: 'h265', codecs: ['h265', 'av1'] }));
+      await expect(h.invoke('converter:runBenchmark', { codec: 'av1' })).resolves.toMatchObject({ ok: true });
+      expect(bench.run).toHaveBeenLastCalledWith(expect.objectContaining({ codec: 'av1', codecs: ['av1'] }));
+    });
+
+    test.each([[[]], [['h265', 'h265']], [['vp9']], [['h265', 'av1', 'h265']], ['h265']])('rejects codecs %p', async (codecs) => {
+      const bench = benchmark();
+      const h = setup({ benchmark: bench });
+      await expect(h.invoke('converter:runBenchmark', { codecs })).resolves.toMatchObject({ ok: false, error: { code: 'INVALID_CODEC' } });
+      expect(bench.run).not.toHaveBeenCalled();
+    });
+  });
+
   describe('automatic conversion settings', () => {
     const auto = () => ({
       get: jest.fn(() => ({ settings: { enabled: false }, status: { lastCheckAt: 1791949248961.5 } })),

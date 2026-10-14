@@ -1138,3 +1138,38 @@ body.converter-mode #driveList {
 .converter-field[hidden] {
     display: none;
 }
+
+/* Side-by-side codec comparison */
+.converter-benchmark-dialog {
+    max-width: min(760px, calc(100vw - 32px));
+}
+
+.converter-benchmark-table th.codec-start,
+.converter-benchmark-table td.codec-start {
+    border-left: 1px solid rgba(255, 255, 255, 0.08);
+    padding-left: 12px;
+}
+
+.converter-benchmark-table td.is-best {
+    color: var(--accent-color);
+    font-weight: 600;
+}
+
+.converter-benchmark-best {
+    white-space: pre-line;
+}
+
+/* Hint text under converter settings (was unstyled: browser-default 16px). */
+.converter-disclosure {
+    display: block;
+    margin: 6px 0 0;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+/* .converter-confirm-row sets display:grid, which would override [hidden]
+   (the replace-originals confirmation must only show for replace mode). */
+.converter-confirm-row[hidden] {
+    display: none;
+}

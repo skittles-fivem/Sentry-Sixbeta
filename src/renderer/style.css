@@ -8153,3 +8153,84 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     width: 480px;
     border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
+
+/* Free camera layout: each camera has its own size and position (shares of
+   the view, set as --fx/--fy/--fw/--fh by playbackLayout.js). */
+.multi-cam-grid.free-layout .multi-tile {
+    position: absolute;
+    left: calc(var(--fx, 0) * 100%);
+    top: calc(var(--fy, 0) * 100%);
+    width: calc(var(--fw, 0.33) * 100%);
+    height: calc(var(--fh, 0.5) * 100%);
+}
+
+.multi-cam-grid.free-layout .grid-resize-handle {
+    display: none;
+}
+
+/* A focused camera still fills the view in a free layout. */
+.multi-cam-grid.free-layout.focused[data-focus-slot="tl"] .multi-tile[data-slot="tl"],
+.multi-cam-grid.free-layout.focused[data-focus-slot="tc"] .multi-tile[data-slot="tc"],
+.multi-cam-grid.free-layout.focused[data-focus-slot="tr"] .multi-tile[data-slot="tr"],
+.multi-cam-grid.free-layout.focused[data-focus-slot="bl"] .multi-tile[data-slot="bl"],
+.multi-cam-grid.free-layout.focused[data-focus-slot="bc"] .multi-tile[data-slot="bc"],
+.multi-cam-grid.free-layout.focused[data-focus-slot="br"] .multi-tile[data-slot="br"] {
+    left: 10px;
+    top: 10px;
+    width: calc(100% - 20px);
+    height: calc(100% - 20px);
+    z-index: 10 !important;
+}
+
+.tile-resize-handle,
+.tile-move-handle {
+    position: absolute;
+    z-index: 4;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    touch-action: none;
+}
+
+.multi-tile:hover > .tile-resize-handle,
+.multi-tile:hover > .tile-move-handle,
+.multi-cam-grid.grid-resizing .tile-resize-handle,
+.multi-cam-grid.grid-resizing .tile-move-handle {
+    opacity: 1;
+}
+
+.tile-resize-handle {
+    right: 2px;
+    bottom: 2px;
+    width: 18px;
+    height: 18px;
+    cursor: nwse-resize;
+    border-right: 3px solid var(--accent-color, #4a9eff);
+    border-bottom: 3px solid var(--accent-color, #4a9eff);
+    border-bottom-right-radius: 8px;
+}
+
+.tile-move-handle {
+    top: 6px;
+    right: 6px;
+    width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    background: var(--overlay-light, rgba(0, 0, 0, 0.5));
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.15));
+    color: var(--text-color, #fff);
+    cursor: move;
+}
+
+.tile-move-handle .material-symbols-outlined {
+    font-size: 16px;
+}
+
+.multi-cam-grid.focused .tile-resize-handle,
+.multi-cam-grid.focused .tile-move-handle,
+.multi-cam-grid.drag-active .tile-resize-handle,
+.multi-cam-grid.drag-active .tile-move-handle {
+    display: none;
+}

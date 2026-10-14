@@ -532,16 +532,17 @@
                             </div>
                             <dialog id="converterBenchmarkDialog" class="converter-benchmark-dialog" aria-labelledby="converterBenchmarkTitle">
                                 <h3 id="converterBenchmarkTitle" data-i18n="ui.converter.benchmarkTitle">Encoding benchmark</h3>
-                                <p class="converter-disclosure" data-i18n="ui.converter.benchmarkIntro">Runs real conversions — telemetry, full verification and saving — on copies of up to 8 clips from your source folder, at 1–8 parallel conversions with the codec and compression selected above. Your footage is only read; results go to a temporary folder. Takes a few minutes; close other heavy apps for accurate results.</p>
+                                <p class="converter-disclosure" data-i18n="ui.converter.benchmarkIntro">Runs real conversions — telemetry, full verification and saving — on copies of up to 8 clips from your source folder with H.265 and then AV1 (when this computer can encode it), at 1–8 parallel conversions with the compression selected above, so you can compare them side by side. Your footage is only read; results go to a temporary folder. Takes several minutes; close other heavy apps for accurate results.</p>
                                 <p id="converterBenchmarkStatus" class="converter-benchmark-status" role="status" aria-live="polite"></p>
                                 <table id="converterBenchmarkTable" class="converter-benchmark-table" hidden>
-                                    <thead><tr><th data-i18n="ui.converter.benchmarkParallel">At once</th><th data-i18n="ui.converter.benchmarkFilesPerMinute">Files/min</th><th data-i18n="ui.converter.benchmarkFps">FPS</th><th aria-hidden="true"></th></tr></thead>
+                                    <thead id="converterBenchmarkHead"><tr><th data-i18n="ui.converter.benchmarkParallel">At once</th><th data-i18n="ui.converter.benchmarkFilesPerMinute">Files/min</th><th data-i18n="ui.converter.benchmarkFps">FPS</th></tr></thead>
                                     <tbody id="converterBenchmarkRows"></tbody>
                                 </table>
                                 <p id="converterBenchmarkBest" class="converter-benchmark-best" hidden></p>
                                 <div class="converter-benchmark-actions">
                                     <button type="button" id="converterBenchmarkRun" class="converter-benchmark-action primary" data-i18n="ui.converter.benchmarkRun">Run benchmark</button>
                                     <button type="button" id="converterBenchmarkApply" class="converter-benchmark-action" hidden></button>
+                                    <button type="button" id="converterBenchmarkApplyAlt" class="converter-benchmark-action" hidden></button>
                                     <button type="button" id="converterBenchmarkClose" class="converter-benchmark-action" data-i18n="ui.converter.benchmarkClose">Close</button>
                                 </div>
                             </dialog>

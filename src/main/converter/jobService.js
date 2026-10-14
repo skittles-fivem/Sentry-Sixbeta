@@ -348,7 +348,12 @@ function createConverterJobService(deps) {
 
   function update(runtime, buildPatch) {
     const operation = runtime.persistChain.catch(() => undefined).then(async () => {
-      const patch = typeof buildPatch === 'function' ? buildPatch(runtime.manifest) : buildPatch;
+      let patch = typeof buildPatch === 'function' ? buildPatch(runtime.manifest) : buildPatch;
+      // Stamp state changes so a finished job knows when it finished (elapsed
+      // time and average speed after completion).
+      if (patch && typeof patch.state === 'string' && patch.state !== runtime.manifest.state && !('updatedAt' in patch)) {
+        patch = { ...patch, updatedAt: clock.now() };
+      }
       runtime.manifest = await store.transition(runtime.manifest.id, patch);
       if (listeners.size > 0) emit(runtime, 'snapshot', { snapshot: publicSnapshot(runtime.manifest) });
       return runtime.manifest;

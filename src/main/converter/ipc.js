@@ -458,8 +458,10 @@ function registerConverterIpc(options = {}) {
     'converter:runBenchmark': wrapped(async (event, payload) => {
       if (typeof options.benchmark?.run !== 'function') fail('BENCHMARK_UNAVAILABLE');
       if (!isPlainObject(payload) || Object.keys(payload)
-        .some((key) => !['codec', 'sourceRoot', 'profileId', 'bitrateKbps', 'qualityLevel'].includes(key))) fail('INVALID_REQUEST');
-      if (!['h265', 'av1'].includes(payload.codec)) fail('INVALID_CODEC');
+        .some((key) => !['codec', 'codecs', 'sourceRoot', 'profileId', 'bitrateKbps', 'qualityLevel'].includes(key))) fail('INVALID_REQUEST');
+      const codecs = payload.codecs === undefined ? [payload.codec] : payload.codecs;
+      if (!Array.isArray(codecs) || codecs.length === 0 || codecs.length > 2 || new Set(codecs).size !== codecs.length
+          || codecs.some((entry) => !['h265', 'av1'].includes(entry))) fail('INVALID_CODEC');
       const profileId = payload.profileId ?? 'balanced';
       if (!PROFILE_IDS.includes(profileId)) fail('INVALID_PROFILE');
       if (profileId === 'custom' ? !isValidCustomBitrate(payload.bitrateKbps) : payload.bitrateKbps !== undefined) {
@@ -472,7 +474,8 @@ function registerConverterIpc(options = {}) {
         ? null : (await canonicalDirectory(payload.sourceRoot, dependencies)).real;
       const sender = event?.sender;
       return options.benchmark.run({
-        codec: payload.codec,
+        codec: codecs[0],
+        codecs,
         profileId,
         ...(profileId === 'custom' ? { bitrateKbps: payload.bitrateKbps } : {}),
         ...(profileId === 'quality' ? { qualityLevel: payload.qualityLevel } : {}),

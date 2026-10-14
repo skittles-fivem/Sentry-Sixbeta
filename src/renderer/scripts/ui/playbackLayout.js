@@ -4,12 +4,18 @@
  *  - Resizable multi-camera grid: drag the dividers between columns and rows;
  *    sizes are remembered per layout and restored on reopen. Double-click a
  *    divider to reset that layout to equal sizes.
+ *  - Free layout: drag any camera's corner to give it any size, or its move
+ *    grip to place it anywhere. The first such change switches that layout to
+ *    free positioning (starting from where the cameras are); positions are
+ *    remembered per layout. Double-click a corner to go back to the grid.
  */
 
 const HARDWARE_KEY = 'sentrySix.playback.teslaHardware';
 const SIZES_KEY = 'sentrySix.playback.gridSizes';
 const HARDWARE_LAYOUTS = Object.freeze({ hw4: 'six_default', hw3: 'tesla_hw3' });
 const MIN_SHARE = 0.12;
+const FREE_KEY = 'sentrySix.playback.freeLayouts';
+const FREE_MIN = 0.08; // smallest camera, as a share of the view
 
 function readJson(key, fallback) {
     try {
@@ -121,12 +127,12 @@ export function createGridResizer({ grid, getLayoutId, getColumns }) {
         }
     }
 
-    function apply() {
+    let apply = function applyTracks() {
         const { tracks } = current();
         grid.style.gridTemplateColumns = tracks.columns.map((share) => `${share}fr`).join(' ');
         grid.style.gridTemplateRows = tracks.rows.map((share) => `${share}fr`).join(' ');
         requestAnimationFrame(positionHandles);
-    }
+    };
 
     function save(layoutId, tracks) {
         sizes = { ...sizes, [layoutId]: { columns: tracks.columns, rows: tracks.rows } };
@@ -185,9 +191,158 @@ export function createGridResizer({ grid, getLayoutId, getColumns }) {
         positionHandles();
     }
 
+    // ---- Free layout: any camera, any size and position -----------------
+    let freeLayouts = readJson(FREE_KEY, {});
+    let freeDrag = null;
+
+    function tiles() {
+        return [...grid.querySelectorAll('.multi-tile[data-slot]')];
+    }
+
+    function validBox(box) {
+        return box && ['x', 'y', 'w', 'h'].every((key) => Number.isFinite(box[key]))
+            && box.w >= FREE_MIN && box.h >= FREE_MIN && box.x >= 0 && box.y >= 0
+            && box.x + box.w <= 1.0001 && box.y + box.h <= 1.0001;
+    }
+
+    function freeFor(layoutId) {
+        const saved = freeLayouts[layoutId];
+        if (!saved || typeof saved !== 'object' || !saved.boxes) return null;
+        const boxes = {};
+        for (const [slot, box] of Object.entries(saved.boxes)) if (validBox(box)) boxes[slot] = box;
+        return Object.keys(boxes).length ? { boxes, order: Array.isArray(saved.order) ? saved.order : [] } : null;
+    }
+
+    function paintFree(layout) {
+        grid.classList.toggle('free-layout', Boolean(layout));
+        for (const tile of tiles()) {
+            const slot = tile.dataset.slot;
+            const box = layout?.boxes[slot];
+            if (!box) {
+                for (const name of ['--fx', '--fy', '--fw', '--fh']) tile.style.removeProperty(name);
+                tile.style.removeProperty('z-index');
+                continue;
+            }
+            tile.style.setProperty('--fx', String(box.x));
+            tile.style.setProperty('--fy', String(box.y));
+            tile.style.setProperty('--fw', String(box.w));
+            tile.style.setProperty('--fh', String(box.h));
+            const depth = layout.order.indexOf(slot);
+            tile.style.zIndex = String(depth >= 0 ? 1 + depth : 1);
+        }
+    }
+
+    // Capture where every camera is right now as a starting free layout.
+    function captureGrid() {
+        const rect = grid.getBoundingClientRect();
+        const boxes = {};
+        for (const tile of tiles()) {
+            if (tile.offsetParent === null) continue;
+            const r = tile.getBoundingClientRect();
+            boxes[tile.dataset.slot] = {
+                x: (r.left - rect.left) / rect.width, y: (r.top - rect.top) / rect.height,
+                w: r.width / rect.width, h: r.height / rect.height
+            };
+        }
+        return { boxes, order: Object.keys(boxes) };
+    }
+
+    function saveFree(layoutId, layout) {
+        freeLayouts = { ...freeLayouts, [layoutId]: layout };
+        writeJson(FREE_KEY, freeLayouts);
+    }
+
+    function resetFree() {
+        const { layoutId } = current();
+        const next = { ...freeLayouts };
+        delete next[layoutId];
+        freeLayouts = next;
+        writeJson(FREE_KEY, freeLayouts);
+        paintFree(null);
+        apply();
+    }
+
+    function startFreeDrag(event, tile, mode) {
+        if (event.button !== 0 || grid.classList.contains('focused')) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const { layoutId } = current();
+        const layout = freeFor(layoutId) || captureGrid();
+        const slot = tile.dataset.slot;
+        if (!layout.boxes[slot]) return;
+        layout.order = [...layout.order.filter((entry) => entry !== slot), slot]; // bring to front
+        const rect = grid.getBoundingClientRect();
+        freeDrag = { mode, slot, layoutId, layout, rect, startX: event.clientX, startY: event.clientY, box: { ...layout.boxes[slot] } };
+        paintFree(layout);
+        grid.classList.add('grid-resizing');
+        const target = event.currentTarget;
+        target.setPointerCapture?.(event.pointerId);
+        target.addEventListener('pointermove', onFreeMove);
+        target.addEventListener('pointerup', endFreeDrag, { once: true });
+        target.addEventListener('pointercancel', endFreeDrag, { once: true });
+    }
+
+    function onFreeMove(event) {
+        if (!freeDrag) return;
+        const { rect, box } = freeDrag;
+        const dx = (event.clientX - freeDrag.startX) / rect.width;
+        const dy = (event.clientY - freeDrag.startY) / rect.height;
+        const next = { ...box };
+        if (freeDrag.mode === 'resize') {
+            next.w = Math.min(1 - box.x, Math.max(FREE_MIN, box.w + dx));
+            next.h = Math.min(1 - box.y, Math.max(FREE_MIN, box.h + dy));
+        } else {
+            next.x = Math.min(1 - box.w, Math.max(0, box.x + dx));
+            next.y = Math.min(1 - box.h, Math.max(0, box.y + dy));
+        }
+        freeDrag.layout.boxes[freeDrag.slot] = next;
+        freeDrag.moved = true;
+        paintFree(freeDrag.layout);
+    }
+
+    function endFreeDrag(event) {
+        event.currentTarget.removeEventListener('pointermove', onFreeMove);
+        grid.classList.remove('grid-resizing');
+        if (freeDrag?.moved) saveFree(freeDrag.layoutId, freeDrag.layout);
+        else if (freeDrag && !freeFor(freeDrag.layoutId)) paintFree(null); // a plain click changes nothing
+        freeDrag = null;
+        positionHandles();
+    }
+
+    function addTileHandles() {
+        for (const tile of tiles()) {
+            if (tile.querySelector(':scope > .tile-resize-handle')) continue;
+            const resize = document.createElement('div');
+            resize.className = 'tile-resize-handle';
+            resize.title = 'Drag to resize this camera · double-click to return to the grid';
+            const move = document.createElement('div');
+            move.className = 'tile-move-handle';
+            move.title = 'Drag to move this camera';
+            move.innerHTML = '<span class="material-symbols-outlined">open_with</span>';
+            for (const handle of [resize, move]) {
+                handle.setAttribute('draggable', 'false');
+                // Never start a camera swap or toggle focus from a handle.
+                handle.addEventListener('dragstart', (event) => { event.preventDefault(); event.stopPropagation(); });
+                handle.addEventListener('mousedown', (event) => event.stopPropagation());
+                handle.addEventListener('click', (event) => event.stopPropagation());
+                tile.appendChild(handle);
+            }
+            resize.addEventListener('pointerdown', (event) => startFreeDrag(event, tile, 'resize'));
+            move.addEventListener('pointerdown', (event) => startFreeDrag(event, tile, 'move'));
+            resize.addEventListener('dblclick', (event) => { event.stopPropagation(); resetFree(); });
+        }
+    }
+
+    const applyGrid = apply;
+    apply = function applyAll() {
+        applyGrid();
+        addTileHandles();
+        paintFree(freeFor(current().layoutId));
+    };
+
     if (typeof ResizeObserver === 'function') new ResizeObserver(() => positionHandles()).observe(grid);
     new MutationObserver(() => requestAnimationFrame(positionHandles))
         .observe(grid, { attributes: true, attributeFilter: ['class', 'data-columns'] });
     apply();
-    return { apply, reset };
+    return { apply: () => apply(), reset, resetFree };
 }
