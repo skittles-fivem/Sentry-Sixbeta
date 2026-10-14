@@ -533,11 +533,15 @@ async function createConverterRuntime(options = {}) {
     platform,
     runCommand: processRunner
   });
-  const inspectVideo = async (_item, source, signal) => parseVideoProbe(await processRunner(options.ffprobePath, [
-    '-v', 'error', '-select_streams', 'v:0',
-    '-show_entries', 'stream=codec_name,duration:format=duration',
-    '-of', 'json', source
-  ], { signal, shell: false, timeoutMs: 30_000 }));
+  const probeArgs = (source) => ['-v', 'error', '-select_streams', 'v:0',
+    '-show_entries', 'stream=codec_name,duration:format=duration', '-of', 'json', source];
+  // A busy computer (or a virus scanner checking FFprobe the first time) can
+  // make one probe run out of time: that probe is tried once more, longer.
+  const inspectVideo = async (_item, source, signal) => {
+    const first = await processRunner(options.ffprobePath, probeArgs(source), { signal, shell: false, timeoutMs: 30_000 });
+    if (!first?.timedOut || signal?.aborted) return parseVideoProbe(first);
+    return parseVideoProbe(await processRunner(options.ffprobePath, probeArgs(source), { signal, shell: false, timeoutMs: 120_000 }));
+  };
   const readTimeline = async ({ source, signal }) => {
     if (signal?.aborted) throw runtimeError('CANCELLED');
     const bytes = await pfs.readFile(source);
