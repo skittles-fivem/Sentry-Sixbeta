@@ -2147,6 +2147,8 @@ try {
 
 app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
+  // Clear export temp files a crash or forced close left behind (best effort, in the background).
+  void require('./main/tempCleanup').removeLeftoverTempFiles({ tempDir: app.getPath('temp') }).catch(() => {});
   // Check for new packages after update (dev mode only)
   // This runs before window creation to ensure packages are installed
   const packageResult = await checkAndInstallPackages();

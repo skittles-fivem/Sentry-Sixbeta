@@ -629,6 +629,42 @@ async function createConverterRuntime(options = {}) {
     return snapshotSweep;
   }
 
+  // A crash or forced shutdown mid-conversion leaves snapshot folders that
+  // still hold a partial copy, which the empty-folder sweep above never
+  // removes. When no job is unfinished at all (so nothing can resume into
+  // them), delete leftovers older than an hour.
+  async function sweepLeftoverSnapshotFolders(knownJobs = null) {
+    try {
+      const jobs = knownJobs || await store.list();
+      if (jobs.some((job) => !['completed', 'failed', 'cancelled'].includes(job.state)) || benchmarkController) return 0;
+      // Never touch a folder any saved job still points into.
+      const owned = [];
+      const collect = (paths) => { for (const value of Object.values(paths || {})) if (typeof value === 'string') owned.push(pathApi.resolve(value)); };
+      for (const job of jobs) {
+        collect(job.ownedPaths);
+        collect(job.ownedArtifacts);
+        for (const item of job.items || []) { collect(item.ownedPaths); collect(item.ownedArtifacts); }
+      }
+      const names = await pfs.readdir(tempPath);
+      const cutoff = Date.now() - 60 * 60_000;
+      let removed = 0;
+      for (const name of names) {
+        if (!name.startsWith(SNAPSHOT_DIRECTORY_PREFIX)) continue;
+        const folder = pathApi.join(tempPath, name);
+        const stat = await pfs.lstat(folder).catch(() => null);
+        if (!stat?.isDirectory() || stat.isSymbolicLink?.() || stat.mtimeMs > cutoff) continue;
+        const inside = pathApi.resolve(folder) + pathApi.sep;
+        if (owned.some((entry) => entry === pathApi.resolve(folder) || entry.startsWith(inside))) continue;
+        try {
+          if (typeof pfs.rm === 'function') await pfs.rm(folder, { recursive: true, force: true });
+          else await pfs.rmdir(folder);
+          removed += 1;
+        } catch (_) { /* in use or already gone */ }
+      }
+      if (removed) console.log(`[CONVERTER] Removed ${removed} leftover work folder(s) from an earlier session`);
+      return removed;
+    } catch (_) { return 0; }
+  }
   async function hasActiveJob() {
     return (await service.list()).some((job) => !['completed', 'failed', 'cancelled'].includes(job.state)
       && !(job.state === 'paused' && job.recovery?.action === 'manual-intervention'));
@@ -831,6 +867,7 @@ async function createConverterRuntime(options = {}) {
           // recovered automatic job resumes discovering files.
           if (options.autoConvert !== false) await auto.start().catch(() => undefined);
           void sweepEmptySnapshotFolders();
+          if (options.sweepLeftoversOnStart !== false) void sweepLeftoverSnapshotFolders(manifests);
           // No queue or reconnect starts until every manifest safely reconciles.
           // Serial execution preserves the singleton worker across saved jobs.
           recoveryPromise = (async () => {
@@ -852,6 +889,7 @@ async function createConverterRuntime(options = {}) {
       }
       return startPromise;
     },
+    sweepLeftoverSnapshotFolders: () => sweepLeftoverSnapshotFolders(),
     auto: Object.freeze({
       get: () => auto.getState(),
       configure: (settings) => auto.configure(settings),
