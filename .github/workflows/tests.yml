@@ -80,12 +80,10 @@ jobs:
           tests/renderer/*.test.mjs
 
   studio-telemetry:
-    # Upstream telemetry-format tests with known failures of their own; run
-    # and reported, but they do not block a build.
-    name: Studio telemetry tests (informational)
+    # Checks that converted clips keep the dashcam telemetry the player reads.
+    name: Studio telemetry tests
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -96,12 +94,15 @@ jobs:
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       - name: Studio telemetry tests
+        env:
+          # Two tests load the player's ES-module reader through vm.SourceTextModule.
+          NODE_OPTIONS: --experimental-vm-modules
         run: >-
           npx jest --ci --reporters=default
           --json --outputFile=jest-results.json tests/main/converter/studioTelemetry
       - name: List failed telemetry tests
         if: failure()
-        run: node tests/ci/jestFailures.js jest-results.json "Studio telemetry (informational)" warning
+        run: node tests/ci/jestFailures.js jest-results.json "Studio telemetry"
 
   real-ffmpeg:
     name: Real FFmpeg conversions (${{ matrix.os }})
