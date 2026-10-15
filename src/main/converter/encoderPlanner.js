@@ -7,6 +7,9 @@ const SAFE_VIDEO_BITRATE_FLOORS = Object.freeze({ h265: 250_000, av1: 200_000 })
 const RETRY_REASONS = Object.freeze({ PROFILE_SIZE: 'profile-size' });
 const DEFAULT_PROBE_BITRATE = 500_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
+// A CPU encoder that ffmpeg lists is always there; a slow probe only means a
+// busy or slow computer, so it gets longer before it counts as failed.
+const CPU_PROBE_TIMEOUT_MS = 45_000;
 
 const CANDIDATES = Object.freeze({
   h265: Object.freeze({
@@ -253,15 +256,21 @@ function createEncoderPlanner({
   async function prove(family, candidate) {
     const key = `${family}:${candidate.codec}`;
     if (!proofCache.has(key)) {
-      proofCache.set(key, probeCandidate({
+      const pending = probeCandidate({
         runProbe,
         ffmpegPath,
         platform,
         family,
         candidate,
-        timeoutMs,
+        timeoutMs: candidate.hardware === false ? Math.max(timeoutMs, CPU_PROBE_TIMEOUT_MS) : timeoutMs,
         vaapiDevice
-      }));
+      });
+      proofCache.set(key, pending);
+      // A probe that only ran out of time is tried again next time instead of
+      // ruling the encoder out for the rest of the session.
+      pending.then((proof) => {
+        if (proof?.reason === 'timeout' && proofCache.get(key) === pending) proofCache.delete(key);
+      }, () => {});
     }
     return proofCache.get(key);
   }

@@ -1314,6 +1314,11 @@ function createConverterJobService(deps) {
   async function failItem(runtime, itemId, error) {
     const retryable = error?.retryable === true || isRetryableNetwork(error, currentItem(runtime, itemId)?.sourcePath);
     const code = stableFailure(error);
+    // An error without a code is unexpected: keep its details in the log
+    // (the job file only records the generic code).
+    if (typeof error?.code !== 'string') {
+      console.error('[CONVERTER] Unexpected clip failure:', String(error?.stack || error).slice(0, 2000));
+    }
     const ownership = ownershipFor(runtime, itemId);
     if (ownership?.ownedPaths?.replacementBackup || error?.code === 'ROLLBACK_FAILED') {
       if (!runtime.recoveryRequired) {

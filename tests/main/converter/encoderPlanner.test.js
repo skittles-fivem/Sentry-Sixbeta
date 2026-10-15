@@ -58,6 +58,22 @@ describe('encoder candidate discovery and proof', () => {
     }
   );
 
+  test('a CPU encoder probe gets longer, and one that only timed out is tried again later', async () => {
+    let cpuTimedOut = true;
+    const { runProbe, calls } = fakeRunner({ advertised: ['libx265'] });
+    runProbe.mockImplementation(async (command, args, options) => {
+      calls.push({ command, args, options });
+      if (args.includes('-encoders')) return { status: 0, stdout: ' V..... libx265', stderr: '' };
+      return cpuTimedOut ? { timedOut: true } : { status: 0, stdout: '', stderr: '' };
+    });
+    const planner = createEncoderPlanner({ runProbe, platform: 'linux' });
+    await expect(planner.selectCpuFallback('h265')).rejects.toThrow(/No proven h265 encoder/);
+    expect(calls.find((call) => encoderFromArgs(call.args) === 'libx265').options.timeoutMs).toBeGreaterThanOrEqual(45_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    cpuTimedOut = false; // the computer is less busy now
+    await expect(planner.selectCpuFallback('h265')).resolves.toMatchObject({ codec: 'libx265', hardware: false });
+  });
+
   test('uses Windows HEVC priority NVENC, QSV, then AMF and stops at the first proven encoder', async () => {
     const { runProbe, calls } = fakeRunner({
       advertised: ['hevc_nvenc', 'hevc_qsv', 'hevc_amf', 'libx265'],
