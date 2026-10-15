@@ -23,7 +23,7 @@ const GROUPS = ['RecentClips', 'SavedClips', 'SentryClips'];
 // How many items a job may convert at the same time. A job without the field runs
 // exactly like the original single-worker pipeline (`fallback`); the UI offers
 // `recommended` by default.
-const CONCURRENCY = deepFreeze({ min: 1, max: 8, fallback: 1, recommended: 5 });
+const CONCURRENCY = deepFreeze({ min: 1, max: 64, fallback: 1, recommended: 5 });
 
 // Where a converted file's wall-clock time goes. Names avoid substrings the
 // IPC snapshot sanitizer treats as private (e.g. "telemetry", "process").

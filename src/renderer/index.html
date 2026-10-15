@@ -636,7 +636,15 @@
                                     <option value="6">6</option>
                                     <option value="7">7</option>
                                     <option value="8">8</option>
+                                    <option value="9">9</option>
+                                    <option value="10">10</option>
+                                    <option value="custom" data-i18n="ui.converter.parallelCustom">Custom…</option>
                                 </select>
+                                <label id="converterConcurrencyCustomRow" class="converter-field" for="converterConcurrencyCustom" hidden>
+                                    <span class="converter-field-label" data-i18n="ui.converter.parallelCustomLabel">How many at once (1–64)</span>
+                                    <input id="converterConcurrencyCustom" class="converter-select" type="number" min="1" max="64" step="1" value="12" inputmode="numeric">
+                                    <small class="converter-disclosure" data-i18n="ui.converter.parallelCustomHint">More than your graphics card or drive can handle makes conversion slower, not faster. The benchmark finds the best number for this PC.</small>
+                                </label>
                                 <p id="converterConcurrencyHint" class="converter-disclosure" data-i18n="ui.converter.parallelConversionsHint">How many clips are converted at the same time. Hardware encoders may limit simultaneous sessions; software encoding uses more CPU and memory.</p>
                             </fieldset>
 

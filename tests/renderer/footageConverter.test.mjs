@@ -905,13 +905,51 @@ test('restores a stored parallel-conversions choice and ignores invalid stored v
   await createFootageConverterController({ api: fakeApi(), elements: restored, storage: memoryStorage({ converterConcurrency: '7' }) }).init();
   assert.equal(restored.concurrency.value, '7');
 
-  for (const stored of ['0', '9', '2.5', 'abc']) {
+  for (const stored of ['0', '65', '2.5', 'abc']) {
     const elements = { ...makeElements(), concurrency: new FakeElement({ value: '5' }) };
     const api = fakeApi();
     await createFootageConverterController({ api, elements, storage: memoryStorage({ converterConcurrency: stored }) }).init();
     assert.equal(elements.concurrency.value, '5', `stored ${stored}`);
     assert.equal((await startWith(elements, api)).concurrency, 5);
   }
+});
+
+test('Custom shows a box for more than 10 at once, which is remembered and submitted', async () => {
+  const customRow = new FakeElement({ hidden: true });
+  const custom = new FakeElement({ value: '12' });
+  const elements = { ...makeElements(), concurrency: new FakeElement({ value: '5' }), concurrencyCustom: custom, concurrencyCustomRow: customRow };
+  const api = fakeApi();
+  const storage = memoryStorage();
+  await createFootageConverterController({ api, elements, storage }).init();
+  assert.equal(customRow.hidden, true);
+
+  elements.concurrency.value = 'custom';
+  await elements.concurrency.dispatch('change');
+  assert.equal(customRow.hidden, false);
+  custom.value = '20';
+  await custom.dispatch('change');
+  assert.equal(storage.values.get('converterConcurrency'), '20');
+  assert.equal((await startWith(elements, api)).concurrency, 20);
+});
+
+test('a custom number outside 1-64 is pulled into range, and a stored large value reopens in the Custom box', async () => {
+  const custom = new FakeElement({ value: '12' });
+  const elements = { ...makeElements(), concurrency: new FakeElement({ value: '5' }), concurrencyCustom: custom, concurrencyCustomRow: new FakeElement({ hidden: true }) };
+  const storage = memoryStorage();
+  await createFootageConverterController({ api: fakeApi(), elements, storage }).init();
+  elements.concurrency.value = 'custom';
+  await elements.concurrency.dispatch('change');
+  custom.value = '500';
+  await custom.dispatch('change');
+  assert.equal(custom.value, '64');
+  assert.equal(storage.values.get('converterConcurrency'), '64');
+
+  const restoredRow = new FakeElement({ hidden: true });
+  const restored = { ...makeElements(), concurrency: new FakeElement({ value: '5' }), concurrencyCustom: new FakeElement({ value: '12' }), concurrencyCustomRow: restoredRow };
+  await createFootageConverterController({ api: fakeApi(), elements: restored, storage: memoryStorage({ converterConcurrency: '24' }) }).init();
+  assert.equal(restored.concurrency.value, 'custom');
+  assert.equal(restored.concurrencyCustom.value, '24');
+  assert.equal(restoredRow.hidden, false);
 });
 
 test('storage failures never block starting a job', async () => {

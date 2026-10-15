@@ -8,7 +8,8 @@ const GROUPS = ['RecentClips', 'SavedClips', 'SentryClips'];
 const DEFAULT_GROUP_ORDER = ['SavedClips', 'SentryClips', 'RecentClips'];
 // Mirrors CONCURRENCY in src/main/converter/contracts.js (not loadable here).
 const MIN_CONCURRENCY = 1;
-const MAX_CONCURRENCY = 8;
+const MAX_CONCURRENCY = 64;
+const LISTED_CONCURRENCY = 10; // higher values use the Custom box
 const DEFAULT_CONCURRENCY = 5;
 const CONCURRENCY_STORAGE_KEY = 'converterConcurrency';
 const VERIFY_STORAGE_KEY = 'converterVerifyMode';
@@ -191,6 +192,8 @@ function collectElements(root) {
         autoStatus: byId('converterAutoStatus'),
         autoCheckNow: byId('converterAutoCheckNow'),
         concurrency: byId('converterConcurrency'),
+        concurrencyCustom: byId('converterConcurrencyCustom'),
+        concurrencyCustomRow: byId('converterConcurrencyCustomRow'),
         outputOptions: all('[data-converter-output]'),
         replaceOption: byId('converterReplaceOption'),
         replaceInput: byId('converterOutputReplace'),
@@ -411,12 +414,26 @@ function createFootageConverterController(options = {}) {
         setHidden(elements.verifyReplaceNote, !replacing);
     }
 
+    function customConcurrencySelected() {
+        return elements.concurrency?.value === 'custom';
+    }
+
     function selectedConcurrency() {
-        return normalizeConcurrency(elements.concurrency?.value) ?? storedConcurrency() ?? DEFAULT_CONCURRENCY;
+        const raw = customConcurrencySelected() ? elements.concurrencyCustom?.value : elements.concurrency?.value;
+        return normalizeConcurrency(raw) ?? storedConcurrency() ?? DEFAULT_CONCURRENCY;
+    }
+
+    function updateConcurrencyCustomVisibility() {
+        setHidden(elements.concurrencyCustomRow, !customConcurrencySelected());
     }
 
     function setConcurrency(value) {
-        if (elements.concurrency) elements.concurrency.value = String(value);
+        if (elements.concurrency) {
+            const custom = value > LISTED_CONCURRENCY && Boolean(elements.concurrencyCustom);
+            elements.concurrency.value = custom ? 'custom' : String(value);
+            if (custom) elements.concurrencyCustom.value = String(value);
+        }
+        updateConcurrencyCustomVisibility();
     }
 
     function message(key, fallback, params) {
@@ -616,6 +633,7 @@ function createFootageConverterController(options = {}) {
         setHidden(elements.errorRows, failedItems.length === 0);
         setDisabled(elements.startButton, active);
         setDisabled(elements.concurrency, active);
+        setDisabled(elements.concurrencyCustom, active);
         setDisabled(elements.benchmarkButton, active);
         setDisabled(elements.profileSelect, active);
         setDisabled(elements.customBitrate, active);
@@ -1146,8 +1164,18 @@ function createFootageConverterController(options = {}) {
         elements.profileSelect?.addEventListener?.('change', updateCustomBitrateVisibility);
         updateCustomBitrateVisibility();
         elements.concurrency?.addEventListener?.('change', () => {
-            const value = normalizeConcurrency(elements.concurrency.value);
-            if (value !== null) rememberConcurrency(value);
+            updateConcurrencyCustomVisibility();
+            if (customConcurrencySelected()) elements.concurrencyCustom?.focus?.();
+            const value = selectedConcurrency();
+            if (normalizeConcurrency(customConcurrencySelected() ? elements.concurrencyCustom?.value : elements.concurrency.value) !== null) rememberConcurrency(value);
+        });
+        elements.concurrencyCustom?.addEventListener?.('change', () => {
+            const value = normalizeConcurrency(elements.concurrencyCustom.value);
+            if (value === null) {
+                const clamped = Math.min(MAX_CONCURRENCY, Math.max(MIN_CONCURRENCY, Math.round(Number(elements.concurrencyCustom.value)) || DEFAULT_CONCURRENCY));
+                elements.concurrencyCustom.value = String(clamped);
+                rememberConcurrency(clamped);
+            } else rememberConcurrency(value);
         });
         elements.benchmarkButton?.addEventListener?.('click', () => elements.benchmarkDialog?.showModal?.());
         elements.benchmarkRun?.addEventListener?.('click', runBenchmark);

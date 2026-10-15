@@ -235,7 +235,7 @@ describe('converter job store', () => {
     expect((await store.load('parallel-absent')).config).not.toHaveProperty('concurrency');
   });
 
-  test.each([0, 9, 1.5, '4', null].map((value) => [value]))('rejects invalid persisted parallel conversions %p', async (concurrency) => {
+  test.each([0, 65, 1.5, '4', null].map((value) => [value]))('rejects invalid persisted parallel conversions %p', async (concurrency) => {
     const store = createJobStore({ rootDir, fs: fs.promises });
     await expect(store.save(job('parallel-bad', { config: validConfig({ concurrency }) })))
       .rejects.toMatchObject({ code: 'INVALID_MANIFEST' });

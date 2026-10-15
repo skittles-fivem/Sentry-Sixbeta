@@ -233,7 +233,7 @@ describe('converter IPC', () => {
   });
 
   test.each([
-    [0, 'INVALID_CONCURRENCY'], [9, 'INVALID_CONCURRENCY'], [-1, 'INVALID_CONCURRENCY'],
+    [0, 'INVALID_CONCURRENCY'], [65, 'INVALID_CONCURRENCY'], [-1, 'INVALID_CONCURRENCY'],
     ['5', 'INVALID_CONCURRENCY'], [null, 'INVALID_CONCURRENCY'], [true, 'INVALID_CONCURRENCY'],
     // Non-integer numbers never pass the generic payload bounds.
     [2.5, 'INVALID_REQUEST']
