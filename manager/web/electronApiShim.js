@@ -16,7 +16,7 @@
   document.documentElement.dataset.embed = embed;
 
   const clientId = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)).slice(0, 64);
-  const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-manager' };
+  const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-manager', 'X-Client-Id': clientId };
 
   async function post(url, body) {
     const res = await fetch(url, { method: 'POST', headers, body: body === undefined ? '' : JSON.stringify(body), credentials: 'same-origin' });

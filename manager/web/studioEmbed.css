@@ -10,8 +10,11 @@ html[data-embed="encoder"] #clipBrowser {
   display: none !important;
 }
 
-/* Desktop-only features */
-[data-web-hidden] { display: none !important; }
+/* Desktop-only features: the server always runs, so there is no tray icon
+   or start-at-sign-in for automatic conversion. */
+[data-web-hidden],
+label:has(> #converterAutoKeepRunning),
+label:has(> #converterAutoLogin) { display: none !important; }
 
 .sm-picker {
   position: fixed; inset: 0; z-index: 100000; display: grid; place-items: center;

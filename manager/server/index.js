@@ -84,6 +84,8 @@ async function main() {
     ffprobePath: FFPROBE,
     log: logger.scope('converter')
   });
+  // Default place for converted copies ("keep originals" mode); EXTRA_ROOTS adds more.
+  fs.mkdirSync(path.join(DATA, 'converted'), { recursive: true });
   const outputRoots = () => [path.join(DATA, 'converted'), ...(process.env.EXTRA_ROOTS || '').split(':').filter(Boolean)];
   const allowedRoots = () => [...vehicles.roots(), ...outputRoots()];
   const allowed = createPathGuard(allowedRoots);
@@ -397,7 +399,7 @@ async function main() {
   r.add('POST', '/api/studio/browse', async (req, res, { body }) => {
     // Folder picker for the converter / viewer: only allowed roots and their subfolders.
     const roots = allowedRoots();
-    if (!body?.path) return { path: null, parent: null, entries: roots.map((p) => ({ name: vehicles.vehicleForPath(p)?.name || p, path: p, isDirectory: true })) };
+    if (!body?.path) return { path: null, parent: null, entries: roots.map((p) => ({ name: vehicles.vehicleForPath(p)?.name || (p === path.join(DATA, 'converted') ? 'Converted copies' : p), path: p, isDirectory: true })) };
     const abs = confined(body.path, allowed);
     const entries = (await readDir(abs).catch(() => [])).filter((e) => e.isDirectory && !e.name.startsWith('.'));
     const atRoot = roots.some((p) => path.resolve(p) === abs);
