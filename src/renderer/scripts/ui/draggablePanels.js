@@ -157,8 +157,19 @@ function constrainPanelsToViewport() {
         
         const offset = dragOffsets.get(panel);
         if (!offset) return;
-        
+
+        // Panels pinned in the telemetry rail are positioned by CSS, not by
+        // their drag offset; leave the saved offset alone for when the rail
+        // is turned off.
+        if (document.body.classList.contains('fd-rail')
+            && (panel.id === 'mapVis' || (panel.id === 'dashboardVis' && !panel.classList.contains('dashboard-vis-compact')))) {
+            return;
+        }
+
         const rect = panel.getBoundingClientRect();
+        // A panel that is not drawn yet (no clip loaded) measures 0×0 at the
+        // top-left corner; that is not "off screen", so do not move it.
+        if (rect.width === 0 || rect.height === 0) return;
         const viewportWidth = window.innerWidth;
         const viewportHeight = window.innerHeight;
         

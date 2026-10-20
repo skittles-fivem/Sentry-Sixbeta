@@ -29,10 +29,17 @@ export function initViewerLayout({ api = window.electronAPI, doc = document, win
         doc.documentElement.style.setProperty('--rail-dash-h', `${height}px`);
     }
 
+    let applied = null;
     function apply() {
         body.classList.toggle('fd-rail', enabled);
         if (toggle) toggle.checked = enabled;
         syncDashboardHeight();
+        if (applied === enabled) return;
+        const changed = applied !== null;
+        applied = enabled;
+        // Only an actual switch moves things; the first apply sets the
+        // starting layout before anything is drawn.
+        if (!changed) return;
         // Let the camera grid, resize handles and map re-measure.
         win.dispatchEvent?.(new Event('resize'));
         onLayoutChange?.(enabled);

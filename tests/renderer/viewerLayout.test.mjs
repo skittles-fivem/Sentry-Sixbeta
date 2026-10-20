@@ -27,12 +27,13 @@ test('telemetry rail is on by default and turns off from the setting, saving the
   await layout.ready;
   assert.equal(env.doc.body.classList.contains('fd-rail'), true);
   assert.equal(env.toggle.checked, true);
-  assert.ok(env.resizes() > 0, 'camera grid is asked to re-measure');
+  assert.equal(env.resizes(), 0, 'nothing re-measures until the layout actually switches');
 
   env.toggle.checked = false;
   env.toggle.listeners.change();
   assert.equal(env.doc.body.classList.contains('fd-rail'), false);
   assert.equal(saved.telemetryRail, false);
+  assert.equal(env.resizes(), 1, 'switching the rail asks the camera grid and map to re-measure');
 });
 
 test('a saved "off" choice is restored', async () => {
