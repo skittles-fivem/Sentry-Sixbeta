@@ -26,6 +26,8 @@ Sentry Studio is one of four free tools for Tesla owners from the [Sentry Six](h
 | [Sentry Drive](https://github.com/Sentry-Six/Sentry-Drive) | Desktop drive history and FSD analytics, processed locally |
 | [Sentry Connect](https://sentry-six.com/sentry-connect/) | iPhone companion app for Sentry USB (App Store, iOS 17+) |
 
+**Sentry Manager** ([`manager/`](manager/README.md), Docker) is a self-hosted web UI on port 9000 for a TeslaCam archive on an SMB share: per-day sizes, purging old days, and automatic re-encoding that keeps clips playable here with their telemetry.
+
 Not affiliated with Tesla, Inc. Unrelated to the Sentry (sentry.io) error-monitoring service and the "Sentry Studio" product at sentrystudio.app.
 
 ## Features

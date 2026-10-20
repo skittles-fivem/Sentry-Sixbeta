@@ -1,0 +1,38 @@
+# Sentry Manager: TeslaCam footage manager, web UI on http://<docker-host>:9000
+#
+#   cp .env.example .env    # then fill in your SMB share and password
+#   docker compose up -d --build
+services:
+  sentry-manager:
+    build: .
+    image: sentry-manager:latest
+    container_name: sentry-manager
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    env_file: .env
+    volumes:
+      # State database + scratch space for encodes. Keep this on local disk,
+      # not on the share.
+      - ./data:/data
+    # Lets the container mount the SMB share itself (SMB_SHARE in .env).
+    # Not needed if you mount the footage yourself (see README).
+    cap_add:
+      - SYS_ADMIN
+      - DAC_READ_SEARCH
+    security_opt:
+      - apparmor:unconfined
+      # - label=disable          # SELinux hosts (Fedora/RHEL)
+
+    # ---- Intel / AMD GPU (VAAPI, Quick Sync): uncomment
+    # devices:
+    #   - /dev/dri:/dev/dri
+
+    # ---- NVIDIA GPU (needs the NVIDIA Container Toolkit): uncomment
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
