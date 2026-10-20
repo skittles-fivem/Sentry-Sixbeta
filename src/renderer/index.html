@@ -17,6 +17,38 @@
 
 <body>
     <div class="app-container">
+
+        <!-- App bar: workspace navigation and global actions -->
+        <header id="appTopBar" class="app-topbar">
+            <div class="app-brand" aria-hidden="true">
+                <span class="app-brand-mark"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></span>
+                <span class="app-brand-name">Sentry Studio</span>
+            </div>
+            <div id="clipDriveTabBar" class="clip-drive-tab-bar" role="tablist" aria-label="Studio workspaces" data-i18n="ui.converter.workspaceTabs" data-i18n-attr="aria-label">
+                    <button type="button" class="clip-drive-tab active" id="clipsTabBtn" data-panel="clips" role="tab" aria-controls="clipList" aria-selected="true" tabindex="0" data-i18n="ui.converter.navClips">Clips</button>
+                    <button type="button" class="clip-drive-tab" id="drivesTabBtn" data-panel="drives" role="tab" aria-controls="driveList" aria-selected="false" tabindex="-1">
+                        <span data-i18n="ui.converter.navDrives">Drives</span>
+                        <span id="drivesTabCount" class="tab-count"></span>
+                    </button>
+                    <button type="button" class="clip-drive-tab" id="converterTabBtn" data-panel="converter" role="tab" aria-controls="converterWorkspace" aria-selected="false" tabindex="-1" data-i18n="ui.converter.navConverter">Converter</button>
+                </div>
+            <span class="app-topbar-spacer"></span>
+            <div class="app-topbar-actions">
+                <button id="supportChatBtn" class="control-btn support-chat-control-btn"
+                    data-i18n-title="ui.playback.supportChat" title="Support Chat">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                    </svg>
+                </button>
+                <button id="settingsBtn" class="control-btn settings-btn" data-i18n-title="ui.playback.settings"
+                    title="Settings">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                        <path
+                            d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" />
+                    </svg>
+                </button>
+            </div>
+        </header>
         <!-- File Drop / Video Area -->
         <div class="video-container" id="videoContainer">
             <div class="drop-overlay" id="dropOverlay">
@@ -163,15 +195,6 @@
                             <span class="material-symbols-outlined mi-md">folder_open</span>
                         </button>
                     </div>
-                </div>
-                <!-- Tab bar - always visible -->
-                <div id="clipDriveTabBar" class="clip-drive-tab-bar" role="tablist" aria-label="Studio workspaces" data-i18n="ui.converter.workspaceTabs" data-i18n-attr="aria-label">
-                    <button type="button" class="clip-drive-tab active" id="clipsTabBtn" data-panel="clips" role="tab" aria-controls="clipList" aria-selected="true" tabindex="0" data-i18n="ui.converter.navClips">Clips</button>
-                    <button type="button" class="clip-drive-tab" id="drivesTabBtn" data-panel="drives" role="tab" aria-controls="driveList" aria-selected="false" tabindex="-1">
-                        <span data-i18n="ui.converter.navDrives">Drives</span>
-                        <span id="drivesTabCount" class="tab-count"></span>
-                    </button>
-                    <button type="button" class="clip-drive-tab" id="converterTabBtn" data-panel="converter" role="tab" aria-controls="converterWorkspace" aria-selected="false" tabindex="-1" data-i18n="ui.converter.navConverter">Converter</button>
                 </div>
                 <div id="clipList" class="clip-list" role="tabpanel" aria-labelledby="clipsTabBtn"></div>
                 <!-- Drives list panel -->
@@ -923,24 +946,11 @@
                 <button id="mySharedClipsBtn" class="control-btn shared-clips-btn" title="My Shared Clips">
                     <span class="material-symbols-outlined mi-sm">share</span>
                 </button>
-                <button id="supportChatBtn" class="control-btn support-chat-control-btn"
-                    data-i18n-title="ui.playback.supportChat" title="Support Chat">
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                    </svg>
-                </button>
                 <div id="hardwareToggle" class="hardware-toggle" role="group" aria-label="Camera hardware"
                     title="HW4: six cameras. HW3: four cameras (HW3 cars have no pillar cameras).">
                     <button type="button" class="hardware-option" data-hardware="hw4">HW4</button>
                     <button type="button" class="hardware-option" data-hardware="hw3">HW3</button>
                 </div>
-                <button id="settingsBtn" class="control-btn settings-btn" data-i18n-title="ui.playback.settings"
-                    title="Settings">
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-                        <path
-                            d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" />
-                    </svg>
-                </button>
             </div>
             <!-- Layout options hidden -->
             <select id="multiLayoutSelect" style="display:none">

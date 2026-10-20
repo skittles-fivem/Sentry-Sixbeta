@@ -168,3 +168,75 @@ html[data-season] body.fx-welcome #seasonalFx {
 @media (prefers-reduced-motion: reduce) {
     #seasonalFx { display: none !important; }
 }
+
+/* ==========================================================================
+   App bar (stage 1 of the layout redesign)
+   Workspace tabs, Support and Settings live in a permanent bar at the top of
+   the window instead of inside the floating Clips panel. Everything that was
+   positioned against the top of the viewport moves down by its height.
+   ========================================================================== */
+:root { --app-topbar-h: 52px; }
+
+.app-topbar {
+    flex: none;
+    height: var(--app-topbar-h);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 14px 0 16px;
+    background: var(--panel-bg-solid);
+    border-bottom: 1px solid var(--border-color);
+    position: relative;
+    z-index: 150;
+    box-sizing: border-box;
+}
+.app-brand { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; color: var(--text-color); white-space: nowrap; }
+.app-brand-mark {
+    width: 30px; height: 30px; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center;
+    background: var(--accent-color); color: #0B0E13;
+}
+.app-topbar-spacer { flex: 1; }
+.app-topbar-actions { display: flex; align-items: center; gap: 8px; }
+
+/* The workspace tabs become the main navigation. */
+.app-topbar .clip-drive-tab-bar {
+    margin: 0;
+    padding: 4px;
+    gap: 4px;
+    background: var(--fd-inner);
+    border-color: var(--fd-border);
+    border-radius: 12px;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+.app-topbar .clip-drive-tab {
+    flex: none;
+    height: 34px;
+    padding: 0 16px;
+    font-size: 14px;
+    color: var(--text-secondary);
+    border-radius: 8px;
+}
+.app-topbar .clip-drive-tab:hover { background: var(--fd-raised); color: var(--text-color); }
+.app-topbar .clip-drive-tab.active { background: var(--accent-color); color: #0B0E13; box-shadow: none; }
+.app-topbar .clip-drive-tab.active .tab-count { background: rgba(11, 14, 19, 0.18); color: #0B0E13; }
+.app-topbar .control-btn { width: 38px; height: 38px; }
+
+/* Fixed-position surfaces that used to measure from the window top. */
+.clips-mode-docked .clip-browser { top: var(--app-topbar-h); }
+.clips-mode-collapsed .clip-browser { top: calc(50px + var(--app-topbar-h)); }
+.dashboard-vis { top: calc(20px + var(--app-topbar-h)); }
+.map-vis { top: calc(20px + var(--app-topbar-h)); }
+body > .dashboard-vis-compact.draggable:not(.fixed-to-camera) { top: calc(20px + var(--app-topbar-h)) !important; }
+.support-chat-panel { top: calc(80px + var(--app-topbar-h)); }
+
+/* The Converter now has its own tab in the app bar, so the Clips panel
+   steps aside instead of floating over the converter's header. */
+body.converter-mode .clip-browser { display: none; }
+body.converter-mode.clips-mode-docked .video-container { margin-left: 0; }
+
+@media (max-width: 720px) {
+    .app-brand-name { display: none; }
+    .app-topbar { gap: 10px; }
+    .app-topbar .clip-drive-tab { padding: 0 10px; }
+}

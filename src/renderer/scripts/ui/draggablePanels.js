@@ -76,7 +76,9 @@ export function initDraggablePanels(panels) {
             // Clamp so panel stays fully within viewport
             const minX = -baseLeft;
             const maxX = viewportWidth - panelWidth - baseLeft;
-            const minY = -baseTop;
+            // Keep panels below the app bar.
+            const topBarHeight = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--app-topbar-h')) || 0;
+            const minY = topBarHeight - baseTop;
             const maxY = viewportHeight - panelHeight - controlsBarHeight - baseTop;
             
             newX = Math.max(minX, Math.min(newX, maxX));
@@ -196,7 +198,7 @@ function constrainPanelsToViewport() {
             // Vertical: top or bottom
             if (centerY < viewportCenterY) {
                 // Closer to top
-                targetTop = margin;
+                targetTop = margin + (parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--app-topbar-h')) || 0);
             } else {
                 // Closer to bottom - account for controls bar
                 targetTop = viewportHeight - panelHeight - 80;
