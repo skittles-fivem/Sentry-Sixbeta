@@ -31,6 +31,8 @@ class Updater {
   constructor({ db, log, dataDir, appRoot, buildInfo = {}, isIdle = () => true, fetchImpl = globalThis.fetch, exit = (c) => process.exit(c) }) {
     Object.assign(this, { db, log, dataDir, appRoot, buildInfo, isIdle, fetch: fetchImpl, exit });
     this.appDir = path.join(dataDir, 'app');
+    // tests point this at a local fake of the GitHub API
+    this.apiBase = (process.env.UPDATE_API_BASE || 'https://api.github.com').replace(/\/$/, '');
     this.state = { checkedAt: null, latest: null, error: null, installing: false, progress: null };
   }
 
@@ -93,9 +95,9 @@ class Updater {
 
   async gh(pathname, { raw = false } = {}) {
     const { token } = this.settings();
-    const res = await this.fetch(`https://api.github.com${pathname}`, {
+    const res = await this.fetch(`${this.apiBase}${pathname}`, {
       headers: {
-        Accept: raw ? 'application/vnd.github+json' : 'application/vnd.github+json',
+        Accept: 'application/vnd.github+json',
         'User-Agent': 'sentry-manager',
         ...(token ? { Authorization: `Bearer ${token}` } : {})
       },
