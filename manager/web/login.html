@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Sign in · Sentry Manager</title>
+  <link rel="icon" type="image/png" href="/web/icon.png">
+  <link rel="stylesheet" href="/web/shell.css">
+  <style>
+    body { display: grid; place-items: center; min-height: 100vh; padding: 16px; }
+    .login { width: min(400px, 100%); background: var(--panel); border: 1px solid var(--border); border-radius: 22px; padding: 32px; }
+    .login .brand { padding: 0 0 26px; }
+    .login form { display: flex; flex-direction: column; gap: 14px; }
+    .login .input { width: 100%; }
+    .login .err { color: var(--danger); min-height: 20px; font-size: 13.5px; }
+  </style>
+</head>
+<body>
+  <main class="login">
+    <div class="brand">
+      <svg class="i" viewBox="0 0 24 24" aria-hidden="true" style="width:30px;height:30px;color:var(--accent);stroke-width:2"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>
+      <div class="brand-name"><b>Sentry</b><span>Manager</span></div>
+    </div>
+    <h2 id="title">Sign in</h2>
+    <p class="muted small" id="lead" style="margin:6px 0 20px">Use the account for this Sentry Manager.</p>
+    <form id="form">
+      <label class="field">User name<input class="input" name="username" autocomplete="username" required value="admin"></label>
+      <label class="field">Password<input class="input" name="password" type="password" autocomplete="current-password" required minlength="1"></label>
+      <label class="field" id="confirm-row" hidden>Confirm password<input class="input" name="confirm" type="password" autocomplete="new-password"></label>
+      <p class="err" id="err" role="alert"></p>
+      <button class="btn solid" type="submit" id="submit">Sign in</button>
+    </form>
+  </main>
+  <script>
+    (async () => {
+      const $ = (id) => document.getElementById(id);
+      const next = new URLSearchParams(location.search).get('next') || '/';
+      const safeNext = next.startsWith('/') && !next.startsWith('//') ? next : '/';
+      const me = await fetch('/api/auth/me').then((r) => r.json()).catch(() => ({}));
+      if (me.user) return location.replace(safeNext);
+      const setup = me.needsSetup;
+      if (setup) {
+        $('title').textContent = 'Create your account';
+        $('lead').textContent = 'This is the first start. Choose the user name and password that protect this Sentry Manager.';
+        $('confirm-row').hidden = false;
+        $('submit').textContent = 'Create account';
+        document.querySelector('[name=password]').autocomplete = 'new-password';
+        document.querySelector('[name=password]').minLength = 8;
+      }
+      $('form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const f = new FormData(e.target);
+        if (setup && f.get('password') !== f.get('confirm')) { $('err').textContent = 'The passwords do not match.'; return; }
+        $('submit').disabled = true;
+        const res = await fetch(setup ? '/api/auth/setup' : '/api/auth/login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-manager' },
+          body: JSON.stringify({ username: f.get('username'), password: f.get('password') })
+        }).catch(() => null);
+        $('submit').disabled = false;
+        if (res && res.ok) return location.replace(safeNext);
+        const data = res ? await res.json().catch(() => ({})) : {};
+        $('err').textContent = data.error || 'Could not reach Sentry Manager.';
+      });
+    })();
+  </script>
+</body>
+</html>

@@ -265,7 +265,8 @@
     devCheckPrerelease: async () => null, devInstallPrerelease: async () => ({ success: false }),
 
     getSetting: async (key) => {
-      if (key === 'defaultFolder' && startFolder) return startFolder;
+      // The Encoder tab never loads footage into the viewer behind it.
+      if (key === 'defaultFolder') return embed === 'encoder' ? null : startFolder;
       const all = await settings();
       if (Object.prototype.hasOwnProperty.call(all, key)) return all[key];
       return WEB_DEFAULTS[key];

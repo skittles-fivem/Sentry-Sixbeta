@@ -163,6 +163,29 @@ class VehicleManager extends EventEmitter {
     return this.shares.get(id) || null;
   }
 
+  /**
+   * The folder Sentry Studio opens for this vehicle: the TeslaCam folder when
+   * the share has one (Studio expects RecentClips/SentryClips/SavedClips
+   * directly inside), else the share root.
+   */
+  studioRoot(vehicle) {
+    const root = this.rootOf(vehicle);
+    this.studioRoots = this.studioRoots || new Map();
+    const cached = this.studioRoots.get(vehicle.id);
+    if (cached && cached.root === root && Date.now() - cached.at < 60000) return cached.value;
+    let value = root;
+    try {
+      const names = fs.readdirSync(root);
+      const hasClipFolders = names.some((n) => /^(recentclips|sentryclips|savedclips)$/i.test(n));
+      const tesla = names.find((n) => /^teslacam$/i.test(n));
+      if (!hasClipFolders && tesla) value = path.join(root, tesla);
+    } catch {
+      // share not reachable right now
+    }
+    this.studioRoots.set(vehicle.id, { root, value, at: Date.now() });
+    return value;
+  }
+
   /** Vehicle as the UI sees it: no password, plus live share status. */
   publicView(vehicle) {
     const share = this.shares.get(vehicle.id);
@@ -171,7 +194,7 @@ class VehicleManager extends EventEmitter {
       source.passwordSet = Boolean(source.password);
       delete source.password;
     }
-    return { id: vehicle.id, name: vehicle.name, timezone: vehicle.timezone, source, root: this.rootOf(vehicle), share: share ? share.status() : null };
+    return { id: vehicle.id, name: vehicle.name, timezone: vehicle.timezone, source, root: this.rootOf(vehicle), studioRoot: this.studioRoot(vehicle), share: share ? share.status() : null };
   }
 
   /** Every folder the manager may read from or write to. */

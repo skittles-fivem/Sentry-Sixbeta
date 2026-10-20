@@ -1,0 +1,718 @@
+'use strict';
+
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const icon = (name) => `<svg class="i" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(`sm:${k}`); return v === null ? d : JSON.parse(v); } catch { return d; } },
+    set(k, v) { try { localStorage.setItem(`sm:${k}`, JSON.stringify(v)); } catch { /* private mode */ } }
+  };
+
+  function bytes(n) {
+    if (n === null || n === undefined || !Number.isFinite(Number(n))) return '—';
+    const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+    let v = Number(n);
+    let i = 0;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return `${v.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+  }
+  const plural = (n, w) => `${Number(n || 0).toLocaleString()} ${w}${n === 1 ? '' : 's'}`;
+  const when = (ts) => (ts ? new Date(ts).toLocaleString() : '—');
+  function ago(ts) {
+    if (!ts) return 'never';
+    const s = Math.round((Date.now() - ts) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.round(s / 60)} min ago`;
+    if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+    return new Date(ts).toLocaleDateString();
+  }
+  const humanize = (s) => String(s || '').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+
+  async function api(path, opts = {}) {
+    const init = { credentials: 'same-origin', headers: { 'X-Requested-With': 'sentry-manager' } };
+    if (opts.method) init.method = opts.method;
+    if (opts.body !== undefined) {
+      init.method = init.method || 'POST';
+      init.headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(opts.body);
+    }
+    const res = await fetch(path, init);
+    if (res.status === 401) {
+      location.href = `/login?next=${encodeURIComponent(location.pathname + location.hash)}`;
+      throw new Error('Signed out');
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    return data;
+  }
+
+  function toast(msg, bad = false) {
+    const el = document.createElement('div');
+    el.className = `toast${bad ? ' bad' : ''}`;
+    el.textContent = msg;
+    $('toasts').append(el);
+    setTimeout(() => el.remove(), bad ? 9000 : 5000);
+  }
+
+  /** Confirm dialog; resolves true/false. */
+  function confirmDialog({ title, body, ok = 'Confirm', danger = false }) {
+    return new Promise((resolve) => {
+      const dlg = $('dialog');
+      $('dialog-form').innerHTML = `<h2>${esc(title)}</h2>${body}<div class="form-actions"><button class="btn" value="cancel">Cancel</button><button class="btn ${danger ? 'danger' : 'solid'}" value="ok">${esc(ok)}</button></div>`;
+      dlg.onclose = () => resolve(dlg.returnValue === 'ok');
+      dlg.returnValue = '';
+      dlg.showModal();
+    });
+  }
+
+  const state = {
+    route: 'overview',
+    vehicles: [],
+    vehicleId: store.get('vehicle', null),
+    notes: [],
+    footage: { category: 'all', date: '', offset: 0, data: null, selected: new Set(), expanded: new Set() },
+    system: null
+  };
+  const current = () => state.vehicles.find((v) => v.id === state.vehicleId) || state.vehicles[0] || null;
+
+  // ---------- shell ----------
+  const app = $('app');
+  if (store.get('collapsed', false)) app.classList.add('collapsed');
+  $('collapse').addEventListener('click', () => {
+    app.classList.toggle('collapsed');
+    store.set('collapsed', app.classList.contains('collapsed'));
+  });
+  $('reduce-effects').addEventListener('change', (e) => {
+    document.documentElement.classList.toggle('reduce-effects', e.target.checked);
+    api('/api/settings/appearance', { method: 'PUT', body: { reduceEffects: e.target.checked } }).catch(() => {});
+  });
+
+  function setBadge(id, text, cls = '') {
+    const b = $(id);
+    b.hidden = !text;
+    b.textContent = text || '';
+    b.className = `count ${cls}`;
+  }
+
+  async function loadVehicles() {
+    const { vehicles } = await api('/api/vehicles');
+    state.vehicles = vehicles;
+    if (!current() && vehicles.length) state.vehicleId = vehicles[0].id;
+    else if (current()) state.vehicleId = current().id;
+    const binItems = vehicles.reduce((n, v) => n + v.binItems, 0);
+    setBadge('badge-bin', binItems ? String(binItems) : '');
+  }
+
+  async function loadNotes() {
+    const { notifications } = await api('/api/notifications?open=1');
+    state.notes = notifications;
+    setBadge('badge-notes', notifications.length ? String(notifications.length) : '', 'alert');
+  }
+
+  function pills() {
+    if (!state.vehicles.length) {
+      return `<div class="pills"><a class="pill add" href="#/settings">${icon('plus')} Add your first vehicle</a></div>`;
+    }
+    return `<div class="pills" role="tablist" aria-label="Vehicles">${state.vehicles.map((v) => {
+      const s = v.share;
+      const dot = !s ? '' : s.healthy ? (s.writable === false ? 'warn' : 'ok') : 'bad';
+      const n = v.inventory ? plural(v.inventory.recordings, 'recording') : v.scanning ? 'scanning…' : 'not scanned yet';
+      return `<button class="pill${v.id === current()?.id ? ' active' : ''}" role="tab" aria-selected="${v.id === current()?.id}" data-vehicle="${esc(v.id)}">
+        <span class="row"><span class="dot ${dot}"></span>${esc(v.name)}</span><span class="sub">${esc(n)}</span></button>`;
+    }).join('')}</div>`;
+  }
+
+  function head(eyebrow, title, extra = '') {
+    return `<div class="page-head"><div><p class="eyebrow">${esc(eyebrow)}</p><h1>${esc(title)}</h1></div>
+      <div style="display:flex;gap:12px">${extra}<button class="btn" data-action="signout">Sign out</button></div></div>`;
+  }
+
+  const page = $('page');
+  page.addEventListener('click', async (e) => {
+    const pill = e.target.closest('[data-vehicle]');
+    if (pill) {
+      state.vehicleId = pill.dataset.vehicle;
+      store.set('vehicle', state.vehicleId);
+      state.footage.offset = 0;
+      state.footage.selected.clear();
+      return render();
+    }
+    const act = e.target.closest('[data-action]');
+    if (act && act.dataset.action === 'signout') {
+      await api('/api/auth/logout', { body: {} }).catch(() => {});
+      location.href = '/login';
+    }
+  });
+
+  // ---------- pages ----------
+  const pages = {};
+
+  pages.overview = async () => {
+    const v = current();
+    let html = head('Your archive workspace', 'Overview') + pills();
+    if (!v) {
+      html += `<div class="card"><h2>Add a vehicle</h2><p>Each vehicle has its own footage share (SMB) or folder. Add one in Settings to start.</p><div class="form-actions" style="justify-content:flex-start"><a class="btn solid" href="#/settings">Open settings</a></div></div>`;
+      page.innerHTML = html;
+      return;
+    }
+    const s = v.share || {};
+    const ready = s.healthy && s.writable !== false;
+    html += `<div class="toolbar"><div class="left">
+        <span class="chip ${ready ? '' : s.healthy ? 'amber' : 'red'}">${ready ? 'Management ready' : s.healthy ? 'Read-only share' : 'Share unavailable'}</span>
+        <span class="muted">${esc(v.timezone)}</span></div>
+      <div class="right"><a class="btn" href="#/settings/vehicle/${esc(v.id)}">Vehicle settings</a><button class="btn" id="refresh-inv">Refresh inventory</button></div></div>`;
+    const inv = v.inventory;
+    const used = s.totalBytes ? 1 - s.freeBytes / s.totalBytes : null;
+    html += `<div class="grid2">
+      <div class="card"><p class="card-label">Last discovered inventory</p><div class="big">${inv ? bytes(inv.bytes) : '—'}</div>
+        <p>${inv ? `${plural(inv.recordings, 'recording')} · all categories · ${ago(inv.scannedAt)}` : v.scanning ? 'Scanning…' : 'Not scanned yet'}</p></div>
+      <div class="card"><p class="card-label">Last observed free on ${esc(v.name)}</p><div class="big">${bytes(s.freeBytes)}</div>
+        <p>${s.totalBytes ? `${bytes(s.totalBytes)} volume capacity · ${Math.round(used * 100)}% used${v.binBytes ? ` · ${bytes(v.binBytes)} in the Recycle Bin` : ''}` : 'Capacity unknown'}</p>
+        ${used !== null ? `<div class="meter"><span class="${used > 0.95 ? 'bad' : used > 0.85 ? 'warn' : ''}" style="width:${Math.round(used * 100)}%"></span></div>` : ''}</div>
+    </div>
+    <div class="card row"><div><h2>Browse your archive</h2><p>Explore recordings by category and capture date. Files and existing event thumbnails are available in Footage.</p></div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap"><a class="btn" href="#/viewer">Open viewer</a><a class="btn" href="#/footage">Open footage</a></div></div>
+    <div class="card row"><div><h2>Encoder</h2><p id="enc-line">Convert footage to H.265 or AV1 with the Sentry Studio converter. Telemetry is copied into every frame and verified before an original is replaced.</p></div>
+      <a class="btn" href="#/encoder">Open encoder</a></div>`;
+    const notes = state.notes.filter((n) => !n.vehicleId || n.vehicleId === v.id);
+    html += `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h2>Current archive alerts</h2><button class="btn" id="refresh-alerts">Refresh current alerts</button></div>
+      <p class="muted small" style="margin-top:12px">${plural(notes.length, 'unresolved alert')}. Resolved alerts stay in Notifications.</p>
+      ${notes.length ? `<ul class="alerts">${notes.slice(0, 5).map((n) => `<li class="alert-item"><span class="dot ${n.level === 'critical' ? 'bad' : n.level === 'info' ? 'ok' : 'warn'}"></span><div><b>${esc(n.title)}</b><span>${esc(n.message || '')}</span></div><span class="muted small">${ago(n.updatedAt)}</span></li>`).join('')}</ul>`
+        : '<p style="margin:14px 0 18px">No unresolved storage or source incidents reported.</p>'}
+      <a class="btn" href="#/notifications">Open notifications</a></div>`;
+    page.innerHTML = html;
+    $('refresh-inv').onclick = () => api(`/api/vehicles/${v.id}/scan`, { body: {} }).then(() => toast('Refreshing the inventory…'), (err) => toast(err.message, true));
+    $('refresh-alerts').onclick = () => loadNotes().then(render);
+  };
+
+  pages.footage = async () => {
+    const v = current();
+    const f = state.footage;
+    let html = head('Your archive workspace', 'Footage') + pills();
+    if (!v) {
+      page.innerHTML = `${html}<div class="empty">Add a vehicle in Settings first.</div>`;
+      return;
+    }
+    const q = new URLSearchParams({ category: f.category, offset: String(f.offset), limit: '100' });
+    if (f.date) q.set('date', f.date);
+    let data;
+    try {
+      data = await api(`/api/vehicles/${v.id}/recordings?${q}`);
+    } catch (err) {
+      page.innerHTML = `${html}<div class="empty">${esc(err.message)}</div>`;
+      return;
+    }
+    f.data = data;
+    const shown = data.recordings;
+    const sel = [...f.selected];
+    const selRecs = shown.filter((r) => f.selected.has(r.id));
+    html += `<div class="filters">
+        <label class="field">Category<select class="input" id="f-cat">
+          ${['all', 'Recent', 'Sentry', 'Saved', 'Other'].map((c) => `<option value="${c}"${f.category === c ? ' selected' : ''}>${c === 'all' ? 'All categories' : `${c}`}</option>`).join('')}</select></label>
+        <label class="field">Capture date<input class="input" type="date" id="f-date" value="${esc(f.date)}"${data.dates.length ? ` min="${data.dates[data.dates.length - 1]}" max="${data.dates[0]}"` : ''}></label>
+        ${f.date ? '<button class="btn ghost" id="f-clear">Clear date</button>' : ''}
+      </div>
+      <p class="hint">${plural(data.total, 'recording')} shown${data.scanning ? ' · scanning…' : ''} · capture times use the vehicle timezone${data.scannedAt ? ` · inventory ${ago(data.scannedAt)}` : ''}</p>
+      <div class="selpanel"><div class="row">
+        <b class="count">${sel.length} selected</b>
+        <button class="btn" id="sel-trash"${sel.length ? '' : ' disabled'}>Move to trash</button>
+        <button class="btn green" id="sel-protect"${sel.length ? '' : ' disabled'}>Protect</button>
+        <button class="btn" id="sel-unprotect"${selRecs.some((r) => r.protected) ? '' : ' disabled'}>Unprotect</button>
+        <a class="btn green" href="#/encoder">Review conversion</a>
+      </div>
+      <details class="more"><summary>Conversion options</summary>
+        <p>Conversion runs folder by folder in the Encoder tab: choose this vehicle's folder there, pick H.265 or AV1 and the profile, and keep originals or replace them. Tesla telemetry is copied byte-for-byte into every frame and checked (Quick or Full verification) before anything is replaced. Protected recordings can still be converted; they are only protected from the Recycle Bin and policies.</p>
+      </details></div>
+      <div class="selrow"><button class="btn" id="sel-all"${shown.length ? '' : ' disabled'}>Select shown (up to 100)</button><button class="btn" id="sel-clear"${sel.length ? '' : ' disabled'}>Clear selection</button></div>`;
+    if (!shown.length) {
+      html += `<div class="empty">${data.error ? esc(data.error) : data.scanning ? 'Scanning the share…' : 'No recordings match. Try another category or date, or refresh the inventory.'}</div>`;
+    } else {
+      html += `<div class="recs">${shown.map((r) => recCard(v, r)).join('')}</div>`;
+      if (data.total > data.offset + shown.length || data.offset > 0) {
+        html += `<div class="form-actions" style="justify-content:center">
+          <button class="btn" id="pg-prev"${data.offset ? '' : ' disabled'}>Previous</button>
+          <span class="muted" style="align-self:center">${data.offset + 1}–${data.offset + shown.length} of ${data.total}</span>
+          <button class="btn" id="pg-next"${data.total > data.offset + shown.length ? '' : ' disabled'}>Next</button></div>`;
+      }
+    }
+    page.innerHTML = html;
+
+    $('f-cat').onchange = (e) => { f.category = e.target.value; f.offset = 0; render(); };
+    $('f-date').onchange = (e) => { f.date = e.target.value; f.offset = 0; render(); };
+    if ($('f-clear')) $('f-clear').onclick = () => { f.date = ''; f.offset = 0; render(); };
+    if ($('pg-prev')) $('pg-prev').onclick = () => { f.offset = Math.max(0, f.offset - 100); render(); };
+    if ($('pg-next')) $('pg-next').onclick = () => { f.offset += 100; render(); };
+    $('sel-all').onclick = () => { shown.forEach((r) => f.selected.add(r.id)); render(); };
+    $('sel-clear').onclick = () => { f.selected.clear(); render(); };
+    $('sel-trash').onclick = () => trash(v, [...f.selected]);
+    $('sel-protect').onclick = () => protect(v, [...f.selected], true);
+    $('sel-unprotect').onclick = () => protect(v, [...f.selected], false);
+    page.querySelectorAll('.rec').forEach((el) => {
+      const id = el.dataset.id;
+      el.querySelector('input[type=checkbox]').onchange = (e) => { if (e.target.checked) f.selected.add(id); else f.selected.delete(id); render(); };
+      el.querySelector('[data-play]').onclick = () => play(v, id);
+      el.querySelector('[data-files]').onclick = () => { if (f.expanded.has(id)) f.expanded.delete(id); else f.expanded.add(id); render(); };
+      el.querySelector('[data-protect]').onclick = (e) => protect(v, [id], e.currentTarget.dataset.protect !== 'on');
+      el.querySelector('[data-trash]')?.addEventListener('click', () => trash(v, [id]));
+    });
+    for (const id of f.expanded) loadFiles(v, id);
+  };
+
+  function recCard(v, r) {
+    const f = state.footage;
+    const chip = r.category === 'Saved' ? 'green' : r.category === 'Sentry' ? 'amber' : '';
+    const thumb = (r.thumbRel || r.frontRel)
+      ? `<img loading="lazy" alt="" src="/api/vehicles/${encodeURIComponent(v.id)}/recordings/${encodeURIComponent(r.id)}/thumbnail" onerror="this.replaceWith(Object.assign(document.createElement('span'),{textContent:'${esc(r.category)}'}))">`
+      : esc(r.category);
+    const range = r.start && r.end && r.end !== r.start ? ` – ${esc(r.end.slice(11))}` : '';
+    return `<article class="rec${f.selected.has(r.id) ? ' selected' : ''}" data-id="${esc(r.id)}">
+      <div class="rec-top">
+        <input type="checkbox" aria-label="Select ${esc(r.start)}"${f.selected.has(r.id) ? ' checked' : ''}>
+        <div class="thumb">${thumb}</div>
+        <div class="rec-info"><span class="when">${esc(r.start || r.day)}${range}</span>
+          <span class="meta"><span class="chip ${chip}">${esc(r.category)}</span><span>${plural(r.fileCount, 'file')}</span><span>${bytes(r.bytes)}</span>${r.eventAt ? `<span>event ${esc(r.eventAt.slice(11))}</span>` : ''}${r.cameras.length ? `<span>${plural(r.cameras.length, 'camera')}</span>` : ''}${r.protected ? '<span class="chip green">Protected</span>' : ''}</span>
+          <span class="orig">Original capture: ${esc(r.startKey ? `${r.startKey.slice(0, 10)}T${r.startKey.slice(11).replace(/-/g, ':')}` : r.day)} · ${esc(r.folder)}</span></div>
+        <div class="rec-actions"><button class="btn" data-play>Play recording</button><button class="btn" data-files>${f.expanded.has(r.id) ? 'Hide files' : 'Show files'}</button></div>
+      </div>
+      <div class="rec-bottom"><button class="btn${r.protected ? ' green' : ''}" data-protect="${r.protected ? 'on' : 'off'}">${r.protected ? 'Protected · unprotect' : 'Protect recording'}</button>
+        ${r.protected ? '' : '<button class="btn ghost" data-trash>Move to trash</button>'}</div>
+      ${f.expanded.has(r.id) ? `<ul class="files" id="files-${esc(r.id)}"><li><span>Loading…</span></li></ul>` : ''}
+    </article>`;
+  }
+
+  async function loadFiles(v, id) {
+    const el = document.getElementById(`files-${id}`);
+    if (!el) return;
+    try {
+      const d = await api(`/api/vehicles/${v.id}/recordings/${id}`);
+      const ev = d.event ? `<li><span>${esc([humanize(d.event.reason), d.event.city, d.event.street].filter(Boolean).join(' · ') || 'Event')}</span><span></span><span></span></li>` : '';
+      el.innerHTML = ev + d.files.map((f) => `<li><span title="${esc(f.rel)}">${esc(f.rel)}</span><span>${bytes(f.size)}</span><a href="/api/media?path=${encodeURIComponent(f.path)}" download>Download</a></li>`).join('');
+    } catch (err) {
+      el.innerHTML = `<li><span>${esc(err.message)}</span></li>`;
+    }
+  }
+
+  async function protect(v, ids, on) {
+    if (!ids.length) return;
+    await api(`/api/vehicles/${v.id}/protect`, { body: { ids, protected: on } }).then(() => toast(on ? 'Protected: policies and Move to trash will skip it.' : 'Protection removed.'), (err) => toast(err.message, true));
+    render();
+  }
+
+  async function trash(v, ids) {
+    if (!ids.length) return;
+    const recs = (state.footage.data?.recordings || []).filter((r) => ids.includes(r.id));
+    const total = recs.reduce((n, r) => n + r.bytes, 0);
+    const ok = await confirmDialog({
+      title: `Move ${plural(ids.length, 'recording')} to the Recycle Bin?`,
+      body: `<p>${bytes(total)} moves to the Recycle Bin on the same share. Nothing is deleted: restore it any time, or delete it forever from the Recycle Bin.</p>${recs.some((r) => r.protected) ? '<p>Protected recordings are skipped.</p>' : ''}`,
+      ok: 'Move to trash'
+    });
+    if (!ok) return;
+    try {
+      const out = await api(`/api/vehicles/${v.id}/trash`, { body: { ids } });
+      const why = out.skipped.length ? ` ${out.skipped.length} skipped (${[...new Set(out.skipped.map((s) => s.reason))].join(', ')}).` : '';
+      toast(`${plural(out.moved.length, 'recording')} moved to the Recycle Bin (${bytes(out.bytes)}).${why}`, out.skipped.length > 0 && !out.moved.length);
+      ids.forEach((id) => state.footage.selected.delete(id));
+    } catch (err) {
+      toast(err.message, true);
+    }
+    await loadVehicles().catch(() => {});
+    render();
+  }
+
+  async function play(v, id) {
+    try {
+      const d = await api(`/api/vehicles/${v.id}/recordings/${id}`);
+      // events open their own folder; drives open the clip folder they are in
+      openStudio('viewer', { folder: d.folderPath });
+    } catch (err) {
+      toast(err.message, true);
+    }
+  }
+
+  // ---------- embedded Studio (Viewer / Encoder) ----------
+  const frames = {};
+  function studioUrl(kind, extra = {}) {
+    const v = current();
+    const q = new URLSearchParams({ embed: kind, ...(v ? { root: v.studioRoot || v.root } : {}), ...extra });
+    return `/studio/index.html?${q}`;
+  }
+  function openStudio(kind, extra = {}) {
+    pendingFrame[kind] = studioUrl(kind, extra);
+    if (location.hash === `#/${kind}`) render();
+    else location.hash = `#/${kind}`;
+  }
+  const pendingFrame = {};
+  function showFrame(kind) {
+    const url = pendingFrame[kind] || frames[kind]?.dataset.src || studioUrl(kind);
+    delete pendingFrame[kind];
+    if (!frames[kind] || frames[kind].dataset.src !== url) {
+      frames[kind]?.remove();
+      const wrap = document.createElement('div');
+      wrap.className = 'frame-wrap';
+      wrap.dataset.src = url;
+      wrap.innerHTML = `<iframe title="Sentry Studio ${kind}" src="${esc(url)}" allow="fullscreen; clipboard-write"></iframe>`;
+      $('frames').append(wrap);
+      frames[kind] = wrap;
+    }
+    for (const [k, el] of Object.entries(frames)) el.hidden = k !== kind;
+  }
+  pages.viewer = () => {
+    page.innerHTML = '';
+    showFrame('viewer');
+  };
+  pages.encoder = () => {
+    page.innerHTML = '';
+    showFrame('encoder');
+  };
+  window.addEventListener('message', (e) => {
+    if (e.origin !== location.origin || e.data?.source !== 'sentry-studio') return;
+    if (e.data.type === 'showInFolder') {
+      state.footage.category = 'all';
+      location.hash = '#/footage';
+    }
+  });
+
+  pages.policies = async () => {
+    const v = current();
+    let html = head('Your archive workspace', 'Policies') + pills();
+    if (!v) {
+      page.innerHTML = `${html}<div class="empty">Add a vehicle in Settings first.</div>`;
+      return;
+    }
+    const { policy, preview } = await api(`/api/vehicles/${v.id}/policy`);
+    html += `<div class="card"><h2>Retention for ${esc(v.name)}</h2>
+      <p>Recordings older than the number of days below are moved to the Recycle Bin once a day. Nothing is ever deleted by a policy, and protected recordings are always skipped. Leave a field empty to keep that category forever.</p>
+      <form id="pol" style="margin-top:22px">
+        <label class="check" style="margin-bottom:18px"><input type="checkbox" name="enabled"${policy.enabled ? ' checked' : ''}> Run this policy every day</label>
+        <div class="keep">${['Recent', 'Sentry', 'Saved', 'Other'].map((c) => `<label class="field">Keep ${c} clips (days)<input class="input" type="number" min="1" max="3650" name="keep-${c}" value="${policy.keepDays[c] ?? ''}" placeholder="forever"></label>`).join('')}</div>
+        <div class="form" style="margin-top:16px"><label class="field">Run at (server time)<input class="input" type="time" name="runAt" value="${esc(policy.runAt)}"></label></div>
+        <div class="note${preview.recordings ? ' amber' : ''}">${preview.recordings ? `With these settings, the next run moves ${plural(preview.recordings, 'recording')} (${bytes(preview.bytes)}) to the Recycle Bin.` : 'With these settings, nothing would be moved right now.'}
+          ${policy.lastRunAt ? `<br>Last run ${when(policy.lastRunAt)}: ${policy.lastResult?.error ? esc(policy.lastResult.error) : `${policy.lastResult?.moved ?? 0} moved, ${policy.lastResult?.skipped ?? 0} skipped`}.` : ''}</div>
+        <div class="form-actions"><button class="btn" type="button" id="pol-run">Run now</button><button class="btn solid" type="submit">Save policy</button></div>
+      </form></div>`;
+    page.innerHTML = html;
+    const form = $('pol');
+    const read = () => {
+      const fd = new FormData(form);
+      return { enabled: fd.get('enabled') === 'on', runAt: fd.get('runAt'), keepDays: Object.fromEntries(['Recent', 'Sentry', 'Saved', 'Other'].map((c) => [c, fd.get(`keep-${c}`) || null])) };
+    };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await api(`/api/vehicles/${v.id}/policy`, { method: 'PUT', body: read() });
+        toast('Policy saved.');
+        render();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+    $('pol-run').onclick = async () => {
+      try {
+        await api(`/api/vehicles/${v.id}/policy`, { method: 'PUT', body: read() });
+        const p = await api(`/api/vehicles/${v.id}/policy`);
+        if (!p.preview.recordings) return toast('Nothing to move right now.');
+        if (!(await confirmDialog({ title: 'Run the policy now?', body: `<p>${plural(p.preview.recordings, 'recording')} (${bytes(p.preview.bytes)}) will move to the Recycle Bin. You can restore them from there.</p>`, ok: 'Run now' }))) return;
+        const out = await api(`/api/vehicles/${v.id}/policy/run`, { body: {} });
+        toast(`${plural(out.moved.length, 'recording')} moved to the Recycle Bin.`);
+        render();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+  };
+
+  pages.jobs = async () => {
+    const v = current();
+    const { jobs } = await api(`/api/jobs${v ? `?vehicle=${encodeURIComponent(v.id)}` : ''}`);
+    const running = jobs.filter((j) => j.status === 'running').length;
+    setBadge('badge-jobs', running ? String(running) : '', 'busy');
+    const chip = (s) => `<span class="chip ${s === 'done' ? 'green' : s === 'failed' ? 'red' : s === 'running' ? 'amber' : ''}">${esc(s)}</span>`;
+    page.innerHTML = head('Your archive workspace', 'Jobs') + pills() + `<div class="card">
+      ${jobs.length ? `<table class="table"><thead><tr><th>Job</th><th>Status</th><th>Details</th><th>Started</th><th>Took</th></tr></thead><tbody>
+        ${jobs.map((j) => `<tr><td><b>${esc(j.title)}</b><br><span class="muted small">${esc(j.type)}</span></td><td>${chip(j.status)}</td><td class="small">${esc(j.detail || '')}</td><td class="small">${when(j.startedAt)}</td>
+          <td class="small mono">${j.finishedAt ? `${Math.max(0, Math.round((j.finishedAt - j.startedAt) / 1000))} s` : '…'}</td></tr>`).join('')}</tbody></table>`
+        : '<p>No jobs yet. Scans, conversions, Recycle Bin actions and policy runs show up here.</p>'}</div>`;
+  };
+
+  pages.bin = async () => {
+    const v = current();
+    const { items } = await api(`/api/bin${v ? `?vehicle=${encodeURIComponent(v.id)}` : ''}`);
+    const total = items.reduce((n, i) => n + i.bytes, 0);
+    page.innerHTML = head('Your archive workspace', 'Recycle Bin', items.length ? '<button class="btn danger" id="bin-empty">Empty Recycle Bin</button>' : '') + pills() + `
+      <div class="note green" style="margin:0 0 20px">Nothing in the Recycle Bin is deleted automatically. Restore puts recordings back exactly where they were; only "Delete forever" and "Empty Recycle Bin" free the space.</div>
+      <div class="card">${items.length ? `<p class="muted" style="margin-bottom:12px">${plural(items.length, 'item')} · ${bytes(total)}</p>
+        <table class="table"><thead><tr><th>Recording</th><th>Size</th><th>Moved</th><th>Why</th><th></th></tr></thead><tbody>
+        ${items.map((i) => `<tr data-item="${esc(i.id)}"><td><b>${esc(i.label)}</b><br><span class="muted small">${plural(i.files.length, 'file')}${i.files.some((f) => f.conflict) ? ' · some files could not be restored (name taken)' : ''}</span></td>
+          <td class="mono small">${bytes(i.bytes)}</td><td class="small">${when(i.trashedAt)}</td><td class="small">${i.reason === 'policy' ? 'Policy' : 'You'}</td>
+          <td class="actions"><button class="btn sm" data-restore>Restore</button><button class="btn sm danger" data-delete>Delete forever</button></td></tr>`).join('')}</tbody></table>`
+        : '<p>The Recycle Bin is empty.</p>'}</div>`;
+    page.querySelectorAll('[data-item]').forEach((row) => {
+      const id = row.dataset.item;
+      const item = items.find((i) => i.id === id);
+      row.querySelector('[data-restore]').onclick = async () => {
+        try {
+          const out = await api(`/api/bin/${encodeURIComponent(id)}/restore`, { body: {} });
+          toast(out.conflicts ? `Restored ${out.restored} file(s); ${out.conflicts} could not be (a file with that name exists).` : 'Restored.', out.conflicts > 0);
+        } catch (err) {
+          toast(err.message, true);
+        }
+        await loadVehicles().catch(() => {});
+        render();
+      };
+      row.querySelector('[data-delete]').onclick = async () => {
+        if (!(await confirmDialog({ title: 'Delete forever?', body: `<p><b>${esc(item.label)}</b> (${bytes(item.bytes)}) will be permanently deleted from the share. This cannot be undone.</p>`, ok: 'Delete forever', danger: true }))) return;
+        try {
+          await api(`/api/bin/${encodeURIComponent(id)}/delete`, { body: { confirm: true } });
+          toast('Deleted.');
+        } catch (err) {
+          toast(err.message, true);
+        }
+        await loadVehicles().catch(() => {});
+        render();
+      };
+    });
+    if ($('bin-empty')) {
+      $('bin-empty').onclick = async () => {
+        if (!(await confirmDialog({ title: 'Empty the Recycle Bin?', body: `<p>${plural(items.length, 'item')} (${bytes(total)}) of ${esc(v ? v.name : 'all vehicles')} will be permanently deleted. This cannot be undone.</p>`, ok: 'Empty Recycle Bin', danger: true }))) return;
+        try {
+          const out = await api('/api/bin/empty', { body: { confirm: true, vehicle: v?.id || null } });
+          toast(`Deleted ${plural(out.deleted, 'item')} (${bytes(out.bytes)}).`, out.failed > 0);
+        } catch (err) {
+          toast(err.message, true);
+        }
+        await loadVehicles().catch(() => {});
+        render();
+      };
+    }
+  };
+
+  pages.notifications = async () => {
+    const { notifications } = await api('/api/notifications');
+    page.innerHTML = head('Your archive workspace', 'Notifications') + `<div class="card">
+      ${notifications.length ? `<ul class="alerts" style="margin:0">${notifications.map((n) => `<li class="alert-item" style="${n.resolvedAt ? 'opacity:.6' : ''}"><span class="dot ${n.resolvedAt ? '' : n.level === 'critical' ? 'bad' : n.level === 'info' ? 'ok' : 'warn'}"></span>
+        <div><b>${esc(n.title)}</b><span>${esc(n.message || '')}</span><br><span class="muted small">${when(n.createdAt)}${n.resolvedAt ? ` · resolved ${when(n.resolvedAt)}` : ''}</span></div>
+        ${n.resolvedAt ? '<span></span>' : `<button class="btn sm" data-dismiss="${n.id}">Dismiss</button>`}</li>`).join('')}</ul>` : '<p>No notifications.</p>'}</div>`;
+    page.querySelectorAll('[data-dismiss]').forEach((b) => {
+      b.onclick = async () => {
+        await api(`/api/notifications/${b.dataset.dismiss}/dismiss`, { body: {} }).catch(() => {});
+        await loadNotes();
+        render();
+      };
+    });
+  };
+
+  pages.settings = async (sub) => {
+    const editing = sub?.startsWith('vehicle/') ? sub.slice(8) : sub === 'vehicle-new' ? 'new' : null;
+    const [settings, upd, sys] = await Promise.all([api('/api/settings'), api('/api/updater'), api('/api/system').catch(() => null)]);
+    let html = head('Your archive workspace', 'Settings');
+    html += `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h2>Vehicles</h2><a class="btn" href="#/settings/vehicle-new">${icon('plus')} Add vehicle</a></div>
+      ${state.vehicles.length ? `<table class="table" style="margin-top:14px"><thead><tr><th>Name</th><th>Footage</th><th>Status</th><th></th></tr></thead><tbody>
+      ${state.vehicles.map((v) => `<tr><td><b>${esc(v.name)}</b><br><span class="muted small">${esc(v.timezone)}</span></td>
+        <td class="small mono">${esc(v.source.type === 'smb' ? v.source.share : v.source.path)}</td>
+        <td class="small">${v.share?.healthy ? (v.share.writable === false ? 'Read-only' : 'Connected') : esc(v.share?.lastError || 'Unavailable')}</td>
+        <td class="actions"><a class="btn sm" href="#/settings/vehicle/${esc(v.id)}">Edit</a></td></tr>`).join('')}</tbody></table>` : '<p style="margin-top:12px">No vehicles yet.</p>'}
+      ${editing ? vehicleForm(editing === 'new' ? null : state.vehicles.find((v) => v.id === editing)) : ''}</div>`;
+
+    html += `<div class="card"><h2>Updates</h2><p>Sentry Manager can update itself from GitHub. Pick the branch to follow.</p>
+      <form id="upd" class="form" style="margin-top:18px">
+        <label class="field">Repository<input class="input" name="repo" value="${esc(upd.settings.repo)}" placeholder="owner/name"></label>
+        <label class="field">Branch<select class="input" name="branch" id="upd-branch"><option>${esc(upd.settings.branch)}</option></select></label>
+        <label class="field">GitHub token (private repositories)<input class="input" name="token" type="password" placeholder="${upd.settings.tokenSet ? 'saved — leave empty to keep' : 'optional'}" autocomplete="off"></label>
+        <label class="field">Check every<select class="input" name="intervalHours">${[1, 3, 6, 12, 24].map((h) => `<option value="${h}"${upd.settings.intervalHours === h ? ' selected' : ''}>${h} hour${h > 1 ? 's' : ''}</option>`).join('')}</select></label>
+        <label class="check full"><input type="checkbox" name="enabled"${upd.settings.enabled ? ' checked' : ''}> Check for updates automatically</label>
+        <label class="check full"><input type="checkbox" name="autoInstall"${upd.settings.autoInstall ? ' checked' : ''}> Install them automatically when nothing is converting</label>
+      </form>
+      <dl class="kv" style="margin-top:18px">
+        <dt>Running</dt><dd class="mono">${esc(upd.current.sha ? upd.current.sha.slice(0, 7) : 'built-in image')} ${upd.current.branch ? `(${esc(upd.current.branch)})` : ''} · ${esc(upd.current.source)}</dd>
+        <dt>Latest on branch</dt><dd class="mono">${upd.latest ? `${esc(upd.latest.sha.slice(0, 7))} · ${esc(upd.latest.message)} · ${when(Date.parse(upd.latest.date))}` : upd.error ? esc(upd.error) : 'not checked yet'}</dd>
+      </dl>
+      ${upd.updateAvailable ? '<div class="note green">An update is available.</div>' : ''}
+      <div class="form-actions"><button class="btn" id="upd-branches" type="button">Load branches</button><button class="btn" id="upd-check" type="button">Check now</button>
+        <button class="btn" id="upd-save" type="button">Save</button><button class="btn solid" id="upd-install" type="button"${upd.installing ? ' disabled' : ''}>${upd.installing ? `Installing (${esc(upd.progress || '')})…` : 'Install latest and restart'}</button></div></div>`;
+
+    html += `<div class="card"><h2>Account</h2><form id="pw" class="form" style="margin-top:16px">
+        <label class="field">Current password<input class="input" type="password" name="current" autocomplete="current-password" required></label>
+        <label class="field">New password<input class="input" type="password" name="next" autocomplete="new-password" minlength="8" required></label>
+        <div class="full form-actions" style="margin-top:0"><button class="btn solid" type="submit">Change password</button></div></form></div>`;
+
+    if (sys) {
+      const caps = sys.converter.capabilities || {};
+      html += `<div class="card"><h2>System</h2><dl class="kv" style="margin-top:16px">
+        <dt>Converter</dt><dd>${sys.converter.ready ? `ready · replace originals ${esc(caps.replacement)} · cleanup ${esc(caps.ownershipCleanup)}` : `not ready (${esc(sys.converter.error || 'starting')})`}</dd>
+        <dt>Safe rename helper</dt><dd>${sys.nativeHelper ? 'installed' : 'missing (link + unlink fallback)'}</dd>
+        <dt>GPUs</dt><dd>${sys.gpu.gpus.length || sys.gpu.nvidia.length ? [...sys.gpu.nvidia.map((g) => `NVIDIA ${esc(g.name)} (driver ${esc(g.driver)})`), ...sys.gpu.gpus.filter((g) => g.vendor !== 'nvidia').map((g) => `${esc(g.name || g.vendorName)} · ${esc(g.node)}${g.passedThrough ? (g.encodes ? ` · encodes ${Object.entries(g.encodes).filter(([, x]) => x).map(([k]) => k.toUpperCase()).join(', ') || 'nothing'}` : '') : ' · not passed into the container'}`)].join('<br>') : 'none visible (the CPU encoders are used)'}</dd>
+        ${sys.gpu.hints.length ? `<dt>GPU hints</dt><dd>${sys.gpu.hints.map(esc).join('<br>')}</dd>` : ''}
+        <dt>Data volume free</dt><dd>${bytes(sys.dataFree)}</dd>
+        <dt>Server time zone</dt><dd>${esc(sys.timezone)}</dd>
+        <dt>Version</dt><dd class="mono">${esc(sys.version.sha ? sys.version.sha.slice(0, 12) : 'dev')}</dd></dl></div>`;
+    }
+    page.innerHTML = html;
+    wireSettings(upd, editing);
+  };
+
+  function vehicleForm(v) {
+    const s = v?.source || { type: 'smb', version: '3.0' };
+    return `<form id="veh" class="form" style="margin-top:22px;padding-top:22px;border-top:1px solid var(--border)">
+      <h3 class="full">${v ? `Edit ${esc(v.name)}` : 'Add a vehicle'}</h3>
+      <label class="field">Name<input class="input" name="name" required value="${esc(v?.name || '')}" placeholder="Daily Driver"></label>
+      <label class="field">Time zone<input class="input" name="timezone" value="${esc(v?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone)}" placeholder="America/Chicago"></label>
+      <div class="field full">Footage source<div class="seg" id="src-type"><button type="button" data-type="smb" class="${s.type !== 'path' ? 'on' : ''}">SMB share</button><button type="button" data-type="path" class="${s.type === 'path' ? 'on' : ''}">Folder in the container</button></div></div>
+      <div class="full form" data-src="smb"${s.type === 'path' ? ' hidden' : ''}>
+        <label class="field full">Share<input class="input" name="share" value="${esc(s.share || '')}" placeholder="//192.168.1.50/TeslaCam"></label>
+        <label class="field">User name<input class="input" name="username" value="${esc(s.username || '')}" autocomplete="off"></label>
+        <label class="field">Password<input class="input" name="password" type="password" placeholder="${s.passwordSet ? 'saved — leave empty to keep' : ''}" autocomplete="new-password"></label>
+        <label class="field">Domain (optional)<input class="input" name="domain" value="${esc(s.domain || '')}"></label>
+        <label class="field">SMB version<select class="input" name="version">${['3.1.1', '3.0', '2.1', '2.0', 'default'].map((x) => `<option${(s.version || '3.0') === x ? ' selected' : ''}>${x}</option>`).join('')}</select></label>
+        <label class="field full">Extra mount options (optional)<input class="input" name="options" value="${esc(s.options || '')}" placeholder="seal"></label>
+      </div>
+      <div class="full" data-src="path"${s.type === 'path' ? '' : ' hidden'}>
+        <label class="field">Folder<input class="input" name="path" value="${esc(s.path || '')}" placeholder="/footage/weekend-car"></label>
+        <p class="muted small" style="margin-top:8px">A folder you mounted into the container yourself (bind mount or Docker CIFS volume).</p>
+      </div>
+      <div class="full form-actions">${v ? '<button class="btn danger" type="button" id="veh-del">Remove vehicle</button>' : ''}<a class="btn" href="#/settings">Cancel</a><button class="btn solid" type="submit">${v ? 'Save' : 'Add vehicle'}</button></div>
+    </form>`;
+  }
+
+  function wireSettings(upd, editing) {
+    const veh = $('veh');
+    if (veh) {
+      let type = veh.querySelector('#src-type .on')?.dataset.type || 'smb';
+      veh.querySelectorAll('#src-type button').forEach((b) => {
+        b.onclick = () => {
+          type = b.dataset.type;
+          veh.querySelectorAll('#src-type button').forEach((x) => x.classList.toggle('on', x === b));
+          veh.querySelectorAll('[data-src]').forEach((x) => { x.hidden = x.dataset.src !== type; });
+        };
+      });
+      veh.onsubmit = async (e) => {
+        e.preventDefault();
+        const fd = new FormData(veh);
+        const body = { name: fd.get('name'), timezone: fd.get('timezone'), source: type === 'path'
+          ? { type: 'path', path: fd.get('path') }
+          : { type: 'smb', share: fd.get('share'), username: fd.get('username'), password: fd.get('password') || undefined, domain: fd.get('domain'), version: fd.get('version'), options: fd.get('options') } };
+        try {
+          const saved = editing === 'new' ? await api('/api/vehicles', { body }) : await api(`/api/vehicles/${encodeURIComponent(editing)}`, { method: 'PUT', body });
+          state.vehicleId = saved.id;
+          store.set('vehicle', saved.id);
+          toast('Saved. Connecting to the footage…');
+          await loadVehicles();
+          location.hash = '#/settings';
+        } catch (err) {
+          toast(err.message, true);
+        }
+      };
+      if ($('veh-del')) {
+        $('veh-del').onclick = async () => {
+          if (!(await confirmDialog({ title: 'Remove this vehicle?', body: '<p>Sentry Manager forgets the vehicle and unmounts its share. No footage is deleted.</p>', ok: 'Remove', danger: true }))) return;
+          await api(`/api/vehicles/${encodeURIComponent(editing)}`, { method: 'DELETE' }).catch((err) => toast(err.message, true));
+          await loadVehicles();
+          location.hash = '#/settings';
+        };
+      }
+    }
+    const updForm = $('upd');
+    const updBody = () => {
+      const fd = new FormData(updForm);
+      return { repo: fd.get('repo'), branch: fd.get('branch'), token: fd.get('token') || undefined, intervalHours: Number(fd.get('intervalHours')), enabled: fd.get('enabled') === 'on', autoInstall: fd.get('autoInstall') === 'on' };
+    };
+    $('upd-branches').onclick = async () => {
+      try {
+        await api('/api/updater/settings', { method: 'PUT', body: updBody() });
+        const { branches } = await api('/api/updater/branches');
+        const sel = $('upd-branch');
+        const cur = sel.value;
+        sel.innerHTML = branches.map((b) => `<option${b.name === cur ? ' selected' : ''}>${esc(b.name)}</option>`).join('');
+        toast(`${branches.length} branch${branches.length === 1 ? '' : 'es'} loaded.`);
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+    $('upd-save').onclick = () => api('/api/updater/settings', { method: 'PUT', body: updBody() }).then(() => toast('Update settings saved.'), (err) => toast(err.message, true));
+    $('upd-check').onclick = async () => {
+      await api('/api/updater/settings', { method: 'PUT', body: updBody() }).catch(() => {});
+      await api('/api/updater/check', { body: {} }).catch((err) => toast(err.message, true));
+      render();
+    };
+    $('upd-install').onclick = async () => {
+      if (!(await confirmDialog({ title: 'Install the latest version?', body: `<p>Sentry Manager downloads <b>${esc(updBody().branch)}</b>, checks it and restarts. Conversions in progress resume after the restart. If the new version does not start, the previous one comes back.</p>`, ok: 'Install and restart' }))) return;
+      try {
+        await api('/api/updater/settings', { method: 'PUT', body: updBody() });
+        await api('/api/updater/install', { body: {} });
+        toast('Installed. Restarting…');
+        setTimeout(() => location.reload(), 8000);
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+    $('pw').onsubmit = async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      try {
+        await api('/api/auth/password', { body: { current: fd.get('current'), next: fd.get('next') } });
+        toast('Password changed.');
+        e.target.reset();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+    void upd;
+  }
+
+  // ---------- routing ----------
+  let renderSeq = 0;
+  async function render() {
+    const seq = ++renderSeq;
+    const [route, ...rest] = (location.hash.replace(/^#\/?/, '') || 'overview').split('/');
+    state.route = pages[route] ? route : 'overview';
+    document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === state.route));
+    const label = document.querySelector(`#nav a[data-route="${state.route}"] span`)?.textContent || '';
+    $('crumb').textContent = `SentryManager${label ? ` / ${label}` : ''}`;
+    document.title = `${label || 'Overview'} · Sentry Manager`;
+    const embedded = state.route === 'viewer' || state.route === 'encoder';
+    $('topbar').hidden = embedded;
+    if (!embedded) for (const el of Object.values(frames)) el.hidden = true;
+    try {
+      await pages[state.route](rest.join('/'));
+    } catch (err) {
+      if (seq === renderSeq) page.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
+    }
+  }
+  window.addEventListener('hashchange', render);
+
+  // ---------- live updates ----------
+  function connect() {
+    const es = new EventSource('/api/events');
+    es.addEventListener('changed', async (e) => {
+      const { topics } = JSON.parse(e.data);
+      if (topics.includes('vehicles') || topics.includes('inventory') || topics.includes('bin')) await loadVehicles().catch(() => {});
+      if (topics.includes('notifications')) await loadNotes().catch(() => {});
+      const affects = {
+        overview: ['vehicles', 'inventory', 'notifications', 'bin'], footage: ['inventory'], jobs: ['jobs'],
+        bin: ['bin'], notifications: ['notifications'], policies: ['inventory']
+      }[state.route] || [];
+      if (topics.some((t) => affects.includes(t)) && !document.querySelector('dialog[open]') && !document.activeElement?.matches('input, select, textarea')) render();
+      if (topics.includes('jobs') && state.route !== 'jobs') {
+        api('/api/jobs?limit=50').then(({ jobs }) => {
+          const running = jobs.filter((j) => j.status === 'running');
+          setBadge('badge-jobs', running.length ? String(running.length) : '', 'busy');
+          setBadge('badge-encoder', running.some((j) => j.type === 'conversion') ? '●' : '', 'busy');
+        }).catch(() => {});
+      }
+    });
+  }
+
+  (async () => {
+    try {
+      const s = await api('/api/settings');
+      $('reduce-effects').checked = Boolean(s.appearance?.reduceEffects);
+      document.documentElement.classList.toggle('reduce-effects', Boolean(s.appearance?.reduceEffects));
+      await Promise.all([loadVehicles(), loadNotes()]);
+    } catch {
+      // shown by render
+    }
+    render();
+    connect();
+  })();
+})();
