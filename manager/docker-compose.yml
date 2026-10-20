@@ -1,22 +1,28 @@
-# Sentry Manager: TeslaCam footage manager, web UI on http://<docker-host>:9000
+# Sentry Manager: web UI on http://<docker-host>:9000
 #
-#   cp .env.example .env    # then fill in your SMB share and password
+#   cd manager
 #   docker compose up -d --build
+#
+# Sign in on first visit to create the account, then add vehicles (one SMB
+# share each) under Settings. Optional defaults go in .env (see .env.example).
 services:
   sentry-manager:
-    build: .
+    build:
+      context: ..
+      dockerfile: manager/Dockerfile
     image: sentry-manager:latest
     container_name: sentry-manager
     restart: unless-stopped
     ports:
       - "9000:9000"
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     volumes:
-      # State database + scratch space for encodes. Keep this on local disk,
-      # not on the share.
+      # Accounts, settings, job journals, thumbnails, converter staging and
+      # the default output folder. Keep it on local disk, not on a share.
       - ./data:/data
-    # Lets the container mount the SMB share itself (SMB_SHARE in .env).
-    # Not needed if you mount the footage yourself (see README).
+    # Lets the container mount each vehicle's SMB share itself.
     cap_add:
       - SYS_ADMIN
       - DAC_READ_SEARCH
@@ -24,9 +30,11 @@ services:
       - apparmor:unconfined
       # - label=disable          # SELinux hosts (Fedora/RHEL)
 
-    # ---- Intel / AMD GPU (VAAPI, Quick Sync): uncomment
+    # ---- AMD (dGPU or APU) / Intel GPU: uncomment
     # devices:
     #   - /dev/dri:/dev/dri
+    # The converter uses /dev/dri/renderD128. With several GPUs, map the one
+    # you want to that name instead, e.g. - /dev/dri/renderD129:/dev/dri/renderD128
 
     # ---- NVIDIA GPU (needs the NVIDIA Container Toolkit): uncomment
     # deploy:

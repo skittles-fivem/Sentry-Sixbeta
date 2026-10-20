@@ -1,0 +1,13 @@
+# Docker build context for manager/Dockerfile (built from the repo root)
+.git
+node_modules
+ffmpeg_bin
+release
+coverage
+tests
+manager/build
+manager/notes
+manager/test
+manager/data
+manager/.env
+**/.DS_Store
