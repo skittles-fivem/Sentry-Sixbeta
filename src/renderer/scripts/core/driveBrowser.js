@@ -5,6 +5,7 @@
 
 import { escapeHtml } from '../lib/utils.js';
 import { formatDriveDistance } from './driveGrouper.js';
+import { routeThumbnail } from './routeThumbnail.js';
 import { createOwnedResourceSlot } from '../../../shared/asyncLifecycle.mjs';
 
 // Injected dependencies
@@ -157,7 +158,13 @@ function createDriveItem(drive, hasClips, useMetric) {
     ).join('');
     const tagsRow = tagPills ? `<div class="drive-tags">${tagPills}</div>` : '';
 
+    const route = routeThumbnail(drive.points);
+    const routeHtml = route
+        ? `<div class="drive-route-thumb" aria-hidden="true"><svg viewBox="0 0 100 36" preserveAspectRatio="xMidYMid meet"><path d="${route.path}"/><circle class="rt-start" cx="${route.start[0]}" cy="${route.start[1]}" r="1.8"/><circle class="rt-end" cx="${route.end[0]}" cy="${route.end[1]}" r="1.8"/></svg></div>`
+        : '';
+
     item.innerHTML = `
+        ${routeHtml}
         <div class="drive-journey">
             <div class="journey-times">
                 <span class="jt-time">${escapeHtml(startTime)}</span>

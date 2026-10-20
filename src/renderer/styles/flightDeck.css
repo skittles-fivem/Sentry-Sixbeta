@@ -320,3 +320,39 @@ body.fd-rail .dashboard-vis:not(.dashboard-vis-compact) .right-cluster { min-wid
     box-shadow: none;
     border-right: 1px solid var(--border-color);
 }
+
+/* ==========================================================================
+   Drives (stage 3): Flight Deck cards with a route thumbnail
+   ========================================================================== */
+.drive-item {
+    border-radius: 14px;
+    background: var(--fd-card);
+    border-color: var(--fd-border);
+    box-shadow: none;
+    contain-intrinsic-size: auto 210px;
+}
+.drive-item:hover { background: var(--fd-raised); }
+.drive-route-thumb {
+    height: 72px;
+    margin: -2px -2px 0;
+    border-radius: 10px;
+    background:
+        linear-gradient(var(--fd-track) 0 0) 0 33% / 100% 1px no-repeat,
+        linear-gradient(var(--fd-track) 0 0) 0 70% / 100% 1px no-repeat,
+        linear-gradient(var(--fd-track) 0 0) 30% 0 / 1px 100% no-repeat,
+        linear-gradient(var(--fd-track) 0 0) 72% 0 / 1px 100% no-repeat,
+        var(--fd-inner);
+    border: 1px solid var(--fd-border);
+    overflow: hidden;
+}
+.drive-route-thumb svg { width: 100%; height: 100%; display: block; }
+.drive-route-thumb path { fill: none; stroke: var(--accent-color); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.drive-route-thumb .rt-start { fill: var(--fd-inner); stroke: var(--accent-color); stroke-width: 1.2; vector-effect: non-scaling-stroke; }
+.drive-route-thumb .rt-end { fill: var(--accent-color); }
+.drive-date-header { color: var(--text-muted); letter-spacing: 0.08em; text-transform: uppercase; font-size: 11px; }
+.tab-count:empty { display: none; }
+
+/* No clip loaded yet: the rail has nothing to show, so give the start screen
+   the full width. */
+body.fd-rail.fx-welcome .video-container { margin-right: 0; }
+body.fd-rail.fx-welcome::after { display: none; }
