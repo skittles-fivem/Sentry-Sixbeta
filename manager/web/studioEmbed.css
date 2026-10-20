@@ -1,0 +1,38 @@
+/* Sentry Studio running inside Sentry Manager.
+   Encoder tab: only the Converter page, exactly as in the desktop app. */
+html[data-embed="encoder"] #clipBrowser {
+  display: none !important;
+}
+
+/* Verification can never be Off in Sentry Manager (insurance); the shim
+   removes the option and the server upgrades Off to Quick. */
+#converterVerifyMode option[value="off"] {
+  display: none !important;
+}
+
+/* Desktop-only features */
+[data-web-hidden] { display: none !important; }
+
+.sm-picker {
+  position: fixed; inset: 0; z-index: 100000; display: grid; place-items: center;
+  background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(3px);
+  font: 14px/1.4 Inter, system-ui, sans-serif; color: #e6e9ef;
+}
+.sm-picker-box {
+  width: min(560px, calc(100vw - 32px)); max-height: min(640px, calc(100vh - 32px)); display: flex; flex-direction: column;
+  background: #10141b; border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 14px; overflow: hidden;
+}
+.sm-picker-head, .sm-picker-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 16px; }
+.sm-picker-head { border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+.sm-picker-foot { border-top: 1px solid rgba(255, 255, 255, 0.08); justify-content: flex-end; }
+.sm-picker-path { padding: 8px 16px; font: 12px ui-monospace, monospace; color: #b8bfcf; word-break: break-all; }
+.sm-picker-list { list-style: none; margin: 0; padding: 4px 8px 8px; overflow: auto; flex: 1; }
+.sm-picker-list button { all: unset; display: block; width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 8px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sm-picker-list button:hover, .sm-picker-list button:focus-visible { background: rgba(255, 255, 255, 0.07); outline: none; }
+.sm-picker-empty { padding: 12px; color: #8a93a3; }
+.sm-picker-foot button, .sm-picker-x {
+  border: 1px solid rgba(255, 255, 255, 0.16); background: #151b25; color: #e6e9ef; border-radius: 8px; padding: 7px 14px; cursor: pointer; font: inherit;
+}
+.sm-picker-ok { background: oklch(0.62 0.16 150) !important; border-color: transparent !important; color: #04140a !important; font-weight: 600 !important; }
+.sm-picker-ok:disabled { opacity: 0.5; cursor: default; }
+.sm-picker-x { padding: 4px 9px; }

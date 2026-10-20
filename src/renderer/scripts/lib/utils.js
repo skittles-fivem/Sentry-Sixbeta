@@ -23,6 +23,8 @@ export function escapeHtml(s) {
  */
 export function filePathToUrl(filePath) {
   const normalizedPath = filePath.replace(/\\/g, '/');
+  // Web version (Sentry Manager): the server streams footage over HTTP.
+  if (globalThis.__SENTRY_WEB__) return `/api/media?path=${encodeURIComponent(normalizedPath)}`;
   // encodeURI handles most characters but NOT # and ? which have special URL meaning
   // We need to encode those separately after encodeURI
   const encoded = encodeURI(normalizedPath)

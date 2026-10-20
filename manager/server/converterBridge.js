@@ -6,8 +6,9 @@
 //   GET  /api/converter/events?client=  SSE stream for converter:progress /
 //                                       converter:benchmarkProgress pushes
 // Two server-side rules on top of the desktop behaviour:
-//   - verification is never Off: telemetry checks are an insurance
-//     requirement, so 'off' becomes 'quick';
+//   - verification is never Off for a real conversion: telemetry checks are
+//     an insurance requirement, so 'off' becomes 'quick' (the benchmark, which
+//     only works on copies, keeps its Off/Quick/Full comparison);
 //   - folders must be inside the allowed roots (vehicle shares, output dirs).
 
 const path = require('path');
@@ -75,7 +76,7 @@ function createConverterBridge({ runtime, isAllowedPath, log }) {
     const channel = `converter:${name}`;
     const fn = handlers.get(channel);
     if (!channels.has(channel) || !fn) return { ok: false, error: { code: 'UNKNOWN_CHANNEL' } };
-    if (name === 'start' || name === 'setAuto' || name === 'runBenchmark') {
+    if (name === 'start' || name === 'setAuto') {
       clampVerify(payload);
       clampVerify(payload?.config);
     }
