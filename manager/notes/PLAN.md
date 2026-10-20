@@ -64,6 +64,30 @@ Saved so the work can resume without re-asking or re-mapping.
 3. Verify: converter tests in the image, Samba end-to-end, every tab at desktop and phone
    widths, adversarial review, then push.
 
+## Architecture (decided)
+
+- `manager/server/` (Node 24, built-ins only):
+  - `converterHost.js` runs `src/main/converter` unchanged via `createConverterRuntime` +
+    `createConverterLifecycle`. It injects `posixOwnedFs.js`, the Linux replacement for
+    the Windows-only owned remove/rename: identity checks (dev/ino/size/sha256), a
+    quarantine-rename remove and `renameat2(RENAME_NOREPLACE)` through
+    `native/noreplace-rename.c` (CIFS does server-side no-replace). It also injects
+    extended retryable network codes (EHOSTDOWN, ESTALE, EAGAIN).
+  - `converterBridge.js` maps ipc.js channels to `POST /api/converter/invoke/:channel` and
+    pushes progress over SSE. Verification is clamped to at least Quick (insurance).
+  - `vehicles.js` (one share each, `share.js` per vehicle, mounted at `/footage/<id>`),
+    `inventory.js` (recordings per vehicle), `recycleBin.js` (in-share rename to a
+    non-.mp4 name so the converter never touches trashed clips; manual empty only),
+    `policies.js` (move to bin only, protected skipped), `jobs.js`, `notifications.js`,
+    `auth.js` (login, cookie sessions), `updater.js` (GitHub branch), `fsApi.js` +
+    `media.js` (Range) for the viewer shim.
+- Browser: the manager shell (`manager/web/`, screenshot design) embeds the unmodified
+  Sentry Studio renderer (`src/renderer`) in an iframe with `web/electronApiShim.js`
+  (`window.electronAPI` over HTTP/SSE). The Encoder tab = Studio's converter panel;
+  Play recording = Studio viewer on that recording.
+- Docker build context is the repo root, so the image ships the same `src/` the desktop
+  app uses.
+
 ## Status
 
 - Done: merge of ai-testing, mapping (3 of 5 areas complete, converter-UI screenshots and
