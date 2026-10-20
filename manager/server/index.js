@@ -15,7 +15,7 @@ const { ManagerDB } = require('./db');
 const { Auth } = require('./auth');
 const { VehicleManager } = require('./vehicles');
 const { Inventory } = require('./inventory');
-const { RecycleBin } = require('./recycleBin');
+const { RecycleBin, formatBytes } = require('./recycleBin');
 const { Policies } = require('./policies');
 const { Jobs, Notifications } = require('./activity');
 const { Updater } = require('./updater');
@@ -503,19 +503,32 @@ async function main() {
     });
   }).catch((err) => log.error(`Converter unavailable: ${err.code || err.message}`));
 
+  // Clip results of a converter job (its counters only hold files and bytes).
+  function converterCounts(s) {
+    const out = { converted: 0, skipped: 0, failed: 0 };
+    for (const item of s.items || []) {
+      if (item?.kind !== 'video') continue;
+      if (item.state === 'completed' && item.eligibleVideo !== false) out.converted++;
+      else if (item.state === 'skipped') out.skipped++;
+      else if (item.state === 'failed') out.failed++;
+    }
+    return out;
+  }
+
   function mirrorConverterJob(s) {
     const externalId = `converter:${s.id}`;
     const src = s.config?.sourceRoot || '';
     const v = vehicles.vehicleForPath(src);
-    const c = s.counters || {};
-    const detail = [`${c.completed ?? 0} converted`, `${c.skipped ?? 0} skipped`, `${c.failed ?? 0} failed`].join(', ');
+    const c = converterCounts(s);
+    const saved = Number(s.counters?.savedBytes) || 0;
+    const detail = [`${c.converted} converted`, `${c.skipped} skipped`, `${c.failed} failed`].join(', ') + (saved > 0 ? ` · ${formatBytes(saved)} saved` : '');
     let jobId = db.jobByExternal(externalId)?.id;
     if (!jobId) jobId = jobs.start({ type: 'conversion', vehicleId: v?.id || null, title: `Convert ${v ? v.name : src} to ${String(s.config?.codec || '').toUpperCase()}`, externalId });
     const terminal = !CONVERTER_ACTIVE.has(s.state);
     const existing = db.jobByExternal(externalId);
     if (terminal && existing?.status === 'running') {
-      jobs.finish(jobId, { status: (c.failed ?? 0) > 0 || s.state === 'failed' ? 'failed' : s.state === 'cancelled' ? 'cancelled' : 'done', detail });
-      if ((c.failed ?? 0) > 0) {
+      jobs.finish(jobId, { status: c.failed > 0 || s.state === 'failed' ? 'failed' : s.state === 'cancelled' ? 'cancelled' : 'done', detail });
+      if (c.failed > 0) {
         notes.raise({ kind: 'conversion', level: 'warning', vehicleId: v?.id || null, dedupeKey: `conversion-failed:${s.id}`,
           title: `${c.failed} clip(s) could not be converted`, message: 'The originals were kept. Open the Encoder tab for details and Retry failed.' });
       }

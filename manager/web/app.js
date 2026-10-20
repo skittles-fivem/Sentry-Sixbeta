@@ -660,6 +660,14 @@
     void upd;
   }
 
+  // Phones show each table row as a stacked block; the cells carry their column name.
+  function labelTableCells(root) {
+    root.querySelectorAll('table.table').forEach((table) => {
+      const names = [...table.querySelectorAll('thead th')].map((th) => th.textContent.trim());
+      table.querySelectorAll('tbody tr').forEach((tr) => [...tr.children].forEach((td, i) => { if (names[i]) td.dataset.label = names[i]; }));
+    });
+  }
+
   // ---------- routing ----------
   let renderSeq = 0;
   async function render() {
@@ -675,6 +683,7 @@
     if (!embedded) for (const el of Object.values(frames)) el.hidden = true;
     try {
       await pages[state.route](rest.join('/'));
+      labelTableCells(page);
     } catch (err) {
       if (seq === renderSeq) page.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
     }
