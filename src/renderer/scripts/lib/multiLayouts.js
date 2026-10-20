@@ -1,21 +1,40 @@
-// Multi-cam layout preset.
-// 6-cam layout uses slots: tl, tc, tr, bl, bc, br (3×2 grid).
-// Users can drag cameras to rearrange them (custom order saved in settings).
+// Multi-camera layouts are supplied by the active dashcam profile.
+// The current player exposes six reusable slots: tl, tc, tr, bl, bc, br.
+
+import { DASHCAM_PROFILES } from '../../../shared/dashcamProfiles.mjs';
+
+function profileLayout(profileId, name) {
+  const profile = DASHCAM_PROFILES[profileId];
+  return {
+    name,
+    columns: 3,
+    slots: profile.layoutSlots.map(({ slot, camera }) => ({
+      slot,
+      camera,
+      label: camera ? profile.cameras[camera] : ''
+    }))
+  };
+}
+
+// HW3 cars record four cameras (no B-pillars): a 2×2 grid. The centre slots
+// stay empty and are hidden by the two-column grid mode.
+function teslaHw3Layout() {
+  const cameras = DASHCAM_PROFILES.tesla.cameras;
+  const slot = (id, camera) => ({ slot: id, camera, label: camera ? cameras[camera] : '' });
+  return {
+    name: 'HW3',
+    columns: 2,
+    slots: [
+      slot('tl', 'front'), slot('tc', null), slot('tr', 'back'),
+      slot('bl', 'left_repeater'), slot('bc', null), slot('br', 'right_repeater')
+    ]
+  };
+}
 
 export const MULTI_LAYOUTS = {
-  // Default 6-camera layout (3×2 grid)
-  six_default: {
-    name: 'Default',
-    columns: 3,
-    slots: [
-      { slot: 'tl', camera: 'left_pillar', label: 'Left Pillar' },
-      { slot: 'tc', camera: 'front', label: 'Front' },
-      { slot: 'tr', camera: 'right_pillar', label: 'Right Pillar' },
-      { slot: 'bl', camera: 'left_repeater', label: 'Left Repeater' },
-      { slot: 'bc', camera: 'back', label: 'Back' },
-      { slot: 'br', camera: 'right_repeater', label: 'Right Repeater' }
-    ]
-  }
+  six_default: profileLayout('tesla', 'Default'),
+  tesla_hw3: teslaHw3Layout(),
+  gm_surroundvision: profileLayout('gm_surroundvision', 'GM Surround Vision')
 };
 
 export const DEFAULT_MULTI_LAYOUT = 'six_default';

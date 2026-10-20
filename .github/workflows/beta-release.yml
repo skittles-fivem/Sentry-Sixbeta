@@ -1,0 +1,118 @@
+name: Beta Release
+
+# Every push to the ai-testing branch builds the Windows installer and publishes
+# it as a GitHub pre-release ("beta") on this repository. A release created with
+# the workflow token does not trigger build-release.yml, so this workflow builds
+# and uploads on its own.
+
+on:
+  push:
+    branches: [ai-testing]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: beta-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    # Every test (see tests.yml): unit tests on Windows, macOS and Linux, real
+    # FFmpeg conversions, and a real launch of the app. The beta is only built
+    # when they all pass.
+    uses: ./.github/workflows/tests.yml
+
+  build-windows-beta:
+    needs: tests
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 20
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Stamp beta version
+        # Only the CI copy of package.json changes; nothing is committed.
+        run: |
+          BASE_VERSION=$(node -p "require('./package.json').version.split('-')[0]")
+          VERSION="${BASE_VERSION}-beta.${GITHUB_RUN_NUMBER}"
+          npm pkg set version="$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Building $VERSION"
+
+      - name: Build Windows installer
+        run: npm run build:win
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Launch the built app and convert through it
+        # The packaged app (bundled FFmpeg, packed files) must start, load its
+        # screens without errors, convert real clips and quit cleanly.
+        run: node tests/smoke/launchApp.js --app "release/win-unpacked/Sentry Studio.exe"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-beta-${{ env.VERSION }}
+          retention-days: 30
+          path: |
+            release/SentryStudioSetup*.exe
+            release/SentryStudioSetup*.exe.blockmap
+            release/latest.yml
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${VERSION}"
+          # Notes cover only what changed since the previous beta release.
+          PREV_TAG=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 30 --json tagName,isPrerelease \
+            --jq '[.[] | select(.isPrerelease and (.tagName | test("-beta\\.")))][0].tagName // empty')
+          RANGE=""
+          if [ -n "$PREV_TAG" ]; then
+            git fetch --quiet --depth=200 origin "+refs/tags/${PREV_TAG}:refs/tags/${PREV_TAG}" "+${GITHUB_SHA}" || true
+            git fetch --quiet --deepen=200 origin || true
+            if PREV_SHA=$(git rev-list -n 1 "$PREV_TAG" 2>/dev/null) && git merge-base --is-ancestor "$PREV_SHA" HEAD; then
+              RANGE="${PREV_SHA}..HEAD"
+            fi
+          fi
+          {
+            echo "Automated beta build from \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA::7}."
+            echo
+            if [ -n "$RANGE" ]; then
+              echo "Changes since ${PREV_TAG}:"
+              echo
+              git log --reverse --no-merges --pretty='### %s (%h)%n%n%b%n' "$RANGE" \
+                | { grep -v -E '^(Co-Authored-By|Claude-Session):' || true; }
+            else
+              echo "Changes in this build:"
+              echo
+              git log -1 --pretty='### %s (%h)%n%n%b%n' | { grep -v -E '^(Co-Authored-By|Claude-Session):' || true; }
+            fi
+          } > release-notes.md
+          cat release-notes.md
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Sentry Studio ${VERSION} (beta)" \
+            --notes-file release-notes.md \
+            release/SentryStudioSetup*.exe \
+            release/SentryStudioSetup*.exe.blockmap \
+            release/latest.yml

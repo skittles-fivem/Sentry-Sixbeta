@@ -137,7 +137,9 @@ export function createClipItem(coll, title, typeClass) {
     
     // Get folder path from first group's first file
     let folderPath = null;
-    if (firstGroup && firstGroup.filesByCamera.size > 0) {
+    if (coll.deletion) {
+        folderPath = coll.deletion.allowed ? coll.deletion.path : null;
+    } else if (firstGroup && firstGroup.filesByCamera.size > 0) {
         const firstEntry = firstGroup.filesByCamera.values().next().value;
         if (firstEntry?.file?.path) {
             // Extract the parent folder path (e.g., /path/to/SentryClips/2024-01-15_10-30-00)
@@ -162,7 +164,9 @@ export function createClipItem(coll, title, typeClass) {
     const segmentText = groups.length === 1 ? t('ui.clipBrowser.segment') : t('ui.clipBrowser.segments');
     const subline = `${groups.length} ${segmentText} · ${Math.max(1, cameras.length)} cam`;
     const badgeClass = typeClass;
-    const badgeLabel = typeClass.charAt(0).toUpperCase() + typeClass.slice(1);
+    const badgeLabel = typeClass === 'custom' && coll.tag
+        ? coll.tag
+        : typeClass.charAt(0).toUpperCase() + typeClass.slice(1);
     
     // Build reason badge for SavedClips only (as text, not icon)
     let reasonBadge = '';
@@ -211,9 +215,12 @@ export function createClipItem(coll, title, typeClass) {
         };
     }
 
-    // Thumbnail hover preview for sentry/saved events
-    if ((typeClass === 'sentry' || typeClass === 'saved') && folderPath) {
-        attachThumbPreview(item, folderPath);
+    // Hover preview: Tesla's thumb.png (Sentry/Saved events) plus a filmstrip
+    // of the first segment's front camera for every clip type.
+    const stripVideoPath = filmstripSource(firstGroup);
+    const tesla = (typeClass === 'sentry' || typeClass === 'saved') && folderPath;
+    if (tesla || stripVideoPath) {
+        attachThumbPreview(item, tesla ? folderPath : null, stripVideoPath);
     }
 
     return item;
@@ -489,56 +496,89 @@ function showFinalDeleteConfirmModal(folderPath, collectionId) {
 
 // Cache of folder paths we've already checked for thumb.png
 const thumbExistsCache = new Map();
+// Filmstrip per clip path: strip path, null (none), or a pending promise.
+const filmstripCache = new Map();
+
+export function clearThumbnailCache() {
+    thumbExistsCache.clear();
+    filmstripCache.clear();
+}
+
+// The clip file a filmstrip is made from: front camera, else any camera.
+function filmstripSource(group) {
+    if (!group?.filesByCamera?.size) return null;
+    const entry = group.filesByCamera.get('front') || group.filesByCamera.values().next().value;
+    const filePath = entry?.file?.path;
+    return typeof filePath === 'string' && /\.mp4$/i.test(filePath) ? filePath : null;
+}
+
+async function teslaThumb(folderPath) {
+    if (!folderPath) return null;
+    const sep = folderPath.includes('\\') ? '\\' : '/';
+    const thumbPath = folderPath + sep + 'thumb.png';
+    if (!thumbExistsCache.has(thumbPath)) {
+        if (!window.electronAPI?.exists) return null;
+        thumbExistsCache.set(thumbPath, await window.electronAPI.exists(thumbPath));
+    }
+    return thumbExistsCache.get(thumbPath) ? thumbPath : null;
+}
+
+async function filmstrip(videoPath) {
+    if (!videoPath || typeof window.electronAPI?.getClipThumbnail !== 'function') return null;
+    if (!filmstripCache.has(videoPath)) {
+        const pending = Promise.resolve(window.electronAPI.getClipThumbnail(videoPath))
+            .catch(() => null)
+            .then((strip) => { filmstripCache.set(videoPath, strip || null); return strip || null; });
+        filmstripCache.set(videoPath, pending);
+    }
+    return filmstripCache.get(videoPath);
+}
 
 /**
- * Attach a thumbnail hover preview to a clip item.
- * Shows thumb.png from the event folder on mouseenter.
+ * Attach a hover preview to a clip item: Tesla's thumb.png for events that
+ * have one, and a filmstrip of frames from across the clip (made on first
+ * hover, or already made when the clip was converted).
  */
-function attachThumbPreview(item, folderPath) {
+function attachThumbPreview(item, folderPath, stripVideoPath) {
     let tooltip = null;
     let hideTimeout = null;
     let hovering = false;
 
-    const sep = folderPath.includes('\\') ? '\\' : '/';
-    const thumbPath = folderPath + sep + 'thumb.png';
+    const addImage = (target, filePath, className, onFail) => {
+        const img = document.createElement('img');
+        img.src = filePathToUrl(filePath);
+        img.alt = 'Preview';
+        if (className) img.className = className;
+        img.onerror = () => { img.remove(); onFail?.(); if (tooltip && !tooltip.querySelector('img')) { tooltip.remove(); tooltip = null; } };
+        target.appendChild(img);
+    };
 
-    item.addEventListener('mouseenter', async (e) => {
+    const show = () => {
+        if (!hovering || !tooltip || !document.body.contains(item)) return;
+        if (!tooltip.parentNode) document.body.appendChild(tooltip);
+        positionTooltip(tooltip, item);
+    };
+
+    item.addEventListener('mouseenter', async () => {
         hovering = true;
         clearTimeout(hideTimeout);
-
-        // Check cache first
-        if (thumbExistsCache.has(thumbPath)) {
-            if (!thumbExistsCache.get(thumbPath)) return; // known missing
-        } else if (window.electronAPI?.exists) {
-            const exists = await window.electronAPI.exists(thumbPath);
-            thumbExistsCache.set(thumbPath, exists);
-            if (!exists) return;
-        } else {
-            return; // no API to check
+        if (tooltip) { show(); return; }
+        const thumbPath = await teslaThumb(folderPath);
+        if (!hovering || !document.body.contains(item)) return;
+        tooltip = document.createElement('div');
+        tooltip.className = 'clip-thumb-tooltip';
+        if (thumbPath) {
+            addImage(tooltip, thumbPath, null, () => thumbExistsCache.set(thumbPath, false));
+            show();
         }
-
-        // If mouse left during the async check, don't show
-        if (!hovering) return;
-
-        // If the item was removed from the DOM during the async check, don't show
-        if (!document.body.contains(item)) return;
-
-        // Create tooltip if not already present
-        if (!tooltip) {
-            tooltip = document.createElement('div');
-            tooltip.className = 'clip-thumb-tooltip';
-            const img = document.createElement('img');
-            img.src = filePathToUrl(thumbPath);
-            img.alt = 'Thumbnail';
-            img.onerror = () => {
-                thumbExistsCache.set(thumbPath, false);
-                if (tooltip) { tooltip.remove(); tooltip = null; }
-            };
-            tooltip.appendChild(img);
+        // The strip may take a moment the first time; show it when ready.
+        const strip = await filmstrip(stripVideoPath);
+        if (strip && tooltip) {
+            addImage(tooltip, strip, 'clip-filmstrip', () => filmstripCache.set(stripVideoPath, null));
+            show();
+        } else if (!thumbPath) {
+            tooltip = null;
         }
-
-        document.body.appendChild(tooltip);
-        positionTooltip(tooltip, item);
     });
 
     item.addEventListener('mouseleave', () => {

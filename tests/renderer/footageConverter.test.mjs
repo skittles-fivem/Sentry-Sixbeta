@@ -1,0 +1,1408 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+
+import {
+  createFootageConverterController,
+  createSidebarPanelSwitcher,
+  formatBytes
+} from '../../src/renderer/scripts/features/footageConverter.js';
+
+class FakeClassList {
+  constructor() { this.values = new Set(); }
+  add(...names) { names.forEach((name) => this.values.add(name)); }
+  remove(...names) { names.forEach((name) => this.values.delete(name)); }
+  contains(name) { return this.values.has(name); }
+  toggle(name, force) {
+    const next = force === undefined ? !this.values.has(name) : Boolean(force);
+    if (next) this.values.add(name); else this.values.delete(name);
+    return next;
+  }
+}
+
+class FakeElement {
+  constructor({ value = '', checked = false, dataset = {} } = {}) {
+    this.value = value;
+    this.checked = checked;
+    this.dataset = dataset;
+    this.textContent = '';
+    this.hidden = false;
+    this.disabled = false;
+    this.style = {};
+    this.classList = new FakeClassList();
+    this.listeners = new Map();
+    this.attributes = new Map();
+    this.children = [];
+    this.ownerDocument = {
+      createElement: () => new FakeElement()
+    };
+  }
+  addEventListener(type, callback) {
+    const listeners = this.listeners.get(type) || [];
+    listeners.push(callback);
+    this.listeners.set(type, listeners);
+  }
+  async dispatch(type) {
+    const overrides = arguments[1] || {};
+    for (const listener of this.listeners.get(type) || []) {
+      await listener({ currentTarget: this, target: this, preventDefault() {}, ...overrides });
+    }
+  }
+  async click() { await this.dispatch('click'); }
+  focus() { this.focused = true; }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  removeAttribute(name) { this.attributes.delete(name); }
+  getAttribute(name) { return this.attributes.get(name); }
+  replaceChildren(...children) { this.children = children; }
+  append(...children) { this.children.push(...children); }
+}
+
+function option(dataset, checked = false) {
+  return new FakeElement({ dataset, checked });
+}
+
+function makeElements() {
+  const orderRows = ['SavedClips', 'SentryClips', 'RecentClips'].map((group) => ({
+    group,
+    row: new FakeElement({ dataset: { converterOrderGroup: group } }),
+    rank: new FakeElement(),
+    up: new FakeElement({ dataset: { converterOrderMove: 'up', converterOrderGroup: group } }),
+    down: new FakeElement({ dataset: { converterOrderMove: 'down', converterOrderGroup: group } })
+  }));
+  return {
+    sourcePath: new FakeElement(),
+    destinationPath: new FakeElement(),
+    sourceButton: new FakeElement(),
+    destinationButton: new FakeElement(),
+    groupOptions: [
+      option({ converterGroup: 'RecentClips' }, true),
+      option({ converterGroup: 'SavedClips' }, true),
+      option({ converterGroup: 'SentryClips' }, true)
+    ],
+    orderRows,
+    codecOptions: [option({ converterCodec: 'h265' }, true), option({ converterCodec: 'av1' })],
+    profileOptions: [
+      option({ converterProfile: 'conservative' }),
+      option({ converterProfile: 'balanced' }, true),
+      option({ converterProfile: 'aggressive' })
+    ],
+    outputOptions: [option({ converterOutput: 'separate' }, true), option({ converterOutput: 'replace' })],
+    replaceOption: new FakeElement(),
+    replaceInput: new FakeElement({ value: 'replace' }),
+    replaceCapability: new FakeElement(),
+    replacementConfirmation: new FakeElement(),
+    replacementWarning: new FakeElement(),
+    replacementConfirmationRow: new FakeElement(),
+    estimate: new FakeElement(),
+    startButton: new FakeElement(),
+    pauseButton: new FakeElement(),
+    resumeButton: new FakeElement(),
+    cancelButton: new FakeElement(),
+    retryButton: new FakeElement(),
+    dismissButton: new FakeElement(),
+    status: new FakeElement(),
+    currentFile: new FakeElement(),
+    currentProgress: new FakeElement(),
+    currentProgressFill: new FakeElement(),
+    elapsed: new FakeElement(),
+    countDiscovered: new FakeElement(),
+    countCompleted: new FakeElement(),
+    countSkipped: new FakeElement(),
+    countFailed: new FakeElement(),
+    countWaiting: new FakeElement(),
+    processedBytes: new FakeElement(),
+    reconnectBanner: new FakeElement(),
+    cleanupBanner: new FakeElement(),
+    errorRows: new FakeElement(),
+    pipeline: new FakeElement(),
+    pipelineStages: [
+      new FakeElement({ dataset: { phase: 'discover' } }),
+      new FakeElement({ dataset: { phase: 'encode' } }),
+      new FakeElement({ dataset: { phase: 'verify' } }),
+      new FakeElement({ dataset: { phase: 'save' } })
+    ],
+    summary: new FakeElement(),
+    summaryRetention: new FakeElement(),
+    summaryFiles: new FakeElement(),
+    summarySkipped: new FakeElement(),
+    summaryFailed: new FakeElement(),
+    summarySource: new FakeElement(),
+    summaryOutput: new FakeElement(),
+    summarySaved: new FakeElement(),
+    summaryPercent: new FakeElement(),
+    summaryAssets: new FakeElement(),
+    summaryElapsed: new FakeElement(),
+    summaryGroups: new FakeElement()
+  };
+}
+
+function emptyCounters() {
+  return {
+    files: 0,
+    sourceVideoBytes: 0,
+    outputVideoBytes: 0,
+    savedBytes: 0,
+    copiedAssetBytes: 0,
+    groups: {
+      RecentClips: { files: 0, sourceBytes: 0, outputBytes: 0, savedBytes: 0 },
+      SavedClips: { files: 0, sourceBytes: 0, outputBytes: 0, savedBytes: 0 },
+      SentryClips: { files: 0, sourceBytes: 0, outputBytes: 0, savedBytes: 0 }
+    }
+  };
+}
+
+function activeSnapshot(overrides = {}) {
+  return {
+    id: 'job-1',
+    state: 'encoding',
+    revision: 4,
+    createdAt: 1_000,
+    updatedAt: 6_000,
+    activeItemId: 'item-2',
+    config: {
+      sourceRoot: 'D:\\TeslaCam',
+      destinationRoot: 'E:\\Converted',
+      codec: 'h265',
+      profileId: 'balanced',
+      networkMode: 'auto',
+      outputMode: 'separate',
+      includedGroups: ['RecentClips', 'SavedClips', 'SentryClips'],
+      replacementConfirmed: false
+    },
+    items: [
+      { id: 'item-1', state: 'completed', relativePath: 'RecentClips/first-front.mp4', sourceBytes: 1_000, outputBytes: 800 },
+      { id: 'item-2', state: 'processing', relativePath: 'SentryClips/event/front.mp4', sourceBytes: 2_000 },
+      { id: 'item-3', state: 'queued', relativePath: 'SavedClips/next-front.mp4', sourceBytes: 3_000 },
+      { id: 'item-4', state: 'skipped', relativePath: 'RecentClips/already-hevc.mp4', sourceBytes: 4_000 },
+      { id: 'item-5', state: 'failed', relativePath: 'SentryClips/bad.mp4', sourceBytes: 5_000, failure: { code: 'unsupported-codec', retryable: false } }
+    ],
+    counters: {
+      ...emptyCounters(),
+      files: 1,
+      sourceVideoBytes: 1_000,
+      outputVideoBytes: 800,
+      savedBytes: 200,
+      groups: {
+        ...emptyCounters().groups,
+        RecentClips: { files: 1, sourceBytes: 1_000, outputBytes: 800, savedBytes: 200 }
+      }
+    },
+    summary: null,
+    ...overrides
+  };
+}
+
+function fakeApi({ current = null, replacement = 'available' } = {}) {
+  const listeners = new Set();
+  const calls = [];
+  const ok = (value) => ({ ok: true, value });
+  return {
+    calls,
+    listeners,
+    emit(payload) { listeners.forEach((listener) => listener(payload)); },
+    async chooseConverterFolder(purpose) {
+      calls.push(['choose', purpose]);
+      return ok(purpose === 'source' ? 'D:\\TeslaCam' : 'E:\\Converted');
+    },
+    async getConverterCapabilities() {
+      return ok({
+        separatePublication: 'hardlink-cleanup-pending',
+        ownershipCleanup: 'unavailable',
+        replacement
+      });
+    },
+    async getCurrentConverterJob() { return ok(current); },
+    async startConverter(config) { calls.push(['start', config]); return ok({ jobId: 'job-new' }); },
+    async pauseConverter(id) { calls.push(['pause', id]); return ok(activeSnapshot({ id, state: 'paused', revision: 5 })); },
+    async resumeConverter(id) { calls.push(['resume', id]); return ok(activeSnapshot({ id, state: 'waiting', revision: 6 })); },
+    async cancelConverter(id) { calls.push(['cancel', id]); return ok(activeSnapshot({ id, state: 'cancelled', revision: 7 })); },
+    async retryFailedConverter(id) { calls.push(['retry', id]); return ok(activeSnapshot({ id, state: 'waiting', revision: 8 })); },
+    async dismissConverterSummary(id) { calls.push(['dismiss', id]); return ok(activeSnapshot({ id, state: 'completed', revision: 99, summary: null, summaryDismissed: true })); },
+    onConverterProgress(listener) { listeners.add(listener); return () => listeners.delete(listener); }
+  };
+}
+
+test('defaults to H.265, Balanced, separate output, all groups, and no estimate', async () => {
+  const elements = makeElements();
+  const api = fakeApi();
+  const controller = createFootageConverterController({ api, elements });
+
+  await controller.init();
+
+  assert.equal(elements.codecOptions[0].checked, true);
+  assert.equal(elements.profileOptions[1].checked, true);
+  assert.equal(elements.outputOptions[0].checked, true);
+  assert.deepEqual(elements.groupOptions.map((entry) => entry.checked), [true, true, true]);
+  assert.equal(elements.estimate.textContent, '');
+});
+
+test('picks source and destination only through the narrow converter API', async () => {
+  const elements = makeElements();
+  const api = fakeApi();
+  const controller = createFootageConverterController({ api, elements });
+  await controller.init();
+
+  await elements.sourceButton.click();
+  await elements.destinationButton.click();
+
+  assert.equal(elements.sourcePath.value, 'D:\\TeslaCam');
+  assert.equal(elements.destinationPath.value, 'E:\\Converted');
+  assert.deepEqual(api.calls.slice(0, 2), [['choose', 'source'], ['choose', 'destination']]);
+});
+
+test('validates required paths and group selection before starting', async () => {
+  const elements = makeElements();
+  const api = fakeApi();
+  const notices = [];
+  const controller = createFootageConverterController({ api, elements, notify: (message) => notices.push(message) });
+  await controller.init();
+
+  await elements.startButton.click();
+  assert.match(notices.at(-1), /source/i);
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  elements.destinationPath.value = 'E:\\Converted';
+  elements.groupOptions.forEach((entry) => { entry.checked = false; });
+  await elements.startButton.click();
+
+  assert.match(notices.at(-1), /group/i);
+  assert.equal(api.calls.some(([name]) => name === 'start'), false);
+});
+
+test('builds the exact start DTO from selected controls', async () => {
+  const elements = makeElements();
+  const api = fakeApi();
+  const controller = createFootageConverterController({ api, elements });
+  await controller.init();
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  elements.destinationPath.value = 'E:\\Converted';
+  elements.codecOptions[0].checked = false;
+  elements.codecOptions[1].checked = true;
+  elements.profileOptions[1].checked = false;
+  elements.profileOptions[2].checked = true;
+  elements.groupOptions[1].checked = false;
+
+  await elements.startButton.click();
+
+  assert.deepEqual(api.calls.find(([name]) => name === 'start')[1], {
+    sourceRoot: 'D:\\TeslaCam',
+    destinationRoot: 'E:\\Converted',
+    codec: 'av1',
+    profileId: 'aggressive',
+    networkMode: 'auto',
+    outputMode: 'separate',
+    includedGroups: ['RecentClips', 'SentryClips'],
+    groupOrder: ['SavedClips', 'SentryClips', 'RecentClips'],
+    replacementConfirmed: false,
+    concurrency: 5,
+    verifyMode: 'quick'
+  });
+});
+
+test('reorders processing groups independently and submits the new order', async () => {
+  const elements = makeElements();
+  const api = fakeApi();
+  const controller = createFootageConverterController({ api, elements });
+  await controller.init();
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  elements.destinationPath.value = 'E:\\Converted';
+  elements.groupOptions[2].checked = false;
+
+  await elements.orderRows[2].up.click();
+  await elements.orderRows[2].up.click();
+  await elements.startButton.click();
+
+  assert.deepEqual(api.calls.find(([name]) => name === 'start')[1].groupOrder,
+    ['RecentClips', 'SavedClips', 'SentryClips']);
+  assert.deepEqual(api.calls.find(([name]) => name === 'start')[1].includedGroups,
+    ['RecentClips', 'SavedClips']);
+  assert.deepEqual(elements.orderRows.map(({ rank }) => rank.textContent), ['2', '3', '1']);
+});
+
+test('restores processing order and disables reorder controls during an active run', async () => {
+  const elements = makeElements();
+  const current = activeSnapshot({
+    config: { ...activeSnapshot().config, groupOrder: ['SentryClips', 'RecentClips', 'SavedClips'] }
+  });
+  const controller = createFootageConverterController({ api: fakeApi({ current }), elements });
+  await controller.init();
+
+  assert.deepEqual(elements.orderRows.map(({ rank }) => rank.textContent), ['3', '1', '2']);
+  assert.ok(elements.orderRows.every(({ up, down }) => up.disabled && down.disabled));
+});
+
+test('visibly disables replace-original when the runtime capability is unavailable', async () => {
+  const elements = makeElements();
+  const controller = createFootageConverterController({ api: fakeApi({ replacement: 'unavailable' }), elements });
+
+  await controller.init();
+
+  assert.equal(elements.replaceInput.disabled, true);
+  assert.equal(elements.replaceOption.getAttribute('aria-disabled'), 'true');
+  assert.match(elements.replaceCapability.textContent, /unavailable|not available/i);
+});
+
+test('requires both explicit replacement acknowledgement and confirmation', async () => {
+  const elements = makeElements();
+  const api = fakeApi();
+  const notices = [];
+  let confirmations = 0;
+  const controller = createFootageConverterController({
+    api,
+    elements,
+    notify: (message) => notices.push(message),
+    confirm: () => { confirmations += 1; return true; }
+  });
+  await controller.init();
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  elements.outputOptions[0].checked = false;
+  elements.outputOptions[1].checked = true;
+  await elements.outputOptions[1].dispatch('change');
+
+  await elements.startButton.click();
+  assert.match(notices.at(-1), /confirm|acknowledge/i);
+  elements.replacementConfirmation.checked = true;
+  await elements.startButton.click();
+
+  assert.equal(confirmations, 1);
+  assert.deepEqual(api.calls.find(([name]) => name === 'start')[1], {
+    sourceRoot: 'D:\\TeslaCam',
+    destinationRoot: null,
+    codec: 'h265',
+    profileId: 'balanced',
+    networkMode: 'auto',
+    outputMode: 'replace',
+    includedGroups: ['RecentClips', 'SavedClips', 'SentryClips'],
+    groupOrder: ['SavedClips', 'SentryClips', 'RecentClips'],
+    replacementConfirmed: true,
+    concurrency: 5,
+    verifyMode: 'quick'
+  });
+});
+
+test('routes pause, resume, cancel, and retry to the restored job', async () => {
+  const elements = makeElements();
+  const api = fakeApi({ current: activeSnapshot() });
+  const controller = createFootageConverterController({ api, elements, confirm: () => true });
+  await controller.init();
+
+  await elements.pauseButton.click();
+  await elements.resumeButton.click();
+  await elements.cancelButton.click();
+  api.emit({ jobId: 'job-1', revision: 10, snapshot: activeSnapshot({ state: 'completed', revision: 10 }) });
+  await elements.retryButton.click();
+
+  assert.deepEqual(api.calls.filter(([name]) => ['pause', 'resume', 'cancel', 'retry'].includes(name)), [
+    ['pause', 'job-1'], ['resume', 'job-1'], ['cancel', 'job-1'], ['retry', 'job-1']
+  ]);
+});
+
+test('offers to set a job aside when it cannot be cancelled, then clears it', async () => {
+  const elements = makeElements();
+  const api = fakeApi({ current: activeSnapshot({ state: 'paused' }) });
+  api.cancelConverter = async (id) => { api.calls.push(['cancel', id]); return { ok: false, error: { code: 'INVALID_MANIFEST' } }; };
+  api.discardConverterJob = async (id) => { api.calls.push(['discard', id]); return { ok: true, value: null }; };
+  const confirmations = [];
+  const notices = [];
+  const controller = createFootageConverterController({
+    api, elements,
+    confirm: (text) => { confirmations.push(text); return true; },
+    notify: (text) => notices.push(text)
+  });
+  await controller.init();
+
+  await elements.cancelButton.click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(api.calls.filter(([name]) => ['cancel', 'discard'].includes(name)), [['cancel', 'job-1'], ['discard', 'job-1']]);
+  assert.equal(confirmations.length, 2);
+  assert.match(confirmations[1], /set it aside/i);
+  assert.equal(controller.snapshot, null);
+  assert.match(notices.at(-1), /set aside/i);
+});
+
+test('keeps the job when the person declines to set it aside', async () => {
+  const elements = makeElements();
+  const api = fakeApi({ current: activeSnapshot({ state: 'paused' }) });
+  api.cancelConverter = async () => ({ ok: false, error: { code: 'INVALID_MANIFEST' } });
+  api.discardConverterJob = async (id) => { api.calls.push(['discard', id]); return { ok: true, value: null }; };
+  let asked = 0;
+  const controller = createFootageConverterController({ api, elements, confirm: () => { asked += 1; return asked === 1; } });
+  await controller.init();
+
+  await elements.cancelButton.click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(api.calls.some(([name]) => name === 'discard'), false);
+  assert.equal(controller.snapshot.id, 'job-1');
+});
+
+test('starts a new revision-zero job after a completed job with a higher revision', async () => {
+  const elements = makeElements();
+  const previous = activeSnapshot({ state: 'completed', revision: 42, summary: null });
+  const controller = createFootageConverterController({ api: fakeApi({ current: previous }), elements });
+  await controller.init();
+
+  await elements.startButton.click();
+
+  assert.equal(controller.snapshot.id, 'job-new');
+  assert.equal(controller.snapshot.revision, 0);
+  assert.equal(elements.status.textContent, 'Discovering footage');
+});
+
+test('preserves a fast completion event that arrives before start resolves', async () => {
+  const elements = makeElements();
+  const previous = activeSnapshot({ state: 'completed', revision: 42, summary: null });
+  const api = fakeApi({ current: previous });
+  api.startConverter = async (config) => {
+    api.calls.push(['start', config]);
+    api.emit({
+      jobId: 'job-new',
+      revision: 7,
+      snapshot: activeSnapshot({ id: 'job-new', state: 'completed', revision: 7, summary: null })
+    });
+    return { ok: true, value: { jobId: 'job-new' } };
+  };
+  const controller = createFootageConverterController({ api, elements });
+  await controller.init();
+
+  await elements.startButton.click();
+
+  assert.equal(controller.snapshot.id, 'job-new');
+  assert.equal(controller.snapshot.revision, 7);
+  assert.equal(controller.snapshot.state, 'completed');
+  assert.equal(elements.status.textContent, 'Conversion complete');
+});
+
+test('preserves a fast event on the first start when no prior snapshot exists', async () => {
+  const elements = makeElements();
+  const api = fakeApi();
+  api.startConverter = async (config) => {
+    api.calls.push(['start', config]);
+    api.emit({
+      jobId: 'job-new',
+      revision: 7,
+      snapshot: activeSnapshot({ id: 'job-new', state: 'verifying', revision: 7 })
+    });
+    return { ok: true, value: { jobId: 'job-new' } };
+  };
+  const controller = createFootageConverterController({ api, elements });
+  await controller.init();
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  elements.destinationPath.value = 'E:\\Converted';
+
+  await elements.startButton.click();
+
+  assert.equal(controller.snapshot.id, 'job-new');
+  assert.equal(controller.snapshot.revision, 7);
+  assert.equal(controller.snapshot.state, 'verifying');
+  assert.equal(elements.status.textContent, 'Verifying telemetry');
+});
+
+test('rejects stale revisions while rendering live phase, counters, failures, reconnect, and cleanup-pending', async () => {
+  const elements = makeElements();
+  const api = fakeApi({ current: activeSnapshot() });
+  const controller = createFootageConverterController({ api, elements });
+  await controller.init();
+
+  api.emit({
+    jobId: 'job-1', revision: 4,
+    snapshot: { id: 'job-1', revision: 4, progress: { outTimeUs: 5_000_000, phase: 'continue' } }
+  });
+  assert.match(elements.currentProgress.textContent, /00:05/);
+  assert.equal(elements.countDiscovered.textContent, '5');
+  assert.equal(elements.countCompleted.textContent, '1');
+  assert.equal(elements.countSkipped.textContent, '1');
+  assert.equal(elements.countFailed.textContent, '1');
+  assert.equal(elements.countWaiting.textContent, '1');
+  assert.equal(elements.processedBytes.textContent, '1,000 B');
+  assert.match(elements.errorRows.textContent, /bad\.mp4.*unsupported-codec/i);
+  assert.equal(elements.pipelineStages[1].classList.contains('is-active'), true);
+  assert.equal(elements.pipeline.dataset.currentPhase, 'encode');
+
+  api.emit({ jobId: 'job-1', revision: 5, snapshot: activeSnapshot({
+    state: 'paused_network', revision: 5,
+    items: activeSnapshot().items.map((item, index) => index === 0
+      ? { ...item, resultCode: 'completed-cleanup-pending' }
+      : item)
+  }) });
+  assert.equal(elements.reconnectBanner.hidden, false);
+  assert.equal(elements.cleanupBanner.hidden, false);
+
+  api.emit({ jobId: 'job-1', revision: 3, snapshot: activeSnapshot({ state: 'completed', revision: 3 }) });
+  assert.equal(elements.status.textContent, 'Waiting for connection');
+});
+
+test('uses the existing translator contract without passing fallback text as interpolation data', async () => {
+  const calls = [];
+  const controller = createFootageConverterController({
+    api: fakeApi({ replacement: 'unavailable' }),
+    elements: makeElements(),
+    t: (...args) => {
+      calls.push(args);
+      return args[0];
+    }
+  });
+
+  await controller.init();
+
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every((args) => args.length === 1 || (args.length === 2 && typeof args[1] === 'object')));
+  assert.ok(calls.every((args) => args[1] === undefined || !Object.values(args[1]).some((value) => /Available on|not available/i.test(value))));
+});
+
+test('separate summary explains video size reduction and retained originals and cleanup space in every locale', async () => {
+  const source = await readFile(new URL('../../src/renderer/scripts/data/translations.js', import.meta.url), 'utf8');
+  const { translations } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  for (const locale of Object.values(translations)) {
+    const elements = makeElements();
+    const current = activeSnapshot({ state: 'completed', cleanupPendingCount: 2,
+      summary: { ...emptyCounters(), files: 1, sourceVideoBytes: 1000, outputVideoBytes: 800, savedBytes: 200 } });
+    const controller = createFootageConverterController({ api: fakeApi({ current }), elements,
+      t: (key, params) => {
+        const copy = locale.ui.converter[key.replace('ui.converter.', '')];
+        assert.equal(typeof copy, 'string', `Missing converter translation: ${key}`);
+        return copy.replace(/\{(\w+)\}/g, (match, name) => params?.[name] ?? match);
+      } });
+    await controller.init();
+    assert.equal(elements.summarySaved.textContent, '200 B');
+    assert.match(elements.summaryGroups.textContent, /video size reduction/);
+    assert.match(elements.summaryRetention.textContent, /originals.*retained/i);
+    assert.match(elements.summaryRetention.textContent, /not.*storage reclaimed/i);
+    assert.match(elements.cleanupBanner.textContent, /consume.*space/i);
+    controller.destroy();
+  }
+});
+
+test('localizes dynamic status, progress, cleanup, and summary copy through ui.converter keys', async () => {
+  const elements = makeElements();
+  const calls = [];
+  const localized = {
+    'ui.converter.statusWaitingForConnection': 'LOC_STATUS',
+    'ui.converter.progressWorking': 'LOC_WORKING',
+    'ui.converter.cleanupPending': 'LOC_CLEANUP',
+    'ui.converter.summaryGroup': 'LOC_GROUP',
+    'ui.converter.summarySeparateRetention': 'LOC_RETENTION'
+  };
+  const current = activeSnapshot({
+    state: 'paused_network',
+    items: activeSnapshot().items.map((item, index) => index === 0
+      ? { ...item, resultCode: 'completed-cleanup-pending' }
+      : item),
+    summary: {
+      files: 1, sourceVideoBytes: 1000, outputVideoBytes: 900, savedBytes: 100,
+      copiedAssetBytes: 0, copiedAssets: '0 B', groups: {}
+    }
+  });
+  const controller = createFootageConverterController({
+    api: fakeApi({ current }), elements,
+    t: (key, params) => { calls.push([key, params]); return localized[key] || key; }
+  });
+
+  await controller.init();
+
+  assert.equal(elements.status.textContent, 'LOC_STATUS');
+  assert.equal(elements.cleanupBanner.textContent, 'LOC_CLEANUP');
+  assert.match(elements.summaryGroups.textContent, /LOC_GROUP/);
+  assert.equal(elements.summaryRetention.textContent, 'LOC_RETENTION');
+  assert.ok(calls.every(([key]) => key.startsWith('ui.converter.')));
+});
+
+test('localizes byte units without changing integer byte input semantics', () => {
+  assert.equal(formatBytes(1_234_567, 'de'), '1,18 MiB');
+  assert.equal(formatBytes(1_234_567, 'en'), '1.18 MiB');
+  assert.equal(formatBytes(1.5, 'en'), '0 B');
+});
+
+test('rerenders dynamic copy and byte totals on language change without leaking subscriptions', async () => {
+  const elements = makeElements();
+  const listeners = new Set();
+  let locale = 'en';
+  const current = activeSnapshot({
+    state: 'paused_network',
+    counters: { sourceVideoBytes: 1_234_567 },
+    config: { ...activeSnapshot().config, sourceRoot: 'D:\\TeslaCam' },
+    summary: {
+      files: 1, sourceVideoBytes: 1_234_567, outputVideoBytes: 1_000_000,
+      savedBytes: 234_567, copiedAssetBytes: 0,
+      source: 'stale source', output: 'stale output', saved: 'stale saved', copiedAssets: 'stale assets',
+      groups: {}
+    }
+  });
+  const translate = (key, params = {}) => {
+    if (key === 'ui.converter.statusWaitingForConnection') return locale === 'de' ? 'DE_STATUS' : 'EN_STATUS';
+    if (key === 'ui.converter.replacementWarning') return `${locale.toUpperCase()} ${params.sourceRoot}`;
+    return key;
+  };
+  const controller = createFootageConverterController({
+    api: fakeApi({ current }), elements, t: translate,
+    getLocale: () => locale,
+    onLanguageChange: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }
+  });
+
+  await controller.init();
+  await controller.init();
+  assert.equal(listeners.size, 1);
+  assert.equal(elements.status.textContent, 'EN_STATUS');
+  assert.equal(elements.processedBytes.textContent, '1.18 MiB');
+  assert.equal(elements.summarySource.textContent, '1.18 MiB');
+
+  locale = 'de';
+  listeners.forEach((listener) => listener(locale));
+
+  assert.equal(elements.status.textContent, 'DE_STATUS');
+  assert.equal(elements.processedBytes.textContent, '1,18 MiB');
+  assert.equal(elements.summarySource.textContent, '1,18 MiB');
+  assert.equal(elements.replacementWarning.textContent, 'DE D:\\TeslaCam');
+
+  controller.destroy();
+  assert.equal(listeners.size, 0);
+});
+
+test('names the source root and backup rollback behavior in both replacement confirmations', async () => {
+  const elements = makeElements();
+  const api = fakeApi();
+  const confirmations = [];
+  const controller = createFootageConverterController({
+    api,
+    elements,
+    confirm: (message) => { confirmations.push(message); return true; }
+  });
+  await controller.init();
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  elements.outputOptions[0].checked = false;
+  elements.outputOptions[1].checked = true;
+  await elements.outputOptions[1].dispatch('change');
+
+  assert.match(elements.replacementWarning.textContent, /D:\\TeslaCam/);
+  assert.match(elements.replacementWarning.textContent, /backup/i);
+  assert.match(elements.replacementWarning.textContent, /restore|roll back/i);
+
+  elements.replacementConfirmation.checked = true;
+  await elements.startButton.click();
+  assert.match(confirmations[0], /D:\\TeslaCam/);
+  assert.match(confirmations[0], /backup/i);
+  assert.match(confirmations[0], /restore|roll back/i);
+});
+
+test('ships complete explicit converter fallback keys for every supported locale', async () => {
+  const testDir = fileURLToPath(new URL('.', import.meta.url));
+  const source = await readFile(`${testDir}../../src/renderer/scripts/data/translations.js`, 'utf8');
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+  const { translations } = await import(moduleUrl);
+  const english = translations.en.ui.converter;
+  assert.ok(english && Object.keys(english).length >= 50);
+  assert.deepEqual(Object.keys(translations), ['en', 'es', 'fr', 'de', 'zh', 'ja', 'ko', 'pt', 'ru', 'it', 'nl', 'pl', 'tr']);
+  for (const [locale, values] of Object.entries(translations)) {
+    assert.deepEqual(Object.keys(values.ui.converter).sort(), Object.keys(english).sort(), `${locale} converter keys`);
+    assert.ok(Object.values(values.ui.converter).every((value) => typeof value === 'string' && value.length > 0));
+  }
+});
+
+test('marks converter navigation and disclosure copy for translation and accessibility', async () => {
+  const testDir = fileURLToPath(new URL('.', import.meta.url));
+  const html = await readFile(`${testDir}../../src/renderer/index.html`, 'utf8');
+  const css = await readFile(`${testDir}../../src/renderer/styles/footageConverter.css`, 'utf8');
+  assert.match(html, /id="clipDriveTabBar"[^>]*role="tablist"/);
+  assert.match(html, /id="clipList"[^>]*role="tabpanel"[^>]*aria-labelledby="clipsTabBtn"/);
+  assert.match(html, /id="driveList"[^>]*role="tabpanel"[^>]*aria-labelledby="drivesTabBtn"/);
+  assert.match(html, /id="converterTabBtn"[^>]*role="tab"[^>]*aria-controls="converterWorkspace"/);
+  assert.match(html, /id="converterWorkspace"[^>]*role="tabpanel"/);
+  assert.match(html, /class="converter-live-state"(?![^>]*aria-live)/);
+  assert.match(html, /id="converterStatus"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/);
+  assert.match(html, /data-i18n="ui\.converter\.lossyDisclosure"[^>]*>[^<]*(lossy|re-encode)/i);
+  assert.match(html, /data-i18n="ui\.converter\.profileOptionHigh"[^>]*>[^<]*approximately 5% smaller/i);
+  assert.doesNotMatch(html, /ui\.converter[^\n]*(lossless)/i);
+  assert.equal((html.match(/name="converterCodec"[^>]*data-converter-codec=/g) || []).length, 2);
+  const profileSelect = html.match(/<select id="converterProfileSelect"[\s\S]*?<\/select>/)?.[0] || '';
+  assert.deepEqual([...profileSelect.matchAll(/<option value="([a-z]+)"/g)].map((match) => match[1]),
+    ['conservative', 'balanced', 'aggressive', 'custom', 'quality']);
+  assert.match(html, /id="converterCustomBitrateRow"[^>]*hidden/);
+  assert.doesNotMatch(html, /name="converterNetwork"|ui\.converter\.networkHandling/);
+  assert.match(css, /\.converter-segments input:focus-visible \+ span[\s\S]*outline:/);
+});
+
+test('renders exact aggregate counts from a bounded snapshot whose item list was truncated', async () => {
+  const elements = makeElements();
+  const current = activeSnapshot({
+    itemCount: 1_000,
+    itemsTruncated: true,
+    itemStateCounts: { queued: 641, processing: 1, completed: 300, skipped: 40, failed: 18, cancelled: 0 },
+    cleanupPendingCount: 2
+  });
+  const controller = createFootageConverterController({ api: fakeApi({ current }), elements });
+
+  await controller.init();
+
+  assert.equal(elements.countDiscovered.textContent, '1000');
+  assert.equal(elements.countCompleted.textContent, '300');
+  assert.equal(elements.countSkipped.textContent, '40');
+  assert.equal(elements.countFailed.textContent, '18');
+  assert.equal(elements.countWaiting.textContent, '641');
+  assert.equal(elements.cleanupBanner.hidden, false);
+  assert.match(elements.cleanupBanner.textContent, /^2 files with cleanup pending/);
+});
+
+test('translated cleanup notice counts source files even when one file retains several artifacts', async () => {
+  const source = await readFile(new URL('../../src/renderer/scripts/data/translations.js', import.meta.url), 'utf8');
+  const { translations } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  for (const count of [1, 2]) {
+    const elements = makeElements();
+    const current = activeSnapshot({ cleanupPendingCount: count,
+      items: [{ id: 'item-1', state: 'completed', resultCode: 'completed-cleanup-pending',
+        ownedPaths: { encodedCandidate: 'candidate.mp4', publicationSnapshot: 'snapshot.mp4', destinationPartial: 'partial.mp4' } }] });
+    const controller = createFootageConverterController({ api: fakeApi({ current }), elements,
+      t: (key, params) => String(key.split('.').reduce((value, part) => value?.[part], translations.en) ?? key)
+        .replace(/\{(\w+)\}/g, (match, name) => params?.[name] ?? match) });
+    await controller.init();
+    assert.match(elements.cleanupBanner.textContent, new RegExp(`^${count} ${count === 1 ? 'file' : 'files'} with cleanup pending`));
+    assert.doesNotMatch(elements.cleanupBanner.textContent, /owned artifacts retained/);
+    controller.destroy();
+  }
+});
+
+test('keeps the job subscription live while the Converter workspace is hidden', async () => {
+  const elements = makeElements();
+  const api = fakeApi({ current: activeSnapshot() });
+  const controller = createFootageConverterController({ api, elements });
+  await controller.init();
+
+  controller.setVisible(false);
+  api.emit({ jobId: 'job-1', revision: 6, snapshot: activeSnapshot({ state: 'verifying', revision: 6 }) });
+
+  assert.equal(api.listeners.size, 1);
+  assert.equal(elements.status.textContent, 'Verifying telemetry');
+  assert.equal(elements.pipelineStages[2].classList.contains('is-active'), true);
+});
+
+test('restores and dismisses an actual persisted completion summary', async () => {
+  const summary = {
+    files: 2,
+    sourceVideoBytes: 2_000,
+    outputVideoBytes: 1_500,
+    savedBytes: 500,
+    copiedAssetBytes: 128,
+    source: '1.95 KiB',
+    output: '1.46 KiB',
+    saved: '500 B',
+    copiedAssets: '128 B',
+    groups: {
+      RecentClips: { files: 1, sourceBytes: 1_000, outputBytes: 800, savedBytes: 200 },
+      SavedClips: { files: 0, sourceBytes: 0, outputBytes: 0, savedBytes: 0 },
+      SentryClips: { files: 1, sourceBytes: 1_000, outputBytes: 700, savedBytes: 300 }
+    }
+  };
+  const completed = activeSnapshot({
+    state: 'completed',
+    revision: 12,
+    updatedAt: 11_000,
+    summary,
+    itemCount: 1_000,
+    itemsTruncated: true,
+    itemStateCounts: { queued: 642, completed: 300, skipped: 40, failed: 18 }
+  });
+  const elements = makeElements();
+  const api = fakeApi({ current: completed });
+  const controller = createFootageConverterController({ api, elements });
+  await controller.init();
+
+  assert.equal(elements.summary.hidden, false);
+  assert.equal(elements.summaryFiles.textContent, '2');
+  assert.equal(elements.summarySkipped.textContent, '40');
+  assert.equal(elements.summaryFailed.textContent, '18');
+  assert.equal(elements.summarySource.textContent, '1.95 KiB');
+  assert.equal(elements.summaryOutput.textContent, '1.46 KiB');
+  assert.equal(elements.summarySaved.textContent, '500 B');
+  assert.equal(elements.summaryPercent.textContent, '25%');
+  assert.match(elements.summaryGroups.textContent, /RecentClips.*200 B.*SentryClips.*300 B/s);
+
+  await elements.dismissButton.click();
+  assert.deepEqual(api.calls.at(-1), ['dismiss', 'job-1']);
+  assert.equal(elements.summary.hidden, true);
+});
+
+test('switches Clips, Drives, and Converter through one panel function and initializes once', async () => {
+  const body = new FakeElement();
+  const clipList = new FakeElement();
+  const driveList = new FakeElement();
+  const workspace = new FakeElement();
+  const tabs = ['clips', 'drives', 'converter'].map((panel) => new FakeElement({ dataset: { panel } }));
+  let converterInitializations = 0;
+  let driveRenders = 0;
+  const switchPanel = createSidebarPanelSwitcher({
+    body, clipList, driveList, workspace, tabs,
+    onConverterOpen: async () => { converterInitializations += 1; },
+    onDrivesOpen: () => { driveRenders += 1; }
+  });
+
+  await switchPanel('converter');
+  await switchPanel('clips');
+  await switchPanel('converter');
+  await switchPanel('drives');
+
+  assert.equal(converterInitializations, 1);
+  assert.equal(driveRenders, 1);
+  assert.equal(clipList.style.display, 'none');
+  assert.equal(driveList.style.display, '');
+  assert.equal(workspace.hidden, true);
+  assert.equal(body.classList.contains('converter-mode'), false);
+  assert.equal(tabs[1].classList.contains('active'), true);
+});
+
+test('moves and selects sidebar tabs with horizontal arrow keys', async () => {
+  const tabs = ['clips', 'drives', 'converter'].map((panel) => new FakeElement({ dataset: { panel } }));
+  const switchPanel = createSidebarPanelSwitcher({
+    body: new FakeElement(), clipList: new FakeElement(), driveList: new FakeElement(),
+    workspace: new FakeElement(), tabs
+  });
+  await switchPanel('clips');
+  let prevented = false;
+
+  await tabs[0].dispatch('keydown', { key: 'ArrowRight', preventDefault: () => { prevented = true; } });
+
+  assert.equal(prevented, true);
+  assert.equal(tabs[1].focused, true);
+  assert.equal(tabs[1].classList.contains('active'), true);
+  assert.equal(tabs[1].getAttribute('tabindex'), '0');
+  assert.equal(tabs[0].getAttribute('tabindex'), '-1');
+});
+
+function memoryStorage(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    values,
+    getItem: (key) => (values.has(key) ? values.get(key) : null),
+    setItem: (key, value) => { values.set(key, String(value)); }
+  };
+}
+
+async function startWith(elements, api) {
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  elements.destinationPath.value = 'E:\\Converted';
+  await elements.startButton.click();
+  return api.calls.find(([name]) => name === 'start')[1];
+}
+
+test('parallel conversions default to 5 and the chosen value is remembered and submitted', async () => {
+  const elements = { ...makeElements(), concurrency: new FakeElement({ value: '5' }) };
+  const api = fakeApi();
+  const storage = memoryStorage();
+  const controller = createFootageConverterController({ api, elements, storage });
+  await controller.init();
+  assert.equal(elements.concurrency.value, '5');
+
+  elements.concurrency.value = '3';
+  await elements.concurrency.dispatch('change');
+  assert.equal(storage.values.get('converterConcurrency'), '3');
+  assert.equal((await startWith(elements, api)).concurrency, 3);
+});
+
+test('restores a stored parallel-conversions choice and ignores invalid stored values', async () => {
+  const restored = { ...makeElements(), concurrency: new FakeElement({ value: '5' }) };
+  await createFootageConverterController({ api: fakeApi(), elements: restored, storage: memoryStorage({ converterConcurrency: '7' }) }).init();
+  assert.equal(restored.concurrency.value, '7');
+
+  for (const stored of ['0', '65', '2.5', 'abc']) {
+    const elements = { ...makeElements(), concurrency: new FakeElement({ value: '5' }) };
+    const api = fakeApi();
+    await createFootageConverterController({ api, elements, storage: memoryStorage({ converterConcurrency: stored }) }).init();
+    assert.equal(elements.concurrency.value, '5', `stored ${stored}`);
+    assert.equal((await startWith(elements, api)).concurrency, 5);
+  }
+});
+
+test('Custom shows a box for more than 10 at once, which is remembered and submitted', async () => {
+  const customRow = new FakeElement({ hidden: true });
+  const custom = new FakeElement({ value: '12' });
+  const elements = { ...makeElements(), concurrency: new FakeElement({ value: '5' }), concurrencyCustom: custom, concurrencyCustomRow: customRow };
+  const api = fakeApi();
+  const storage = memoryStorage();
+  await createFootageConverterController({ api, elements, storage }).init();
+  assert.equal(customRow.hidden, true);
+
+  elements.concurrency.value = 'custom';
+  await elements.concurrency.dispatch('change');
+  assert.equal(customRow.hidden, false);
+  custom.value = '20';
+  await custom.dispatch('change');
+  assert.equal(storage.values.get('converterConcurrency'), '20');
+  assert.equal((await startWith(elements, api)).concurrency, 20);
+});
+
+test('a custom number outside 1-64 is pulled into range, and a stored large value reopens in the Custom box', async () => {
+  const custom = new FakeElement({ value: '12' });
+  const elements = { ...makeElements(), concurrency: new FakeElement({ value: '5' }), concurrencyCustom: custom, concurrencyCustomRow: new FakeElement({ hidden: true }) };
+  const storage = memoryStorage();
+  await createFootageConverterController({ api: fakeApi(), elements, storage }).init();
+  elements.concurrency.value = 'custom';
+  await elements.concurrency.dispatch('change');
+  custom.value = '500';
+  await custom.dispatch('change');
+  assert.equal(custom.value, '64');
+  assert.equal(storage.values.get('converterConcurrency'), '64');
+
+  const restoredRow = new FakeElement({ hidden: true });
+  const restored = { ...makeElements(), concurrency: new FakeElement({ value: '5' }), concurrencyCustom: new FakeElement({ value: '12' }), concurrencyCustomRow: restoredRow };
+  await createFootageConverterController({ api: fakeApi(), elements: restored, storage: memoryStorage({ converterConcurrency: '24' }) }).init();
+  assert.equal(restored.concurrency.value, 'custom');
+  assert.equal(restored.concurrencyCustom.value, '24');
+  assert.equal(restoredRow.hidden, false);
+});
+
+test('storage failures never block starting a job', async () => {
+  const elements = makeElements();
+  const api = fakeApi();
+  const storage = { getItem() { throw new Error('denied'); }, setItem() { throw new Error('denied'); } };
+  await createFootageConverterController({ api, elements, storage }).init();
+  assert.equal((await startWith(elements, api)).concurrency, 5);
+});
+
+test('shows how many files convert at once and locks the setting while a job runs', async () => {
+  const snapshot = activeSnapshot({ config: { ...activeSnapshot().config, concurrency: 4 } });
+  snapshot.items = snapshot.items.map((item) => item.id === 'item-3' ? { ...item, state: 'processing' } : item);
+  const elements = { ...makeElements(), concurrency: new FakeElement({ value: '5' }) };
+  await createFootageConverterController({ api: fakeApi({ current: snapshot }), elements, storage: memoryStorage() }).init();
+  assert.equal(elements.currentFile.textContent, 'Converting 2 files at once');
+  assert.equal(elements.concurrency.value, '4');
+  assert.equal(elements.concurrency.disabled, true);
+});
+
+test('keeps the single-file status line when one file is converting', async () => {
+  const elements = makeElements();
+  await createFootageConverterController({ api: fakeApi({ current: activeSnapshot() }), elements, storage: memoryStorage() }).init();
+  assert.equal(elements.currentFile.textContent, 'SentryClips/event/front.mp4');
+});
+
+test('shows files per minute and time remaining from finished files over time', async () => {
+  let clock = 1_000_000;
+  const base = activeSnapshot({ createdAt: clock, revision: 10 });
+  const elements = { ...makeElements(), speed: new FakeElement(), eta: new FakeElement() };
+  const api = fakeApi({ current: base });
+  await createFootageConverterController({ api, elements, storage: memoryStorage(), now: () => clock }).init();
+  // Fewer than 10 s of history: no estimate yet.
+  assert.equal(elements.speed.textContent, '—');
+
+  const withCounts = (completed, queued, revision) => ({
+    ...base, revision,
+    itemCount: completed + queued + 3,
+    itemStateCounts: { queued, completed, skipped: 1, failed: 1, active: 1 }
+  });
+  clock += 60_000;
+  api.emit({ jobId: 'job-1', revision: 11, snapshot: withCounts(10, 100, 11) });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  clock += 60_000;
+  api.emit({ jobId: 'job-1', revision: 12, snapshot: withCounts(20, 90, 12) });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // 3 files were already finished in the first sample: (22 - 3) / 2 min.
+  assert.equal(elements.speed.textContent, '9.5 files/min');
+  // 90 queued + 1 converting at 9.5 files/min = 574.7 s.
+  assert.equal(elements.eta.textContent, '9m 35s');
+});
+
+test('elapsed time and the finished average leave out time spent paused', async () => {
+  const hour = 3_600_000;
+  // Ran 1 h, then waited 16 h paused for the automatic-conversion window.
+  const finished = activeSnapshot({
+    state: 'completed', revision: 20, createdAt: 0, updatedAt: 17 * hour, pausedMs: 16 * hour,
+    itemCount: 120, itemStateCounts: { queued: 0, completed: 110, skipped: 5, failed: 5, active: 0 }
+  });
+  const elements = { ...makeElements(), speed: new FakeElement(), eta: new FakeElement() };
+  await createFootageConverterController({ api: fakeApi({ current: finished }), elements, storage: memoryStorage(), now: () => 20 * hour }).init();
+  assert.equal(elements.elapsed.textContent, '01:00:00');
+  assert.equal(elements.speed.textContent, '2.0 files/min');
+
+  // While paused the clock stops at the moment the pause began.
+  const paused = activeSnapshot({ state: 'paused', revision: 5, createdAt: 0, updatedAt: 2 * hour, pausedMs: hour });
+  const pausedElements = makeElements();
+  await createFootageConverterController({ api: fakeApi({ current: paused }), elements: pausedElements, storage: memoryStorage(), now: () => 9 * hour }).init();
+  assert.equal(pausedElements.elapsed.textContent, '01:00:00');
+});
+
+test('lists where the time goes, largest average first', async () => {
+  const snapshot = activeSnapshot({
+    timings: { files: 4, totalMs: { inspect: 400, source: 0, timeline: 2_000, encode: 48_000, metadata: 1_200,
+      verify: 16_000, saveWait: 4_000, save: 2_800, cleanup: 400 } }
+  });
+  const elements = { ...makeElements(), timings: new FakeElement(), timingRows: new FakeElement() };
+  elements.timings.hidden = true;
+  await createFootageConverterController({ api: fakeApi({ current: snapshot }), elements, storage: memoryStorage() }).init();
+
+  assert.equal(elements.timings.hidden, false);
+  const rows = elements.timingRows.children.map((row) => row.getAttribute('data-phase'));
+  assert.deepEqual(rows, ['encode', 'verify', 'saveWait', 'save', 'timeline', 'metadata', 'inspect', 'cleanup']);
+  const encode = elements.timingRows.children[0].children;
+  assert.equal(encode[0].textContent, 'Encode');
+  assert.equal(encode[2].textContent, '12.0s');
+});
+
+test('hides the timing breakdown until a file has been converted', async () => {
+  const elements = { ...makeElements(), timings: new FakeElement(), timingRows: new FakeElement() };
+  await createFootageConverterController({ api: fakeApi({ current: activeSnapshot() }), elements, storage: memoryStorage() }).init();
+  assert.equal(elements.timings.hidden, true);
+});
+
+test('custom bitrate: the dropdown reveals the box and sends bitrateKbps', async () => {
+  const elements = { ...makeElements(), profileSelect: new FakeElement({ value: 'balanced' }),
+    customBitrate: new FakeElement({ value: '2.5' }), customBitrateRow: new FakeElement() };
+  const api = fakeApi();
+  await createFootageConverterController({ api, elements, storage: memoryStorage() }).init();
+  assert.equal(elements.customBitrateRow.hidden, true);
+
+  elements.profileSelect.value = 'custom';
+  await elements.profileSelect.dispatch('change');
+  assert.equal(elements.customBitrateRow.hidden, false);
+  elements.customBitrate.value = '3.75';
+  const config = await startWith(elements, api);
+  assert.equal(config.profileId, 'custom');
+  assert.equal(config.bitrateKbps, 3750);
+});
+
+test('custom bitrate: out-of-range values block the start; size profiles send no bitrate', async () => {
+  for (const value of ['0.1', '101', '', 'abc']) {
+    const elements = { ...makeElements(), profileSelect: new FakeElement({ value: 'custom' }),
+      customBitrate: new FakeElement({ value }), customBitrateRow: new FakeElement() };
+    const api = fakeApi();
+    const notices = [];
+    await createFootageConverterController({ api, elements, storage: memoryStorage(), notify: (text) => notices.push(text) }).init();
+    elements.sourcePath.value = 'D:\\TeslaCam';
+    elements.destinationPath.value = 'E:\\Converted';
+    await elements.startButton.click();
+    assert.equal(api.calls.some(([name]) => name === 'start'), false, `value ${value}`);
+    assert.match(notices.at(-1) || '', /bitrate/i);
+  }
+  const elements = { ...makeElements(), profileSelect: new FakeElement({ value: 'aggressive' }),
+    customBitrate: new FakeElement({ value: '3' }), customBitrateRow: new FakeElement() };
+  const api = fakeApi();
+  await createFootageConverterController({ api, elements, storage: memoryStorage() }).init();
+  const config = await startWith(elements, api);
+  assert.equal(config.profileId, 'aggressive');
+  assert.equal('bitrateKbps' in config, false);
+});
+
+test('custom bitrate: a restored custom job shows its bitrate', async () => {
+  const snapshot = activeSnapshot({ config: { ...activeSnapshot().config, profileId: 'custom', bitrateKbps: 4200 } });
+  const elements = { ...makeElements(), profileSelect: new FakeElement({ value: 'balanced' }),
+    customBitrate: new FakeElement({ value: '2.5' }), customBitrateRow: new FakeElement() };
+  await createFootageConverterController({ api: fakeApi({ current: snapshot }), elements, storage: memoryStorage() }).init();
+  assert.equal(elements.profileSelect.value, 'custom');
+  assert.equal(elements.customBitrate.value, '4.2');
+  assert.equal(elements.customBitrateRow.hidden, false);
+});
+
+test('constant quality: the dropdown reveals the level and sends qualityLevel only', async () => {
+  const elements = { ...makeElements(), profileSelect: new FakeElement({ value: 'balanced' }),
+    customBitrate: new FakeElement({ value: '2.5' }), customBitrateRow: new FakeElement(),
+    qualityLevel: new FakeElement({ value: 'balanced' }), qualityRow: new FakeElement() };
+  const api = fakeApi();
+  await createFootageConverterController({ api, elements, storage: memoryStorage() }).init();
+  assert.equal(elements.qualityRow.hidden, true);
+  elements.profileSelect.value = 'quality';
+  await elements.profileSelect.dispatch('change');
+  assert.equal(elements.qualityRow.hidden, false);
+  assert.equal(elements.customBitrateRow.hidden, true);
+  elements.qualityLevel.value = 'small';
+  const config = await startWith(elements, api);
+  assert.equal(config.profileId, 'quality');
+  assert.equal(config.qualityLevel, 'small');
+  assert.equal('bitrateKbps' in config, false);
+});
+
+test('constant quality: a restored job shows its level', async () => {
+  const snapshot = activeSnapshot({ config: { ...activeSnapshot().config, profileId: 'quality', qualityLevel: 'high' } });
+  const elements = { ...makeElements(), profileSelect: new FakeElement({ value: 'balanced' }),
+    qualityLevel: new FakeElement({ value: 'balanced' }), qualityRow: new FakeElement() };
+  await createFootageConverterController({ api: fakeApi({ current: snapshot }), elements, storage: memoryStorage() }).init();
+  assert.equal(elements.profileSelect.value, 'quality');
+  assert.equal(elements.qualityLevel.value, 'high');
+  assert.equal(elements.qualityRow.hidden, false);
+});
+
+function benchmarkElements() {
+  const dialog = new FakeElement();
+  dialog.open = false;
+  dialog.showModal = () => { dialog.open = true; };
+  dialog.close = () => { dialog.open = false; };
+  return {
+    ...makeElements(),
+    concurrency: new FakeElement({ value: '5' }),
+    benchmarkButton: new FakeElement(), benchmarkDialog: dialog, benchmarkStatus: new FakeElement(),
+    benchmarkTable: new FakeElement(), benchmarkRows: new FakeElement(), benchmarkBest: new FakeElement(),
+    benchmarkRun: new FakeElement(), benchmarkApply: new FakeElement(), benchmarkClose: new FakeElement(),
+    benchmarkApplyAlt: new FakeElement(), benchmarkHead: new FakeElement()
+  };
+}
+
+test('benchmark: compares H.265 and AV1 side by side and applies either pick', async () => {
+  const elements = benchmarkElements();
+  const api = fakeApi();
+  const storage = memoryStorage();
+  api.runConverterBenchmark = async (request, onProgress) => {
+    api.calls.push(['benchmark', request]);
+    onProgress({ step: 'copy', index: 3, total: 8 });
+    assert.match(elements.benchmarkStatus.textContent, /sample clip 3 of 8/);
+    onProgress({ step: 'run', level: 2, index: 2, total: 5, codec: 'av1', codecIndex: 2, codecTotal: 2 });
+    assert.match(elements.benchmarkStatus.textContent, /AV1 \(2 of 2\).*2 at once.*2 of 5/);
+    const h265 = { codec: 'h265', encoder: { codec: 'hevc_nvenc', hardware: true }, clips: 8,
+      results: [
+        { level: 1, ok: true, filesPerMinute: 4.2, fps: 150.3, savedPercent: 21.5, failures: [] },
+        { level: 4, ok: true, filesPerMinute: 12.5, fps: 450, savedPercent: 21.4, failures: [] },
+        { level: 6, ok: false, filesPerMinute: 0, fps: 0, failures: ['encoder-failed'] }
+      ],
+      best: { level: 4, ok: true, filesPerMinute: 12.5, fps: 450 } };
+    const av1 = { codec: 'av1', encoder: { codec: 'av1_nvenc', hardware: true }, clips: 8,
+      results: [
+        { level: 1, ok: true, filesPerMinute: 3.1, fps: 120, savedPercent: 48.2, failures: [] },
+        { level: 2, ok: true, filesPerMinute: 6.4, fps: 240, savedPercent: 48, failures: [] }
+      ],
+      best: { level: 2, ok: true, filesPerMinute: 6.4, fps: 240 } };
+    return { ok: true, value: { ...h265, codecs: [h265, av1] } };
+  };
+  await createFootageConverterController({ api, elements, storage }).init();
+  elements.sourcePath.value = 'D:\\TeslaCam';
+
+  await elements.benchmarkButton.click();
+  assert.equal(elements.benchmarkDialog.open, true);
+  await elements.benchmarkRun.click();
+
+  assert.deepEqual(api.calls.find(([name]) => name === 'benchmark')[1],
+    { codecs: ['h265', 'av1'], verifyMode: 'quick', profileId: 'balanced', sourceRoot: 'D:\\TeslaCam' });
+  const head = elements.benchmarkHead.children[0].children.map((node) => node.textContent);
+  assert.deepEqual(head, ['At once', 'H.265 Files/min', 'FPS', 'Saved', 'AV1 Files/min', 'FPS', 'Saved']);
+  assert.deepEqual(elements.benchmarkRows.children.map((row) => row.children[0].textContent), ['1', '2', '4', '6']);
+  const level4 = elements.benchmarkRows.children[2].children.map((node) => node.textContent);
+  assert.deepEqual(level4, ['4', '12.5', '450', '21.4%', '—', '—', '—']);
+  assert.equal(elements.benchmarkRows.children[3].children[1].textContent, 'failed');
+  assert.equal(elements.benchmarkRows.children[3].children[1].title, 'encoder-failed');
+  assert.match(elements.benchmarkBest.textContent, /H\.265: fastest at 4 at once — 12\.5 files\/min, saves 21\.4%/);
+  assert.match(elements.benchmarkBest.textContent, /AV1: fastest at 2 at once — 6\.4 files\/min, saves 48%/);
+  assert.match(elements.benchmarkStatus.textContent, /H\.265 on hevc_nvenc \(GPU\), AV1 on av1_nvenc \(GPU\)/);
+  assert.equal(elements.benchmarkApply.textContent, 'Use H.265 · 4 at once');
+  assert.equal(elements.benchmarkApplyAlt.textContent, 'Use AV1 · 2 at once');
+
+  await elements.benchmarkApplyAlt.click();
+  assert.equal(elements.concurrency.value, '2');
+  assert.equal(storage.values.get('converterConcurrency'), '2');
+  assert.equal(elements.codecOptions.find((option) => option.checked).dataset.converterCodec, 'av1');
+  assert.equal(elements.benchmarkDialog.open, false);
+});
+
+test('benchmark: reports a codec this computer cannot encode and offers only the other', async () => {
+  const elements = benchmarkElements();
+  const api = fakeApi();
+  api.runConverterBenchmark = async () => {
+    const h265 = { codec: 'h265', encoder: { codec: 'libx265', hardware: false }, clips: 2,
+      results: [{ level: 1, ok: true, filesPerMinute: 2, fps: 60, savedPercent: 20, failures: [] }],
+      best: { level: 1, ok: true, filesPerMinute: 2, fps: 60 } };
+    return { ok: true, value: { ...h265, codecs: [h265, { codec: 'av1', error: 'UNSUPPORTED', results: [], best: null }] } };
+  };
+  await createFootageConverterController({ api, elements, storage: memoryStorage() }).init();
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  await elements.benchmarkRun.click();
+  assert.match(elements.benchmarkBest.textContent, /AV1: not supported on this computer/);
+  assert.equal(elements.benchmarkApply.hidden, false);
+  assert.equal(elements.benchmarkApplyAlt.hidden, true);
+  assert.deepEqual(elements.benchmarkHead.children[0].children.map((node) => node.textContent), ['At once', 'H.265 Files/min', 'FPS', 'Saved']);
+});
+
+test('benchmark: asks for a source folder when there are no original clips', async () => {
+  const elements = benchmarkElements();
+  const api = fakeApi();
+  api.runConverterBenchmark = async () => ({ ok: false, error: { code: 'BENCHMARK_SOURCE_REQUIRED', retryable: false } });
+  await createFootageConverterController({ api, elements, storage: memoryStorage() }).init();
+  await elements.benchmarkRun.click();
+  assert.match(elements.benchmarkStatus.textContent, /source folder/);
+});
+
+test('benchmark: explains a refusal while a conversion is running', async () => {
+  const elements = benchmarkElements();
+  const api = fakeApi();
+  api.runConverterBenchmark = async () => ({ ok: false, error: { code: 'JOB_ACTIVE', retryable: false } });
+  await createFootageConverterController({ api, elements, storage: memoryStorage() }).init();
+  await elements.benchmarkRun.click();
+  assert.match(elements.benchmarkStatus.textContent, /current conversion/);
+  assert.equal(elements.benchmarkApply.hidden, true);
+  assert.equal(elements.benchmarkRun.disabled, false);
+});
+
+function autoElements() {
+  return {
+    ...makeElements(),
+    autoEnabled: new FakeElement(), autoInterval: new FakeElement({ value: '60' }),
+    autoWindowEnabled: new FakeElement(), autoStart: new FakeElement({ value: '1' }), autoEnd: new FakeElement({ value: '6' }),
+    autoKeepRunning: new FakeElement(), autoLogin: new FakeElement(), autoStatus: new FakeElement(), autoCheckNow: new FakeElement()
+  };
+}
+
+function autoApi(initial = { enabled: false, intervalMinutes: 60, window: null, keepRunning: false, openAtLogin: false, config: null }) {
+  const api = fakeApi();
+  let state = { settings: initial, status: { nextCheckAt: null } };
+  api.getConverterAuto = async () => ({ ok: true, value: state });
+  api.setConverterAuto = async (settings) => {
+    api.calls.push(['setAuto', settings]);
+    state = { settings, status: { nextCheckAt: settings.enabled ? Date.UTC(2026, 9, 14, 3, 0) : null } };
+    return { ok: true, value: state };
+  };
+  api.checkConverterAutoNow = async () => { api.calls.push(['checkAuto']); return { ok: true, value: state }; };
+  return api;
+}
+
+test('automatic conversion: turning it on saves the current job settings and schedule', async () => {
+  const elements = autoElements();
+  const api = autoApi();
+  await createFootageConverterController({ api, elements, storage: memoryStorage(), autoPollMs: 0 }).init();
+  assert.equal(elements.autoStatus.textContent, 'Off');
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  elements.destinationPath.value = 'E:\\Converted';
+  elements.autoInterval.value = '180';
+  elements.autoWindowEnabled.checked = true;
+  elements.autoStart.value = '23';
+  elements.autoEnd.value = '5';
+  elements.autoKeepRunning.checked = true;
+  elements.autoEnabled.checked = true;
+  await elements.autoEnabled.dispatch('change');
+  const saved = api.calls.find(([name]) => name === 'setAuto')[1];
+  assert.equal(saved.enabled, true);
+  assert.equal(saved.intervalMinutes, 180);
+  assert.deepEqual(saved.window, { startHour: 23, endHour: 5 });
+  assert.equal(saved.keepRunning, true);
+  assert.equal(saved.config.sourceRoot, 'D:\\TeslaCam');
+  assert.equal(saved.config.destinationRoot, 'E:\\Converted');
+  assert.match(elements.autoStatus.textContent, /Next check/);
+  assert.equal(elements.autoCheckNow.disabled, false);
+});
+
+test('automatic conversion: a paused automatic job says it is paused, then converting again once resumed', async () => {
+  const elements = autoElements();
+  const api = autoApi({ enabled: true, intervalMinutes: 60, window: null, keepRunning: false, openAtLogin: false, config: {} });
+  api.getConverterAuto = async () => ({ ok: true, value: {
+    settings: { enabled: true, intervalMinutes: 60, window: null, keepRunning: false, openAtLogin: false, config: {} },
+    status: { activeJobId: 'job-auto', pausedForWindow: false }
+  } });
+  api.getCurrentConverterJob = async () => ({ ok: true, value: activeSnapshot({ id: 'job-auto', state: 'paused', revision: 3 }) });
+  await createFootageConverterController({ api, elements, storage: memoryStorage(), autoPollMs: 0 }).init();
+  assert.equal(elements.autoStatus.textContent, 'Automatic conversion is paused — resume or cancel it above');
+  await elements.resumeButton.click();
+  assert.equal(elements.autoStatus.textContent, 'Converting new clips…');
+});
+
+test('automatic conversion: cannot be turned on without a source folder', async () => {
+  const elements = autoElements();
+  const api = autoApi();
+  const notices = [];
+  await createFootageConverterController({ api, elements, storage: memoryStorage(), autoPollMs: 0, notify: (text) => notices.push(text) }).init();
+  elements.autoEnabled.checked = true;
+  await elements.autoEnabled.dispatch('change');
+  assert.equal(api.calls.some(([name]) => name === 'setAuto'), false);
+  assert.match(notices.at(-1) || '', /source folder/i);
+  assert.equal(elements.autoEnabled.checked, false);
+});
+
+test('automatic conversion: shows the saved schedule and a new automatic job replaces a finished one', async () => {
+  const elements = autoElements();
+  const finished = activeSnapshot({ id: 'job-old', state: 'completed', revision: 50 });
+  const api = autoApi({ enabled: true, intervalMinutes: 360, window: { startHour: 2, endHour: 4 }, keepRunning: false, openAtLogin: true, config: {} });
+  api.getCurrentConverterJob = async () => ({ ok: true, value: finished });
+  const controller = createFootageConverterController({ api, elements, storage: memoryStorage(), autoPollMs: 0 });
+  await controller.init();
+  assert.equal(elements.autoEnabled.checked, true);
+  assert.equal(elements.autoInterval.value, '360');
+  assert.equal(elements.autoWindowEnabled.checked, true);
+  assert.equal(elements.autoStart.value, '2');
+  assert.equal(elements.autoLogin.checked, true);
+  api.emit({ jobId: 'job-auto', revision: 3, snapshot: activeSnapshot({ id: 'job-auto', state: 'encoding', revision: 3 }) });
+  assert.equal(controller.snapshot.id, 'job-auto');
+});
+
+test('a different job never replaces one that is still running', async () => {
+  const elements = autoElements();
+  const api = autoApi();
+  api.getCurrentConverterJob = async () => ({ ok: true, value: activeSnapshot({ id: 'job-live', state: 'encoding', revision: 10 }) });
+  const controller = createFootageConverterController({ api, elements, storage: memoryStorage(), autoPollMs: 0 });
+  await controller.init();
+  api.emit({ jobId: 'job-other', revision: 1, snapshot: activeSnapshot({ id: 'job-other', state: 'encoding', revision: 1 }) });
+  assert.equal(controller.snapshot.id, 'job-live');
+});
+
+
+function verifyElements() {
+  const select = new FakeElement({ value: 'quick' });
+  select.options = ['off', 'quick', 'full'].map((value) => ({ value, disabled: false }));
+  return { ...makeElements(), verifyMode: select, verifyReplaceNote: new FakeElement() };
+}
+
+test('verification: defaults to Quick, sends the chosen mode and remembers it', async () => {
+  const elements = verifyElements();
+  const api = fakeApi();
+  const storage = memoryStorage();
+  await createFootageConverterController({ api, elements, storage }).init();
+  assert.equal(elements.verifyMode.value, 'quick');
+  assert.equal(elements.verifyReplaceNote.hidden, true);
+  elements.verifyMode.value = 'full';
+  await elements.verifyMode.dispatch('change');
+  assert.equal(storage.values.get('converterVerifyMode'), 'full');
+  const config = await startWith(elements, api);
+  assert.equal(config.verifyMode, 'full');
+
+  const next = verifyElements();
+  await createFootageConverterController({ api: fakeApi(), elements: next, storage }).init();
+  assert.equal(next.verifyMode.value, 'full');
+});
+
+test('verification: Off is unavailable while replacing originals (Quick is used)', async () => {
+  const elements = verifyElements();
+  const api = fakeApi();
+  await createFootageConverterController({ api, elements, storage: memoryStorage(), confirm: () => true }).init();
+  elements.verifyMode.value = 'off';
+  await elements.verifyMode.dispatch('change');
+  elements.outputOptions[0].checked = false;
+  elements.outputOptions[1].checked = true;
+  await elements.outputOptions[1].dispatch('change');
+  assert.equal(elements.verifyMode.options.find((option) => option.value === 'off').disabled, true);
+  assert.equal(elements.verifyMode.value, 'quick');
+  assert.equal(elements.verifyReplaceNote.hidden, false);
+  elements.replacementConfirmation.checked = true;
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  await elements.startButton.click();
+  assert.equal(api.calls.find(([name]) => name === 'start')[1].verifyMode, 'quick');
+  // Back to separate output: Off is offered again.
+  elements.outputOptions[1].checked = false;
+  elements.outputOptions[0].checked = true;
+  await elements.outputOptions[0].dispatch('change');
+  assert.equal(elements.verifyMode.options.find((option) => option.value === 'off').disabled, false);
+});
+
+test('verification: a job saved before the setting existed shows Full', async () => {
+  const elements = verifyElements();
+  await createFootageConverterController({ api: fakeApi({ current: activeSnapshot() }), elements, storage: memoryStorage() }).init();
+  assert.equal(elements.verifyMode.value, 'full');
+});
+
+test('benchmark: shows Off / Quick / Full side by side at the recommended setting', async () => {
+  const elements = { ...benchmarkElements(), benchmarkVerifyTable: new FakeElement(), benchmarkVerifyHead: new FakeElement(), benchmarkVerifyRows: new FakeElement() };
+  const api = fakeApi();
+  api.runConverterBenchmark = async (_request, onProgress) => {
+    onProgress({ step: 'verify', codec: 'h265', verifyMode: 'full', level: 4, index: 3, total: 3 });
+    assert.match(elements.benchmarkStatus.textContent, /H\.265: timing verification Full at 4 at once… \(3 of 3\)/);
+    const best = { level: 4, ok: true, filesPerMinute: 40, fps: 400 };
+    const h265 = { codec: 'h265', encoder: { codec: 'hevc_nvenc', hardware: true }, clips: 8,
+      results: [{ ...best, savedPercent: 20, verifySecondsPerClip: 0.4, failures: [] }], best,
+      verifyComparison: [
+        { verifyMode: 'off', level: 4, ok: true, filesPerMinute: 42, verifySecondsPerClip: 0.1 },
+        { verifyMode: 'quick', level: 4, ok: true, filesPerMinute: 40, verifySecondsPerClip: 0.4 },
+        { verifyMode: 'full', level: 4, ok: true, filesPerMinute: 27.5, verifySecondsPerClip: 4.1 }
+      ] };
+    return { ok: true, value: { ...h265, codecs: [h265] } };
+  };
+  await createFootageConverterController({ api, elements, storage: memoryStorage() }).init();
+  elements.sourcePath.value = 'D:\\TeslaCam';
+  await elements.benchmarkRun.click();
+  assert.equal(elements.benchmarkVerifyTable.hidden, false);
+  assert.deepEqual(elements.benchmarkVerifyHead.children[0].children.map((node) => node.textContent), ['Verification', 'Off', 'Quick', 'Full']);
+  assert.deepEqual(elements.benchmarkVerifyRows.children[0].children.map((node) => node.textContent), [
+    'H.265 · 4 at once', '42 (0.1 s)', '40 (0.4 s)', '27.5 (4.1 s)'
+  ]);
+});

@@ -94,6 +94,14 @@ let getBaseFolderPath = null;
 let getProgressBar = null;
 let getFindSeiAtTime = null;
 let getUseMetric = null;
+const PROFILE_EXPORT_UNAVAILABLE =
+    'Export support for this vehicle profile is coming later.';
+
+function ensureProfileExportSupported(state = getState?.()) {
+    if (state?.library?.capabilities?.export !== false) return true;
+    notify(PROFILE_EXPORT_UNAVAILABLE, { type: 'info' });
+    return false;
+}
 
 /**
  * Initialize export module with dependencies
@@ -630,6 +638,60 @@ function updateCameraCheckboxVisibility(availableCameras) {
     }
 }
 
+// Export markers are anchored to the wall-clock timestamp of the frame the user
+// picked, not to a % of the timeline. The timeline length changes when segment
+// durations are refined by background probing, so a stored % drifts; a wall-clock
+// is stable. pct/seconds are always re-derived from the wall-clock.
+
+/** Wall-clock (epoch ms) of the frame currently under the playhead, or null. */
+function markerWallMsNow() {
+    const nv = getNativeVideo?.();
+    const groups = getState?.()?.collection?.active?.groups || [];
+    const segIdx = nv?.currentSegmentIdx || 0;
+    const segTs = parseTimestampKeyToEpochMs(groups[segIdx]?.timestampKey);
+    if (!segTs) return null;
+    return segTs + (nv?.master?.currentTime || 0) * 1000;
+}
+
+/** Map a wall-clock (epoch ms) to a contiguous timeline second, or null if it
+ *  falls outside any segment (a recording gap). Uses the CURRENT timeline.
+ *  Exported so the Advanced Editor export can anchor its range the same way. */
+export function wallMsToContiguousSec(wallMs) {
+    if (wallMs == null) return null;
+    const nv = getNativeVideo?.();
+    const groups = getState?.()?.collection?.active?.groups || [];
+    const cumStarts = nv?.cumulativeStarts || [];
+    const durs = nv?.segmentDurations || [];
+    for (let i = 0; i < groups.length; i++) {
+        const segTs = parseTimestampKeyToEpochMs(groups[i]?.timestampKey);
+        if (!segTs) continue;
+        const durMs = (durs[i] || 60) * 1000;
+        if (wallMs >= segTs && wallMs < segTs + durMs) {
+            return (cumStarts[i] || 0) + (wallMs - segTs) / 1000;
+        }
+    }
+    return null;
+}
+
+/** Re-derive marker percentages from their wall-clock anchors against the current
+ *  timeline. Call after the timeline is rebuilt (duration probe completes) so the
+ *  markers stay locked to the frames the user picked. */
+export function recomputeMarkerPctsFromWallClock() {
+    const nv = getNativeVideo?.();
+    const totalSec = nv?.cumulativeStarts?.[nv.cumulativeStarts.length - 1] || 0;
+    if (!totalSec) return;
+    let changed = false;
+    if (exportState.startMarkerWallMs != null) {
+        const c = wallMsToContiguousSec(exportState.startMarkerWallMs);
+        if (c != null) { exportState.startMarkerPct = (c / totalSec) * 100; changed = true; }
+    }
+    if (exportState.endMarkerWallMs != null) {
+        const c = wallMsToContiguousSec(exportState.endMarkerWallMs);
+        if (c != null) { exportState.endMarkerPct = (c / totalSec) * 100; changed = true; }
+    }
+    if (changed) updateExportMarkers();
+}
+
 /**
  * Set an export marker at current position
  * @param {string} type - 'start' or 'end'
@@ -644,17 +706,22 @@ export function setExportMarker(type) {
     }
 
     const currentPct = parseFloat(progressBar?.value) || 0;
+    const currentWallMs = markerWallMsNow(); // stable anchor, immune to timeline re-probing
 
     if (type === 'start') {
         exportState.startMarkerPct = currentPct;
+        exportState.startMarkerWallMs = currentWallMs;
         if (exportState.endMarkerPct !== null && exportState.endMarkerPct <= currentPct) {
             exportState.endMarkerPct = null;
+            exportState.endMarkerWallMs = null;
         }
         notify(t('ui.notifications.startMarkerSet'), { type: 'success' });
     } else {
         exportState.endMarkerPct = currentPct;
+        exportState.endMarkerWallMs = currentWallMs;
         if (exportState.startMarkerPct !== null && exportState.startMarkerPct >= currentPct) {
             exportState.startMarkerPct = null;
+            exportState.startMarkerWallMs = null;
         }
         notify(t('ui.notifications.endMarkerSet'), { type: 'success' });
     }
@@ -745,8 +812,10 @@ function createMarkerElement(type) {
 function removeMarker(type) {
     if (type === 'start') {
         exportState.startMarkerPct = null;
+        exportState.startMarkerWallMs = null;
     } else {
         exportState.endMarkerPct = null;
+        exportState.endMarkerWallMs = null;
     }
     updateExportMarkers();
     updateExportButtonState();
@@ -801,12 +870,30 @@ export function updateExportButtonState() {
     const setStartMarkerBtn = $('setStartMarkerBtn');
     const setEndMarkerBtn = $('setEndMarkerBtn');
     const exportBtn = $('exportBtn');
+    const openAdvancedEditorBtn = $('openAdvancedEditorBtn');
 
     const hasCollection = !!state?.collection?.active;
+    const exportAvailable = state?.library?.capabilities?.export !== false;
+    const unavailableMessage = 'Export support for this vehicle profile is coming later.';
 
-    if (setStartMarkerBtn) setStartMarkerBtn.disabled = !hasCollection;
-    if (setEndMarkerBtn) setEndMarkerBtn.disabled = !hasCollection;
-    if (exportBtn) exportBtn.disabled = !hasCollection;
+    if (setStartMarkerBtn) setStartMarkerBtn.disabled = !hasCollection || !exportAvailable;
+    if (setEndMarkerBtn) setEndMarkerBtn.disabled = !hasCollection || !exportAvailable;
+    if (exportBtn) {
+        exportBtn.disabled = !hasCollection || !exportAvailable;
+        if (!exportAvailable) {
+            exportBtn.title = unavailableMessage;
+            exportBtn.setAttribute('data-tip', unavailableMessage);
+        } else {
+            const availableMessage = t('ui.playback.exportVideo');
+            exportBtn.title = availableMessage;
+            exportBtn.setAttribute('data-tip', availableMessage);
+        }
+    }
+    if (openAdvancedEditorBtn) {
+        openAdvancedEditorBtn.disabled = !exportAvailable;
+        if (!exportAvailable) openAdvancedEditorBtn.title = unavailableMessage;
+        else openAdvancedEditorBtn.removeAttribute('title');
+    }
 }
 
 // Lock or unlock the simple export modal for AE-driven exports. Locks the
@@ -840,6 +927,7 @@ export function openExportModal() {
     }
 
     const state = getState?.();
+    if (!ensureProfileExportSupported(state)) return;
     if (!state?.collection?.active) {
         notify(t('ui.notifications.loadCollectionFirst'), { type: 'warn' });
         return;
@@ -927,6 +1015,18 @@ export function openExportModal() {
 
     const qualityInputs = document.querySelectorAll('input[name="exportQuality"]');
     qualityInputs.forEach(input => { input.onchange = updateExportSizeEstimate; });
+    const bitrateSelect = $('exportBitrate');
+    const bitrateCustom = $('exportBitrateCustom');
+    if (bitrateSelect) bitrateSelect.onchange = () => { syncExportBitrateControls(); updateExportSizeEstimate(); };
+    if (bitrateCustom) bitrateCustom.oninput = updateExportSizeEstimate;
+    window.electronAPI?.getSetting?.('exportLastBitrate').then((saved) => {
+        if (!saved || typeof saved !== 'object' || !bitrateSelect) return;
+        if ([...bitrateSelect.options].some((option) => option.value === saved.mode)) bitrateSelect.value = saved.mode;
+        if (bitrateCustom && Number.isFinite(saved.customMbps)) bitrateCustom.value = String(saved.customMbps);
+        syncExportBitrateControls();
+        updateExportSizeEstimate();
+    }).catch(() => { });
+    syncExportBitrateControls();
     const cameraInputs = document.querySelectorAll('#exportCameraToggles input[data-camera]');
     cameraInputs.forEach(input => { input.onchange = updateExportSizeEstimate; });
     updateExportSizeEstimate();
@@ -1570,6 +1670,28 @@ export function updateExportRangeDisplay() {
 /**
  * Update estimated file size display
  */
+// Export bitrate: 'auto' keeps the quality preset's constant-quality encode;
+// a preset or custom value (kbps) switches the encoder to bitrate mode.
+const EXPORT_BITRATE_KBPS = Object.freeze({ min: 500, max: 200_000 });
+
+function readExportBitrate() {
+    const mode = $('exportBitrate')?.value || 'auto';
+    if (mode === 'auto') return { mode, kbps: null, valid: true };
+    if (mode === 'custom') {
+        const mbps = Number($('exportBitrateCustom')?.value);
+        const kbps = Number.isFinite(mbps) ? Math.round(mbps * 1000) : NaN;
+        const valid = kbps >= EXPORT_BITRATE_KBPS.min && kbps <= EXPORT_BITRATE_KBPS.max;
+        return { mode, kbps: valid ? kbps : null, valid, mbps };
+    }
+    const kbps = Number(mode);
+    return { mode, kbps: Number.isSafeInteger(kbps) ? kbps : null, valid: Number.isSafeInteger(kbps) };
+}
+
+function syncExportBitrateControls() {
+    const wrap = $('exportBitrateCustomWrap');
+    if (wrap) wrap.hidden = ($('exportBitrate')?.value || 'auto') !== 'custom';
+}
+
 export function updateExportSizeEstimate() {
     const nativeVideo = getNativeVideo?.();
     const state = getState?.();
@@ -1658,7 +1780,9 @@ export function updateExportSizeEstimate() {
         maxQualityWarningEl.classList.toggle('hidden', !isMaxQuality);
     }
     const pixels = gridW * gridH;
-    const mbPerMin = pixels * 0.000018;
+    // A chosen bitrate makes the size exact: kbps → MB per minute.
+    const bitrateChoice = readExportBitrate();
+    const mbPerMin = bitrateChoice.kbps ? (bitrateChoice.kbps * 1000 * 60) / 8 / (1024 * 1024) : pixels * 0.000018;
     const estimatedMB = Math.round(durationMin * mbPerMin);
     const estimatedGB = (estimatedMB / 1024).toFixed(1);
 
@@ -1795,6 +1919,8 @@ export async function startExport() {
     const nativeVideo = getNativeVideo?.();
     const baseFolderPath = getBaseFolderPath?.();
 
+    if (!ensureProfileExportSupported(state)) return;
+
     if (!state?.collection?.active || !window.electronAPI?.startExport) {
         notify(t('ui.notifications.exportNotAvailable'), { type: 'error' });
         return;
@@ -1827,6 +1953,11 @@ export async function startExport() {
 
     const qualityInput = document.querySelector('input[name="exportQuality"]:checked');
     const quality = qualityInput?.value || 'high';
+    const bitrateChoice = readExportBitrate();
+    if (!bitrateChoice.valid) {
+        notify('Enter a custom bitrate between 0.5 and 200 Mbps.', { type: 'warn' });
+        return;
+    }
 
     // Track quality for share restriction enforcement
     exportState.lastExportQuality = quality;
@@ -1838,6 +1969,10 @@ export async function startExport() {
                 await window.electronAPI.setSetting('exportLastBlurZones', exportState.blurZones);
             }
             await window.electronAPI.setSetting('exportLastQuality', quality);
+            await window.electronAPI.setSetting('exportLastBitrate', {
+                mode: bitrateChoice.mode,
+                customMbps: Number(document.getElementById('exportBitrateCustom')?.value) || 10
+            });
         }
     } catch (e) { /* ignore save errors */ }
 
@@ -1889,8 +2024,21 @@ export async function startExport() {
     const startPct = exportState.startMarkerPct ?? 0;
     const endPct = exportState.endMarkerPct ?? 100;
 
-    const startTimeMs = (Math.min(startPct, endPct) / 100) * totalSec * 1000;
-    const endTimeMs = (Math.max(startPct, endPct) / 100) * totalSec * 1000;
+    let startTimeMs = (Math.min(startPct, endPct) / 100) * totalSec * 1000;
+    let endTimeMs = (Math.max(startPct, endPct) / 100) * totalSec * 1000;
+
+    // Prefer the wall-clock anchor (immune to timeline re-probing between marking
+    // and export) when both markers have one; fall back to the pct-based value.
+    {
+        const sWall = exportState.startMarkerWallMs, eWall = exportState.endMarkerWallMs;
+        if (sWall != null && eWall != null) {
+            const a = wallMsToContiguousSec(Math.min(sWall, eWall));
+            const b = wallMsToContiguousSec(Math.max(sWall, eWall));
+            if (a != null) startTimeMs = a * 1000;
+            if (b != null) endTimeMs = b * 1000;
+            console.log(`[EXPORT] marker range -> ${new Date(Math.min(sWall, eWall)).toLocaleTimeString()} .. ${new Date(Math.max(sWall, eWall)).toLocaleTimeString()} (startSec=${(startTimeMs / 1000).toFixed(1)}, endSec=${(endTimeMs / 1000).toFixed(1)})`);
+        }
+    }
 
     // Coincident markers produce a zero-length export that FFmpeg either fails
     // on or writes as an empty file — catch it before any heavy work starts
@@ -2304,6 +2452,7 @@ export async function startExport() {
             cameras,
             baseFolderPath,
             quality,
+            ...(bitrateChoice.kbps ? { bitrateKbps: bitrateChoice.kbps } : {}),
             // Only include dashboard if checkbox was checked AND we successfully extracted SEI data
             includeDashboard: includeDashboard && seiData !== null && seiData.length > 0,
             seiData: seiData || [], // Empty array if dashboard disabled - no RAM used
@@ -3003,6 +3152,8 @@ function _wireDetailButtons(listEl, emptyEl, layoutEl) {
 export function clearExportMarkers() {
     exportState.startMarkerPct = null;
     exportState.endMarkerPct = null;
+    exportState.startMarkerWallMs = null;
+    exportState.endMarkerWallMs = null;
     updateExportMarkers();
     updateExportButtonState();
 }

@@ -1,8 +1,9 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn, spawnSync } = require('child_process');
+const { prepareConcatFiles, concatFileList } = require('./main/exportConcat');
 const { writeCompactDashboardAss, writeDefaultDashboardAss, writeDetailedDashboardAss, writeTeslaMobileDashboardAss, writeTeslaMobileDateAss, writeTeslaMobileDataAss, writeTeslaScreenDashAss, writeMinimapAss } = require('./assGenerator');
 // Pure-JS PNG compositor used for blur masks. Replaces `sharp` so Linux (and other)
 // users don't need the native libvips binaries bundled.
@@ -48,12 +49,18 @@ function compositeBlurMasks(width, height, zones) {
   return PNG.sync.write(canvas);
 }
 const { checkUpdateWithTelemetry, processApiResponse } = require('./updateTelemetry');
-const { settingsPath, loadSettings, saveSettings, registerSettingsIpc } = require('./main/settings');
+const { settingsPath, loadSettings, saveSettings, registerSettingsIpc, applyPlaybackHardwareAcceleration } = require('./main/settings');
 const { SUPPORT_SERVER_URL, registerSupportChatIpc } = require('./main/supportChat');
 const { registerDiagnosticsStorageIpc } = require('./main/diagnostics');
-const { UPDATE_CONFIG, autoUpdater, getLatestVersionFromGitHub, registerAutoUpdateIpc, setupAutoUpdaterEvents } = require('./main/autoUpdate');
-const { findFFmpegPath, preCacheFFmpegPath, formatExportDuration, detectGpuHardware, detectGpuEncoder, detectHEVCEncoder, findVaapiDevice, getGpuEncoder, setGpuEncoder, getGpuEncoderHEVC, setGpuEncoderHEVC } = require('./main/ffmpeg');
+const { UPDATE_CONFIG, autoUpdater, getLatestVersionFromGitHub, registerAutoUpdateIpc, resolveUpdateChannel, setupAutoUpdaterEvents } = require('./main/autoUpdate');
+const { findFFmpegPath, findFFprobePath, preCacheFFmpegPath, formatExportDuration, detectGpuHardware, detectGpuEncoder, detectHEVCEncoder, findVaapiDevice, getGpuEncoder, setGpuEncoder, getGpuEncoderHEVC, setGpuEncoderHEVC } = require('./main/ffmpeg');
+const { registerConverterIpc } = require('./main/converter/ipc');
+const { createConverterLifecycle, createConverterRuntime, startConverterWithRecoveryPrompt } = require('./main/converter/runtime');
 const { calculateMinimapSize, downloadStaticMapBackground, preRenderMinimap } = require('./main/minimap');
+const { createSentryUsbCache } = require('./main/sentryUsbCache');
+const { createClipThumbnails } = require('./main/clipThumbnails');
+const { createSmokeTest } = require('./main/smokeTest');
+const MapProviders = require('./shared/mapProviders');
 const crypto = require('crypto');
 
 // ============================================
@@ -108,10 +115,20 @@ console.warn = (...args) => { captureMainLog('warn', args); originalMainConsole.
 console.error = (...args) => { captureMainLog('error', args); originalMainConsole.error(...args); };
 console.info = (...args) => { captureMainLog('info', args); originalMainConsole.info(...args); };
 
-// Get the configured update branch from settings (defaults to main)
+// Apply the playback hardware-acceleration preference. This MUST run before the
+// app 'ready' event because Chromium command-line switches are read at startup.
+// Placed after the console overrides above so the decision is captured in the
+// diagnostics log.
+if (!applyPlaybackHardwareAcceleration()) {
+  console.log('[STARTUP] Hardware video acceleration disabled by user setting — using software video decode');
+}
+
+// GitHub branch the raw-file update paths read from (version.json, the
+// changelog, and the dev-install zip). Derived from the configured update
+// channel so the branch and the electron-updater release feed can never
+// disagree — see resolveUpdateChannel in src/main/autoUpdate.js.
 function getUpdateBranch() {
-  const settings = loadSettings();
-  return settings.updateBranch || UPDATE_CONFIG.defaultBranch;
+  return resolveUpdateChannel(loadSettings()).branch;
 }
 
 // Active exports tracking
@@ -119,6 +136,123 @@ const activeExports = {};
 const activeExportPaths = {}; // Track output paths for cleanup on cancel
 const cancelledExports = new Set(); // Track cancelled exports by ID
 let mainWindow = null;
+
+// ============================================
+// AUTOMATIC CONVERSION: background mode
+// ============================================
+// With automatic conversion on and "keep running in the background" checked,
+// closing the window hides it to the tray so scheduled checks keep running.
+// "Start when I sign in" launches straight to the tray.
+const launchedInBackground = process.argv.includes('--background')
+  || (process.platform === 'darwin' && (() => { try { return app.getLoginItemSettings().wasOpenedAsHidden === true; } catch (_) { return false; } })());
+let keepRunningInBackground = false;
+let appQuitting = false;
+let tray = null;
+let autoConvertApi = null;
+
+// The converter starts before the first window is created. Until startup has
+// made that window, nothing else may create one (it would be a duplicate).
+let mainWindowEverCreated = false;
+// Automated launch check (GitHub tests only; inactive otherwise).
+const smokeTest = createSmokeTest({ app });
+// Asked for during start-up (a second launch, a tray click): shown when made.
+let showWhenCreated = false;
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (mainWindowEverCreated) createWindow();
+    else showWhenCreated = true;
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function createAppTray() {
+  if (tray) return;
+  try {
+    const icon = nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'Sentry_six.png')).resize({ width: 16, height: 16 });
+    tray = new Tray(icon);
+    tray.setToolTip('Sentry Studio — automatic conversion');
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: 'Open Sentry Studio', click: showMainWindow },
+      { label: 'Check for new clips now', click: () => { void autoConvertApi?.checkNow?.().catch(() => {}); } },
+      { type: 'separator' },
+      { label: 'Quit', click: () => { appQuitting = true; app.quit(); } }
+    ]));
+    tray.on('click', showMainWindow);
+  } catch (error) {
+    console.error('[AUTO] Tray unavailable:', error?.message || error);
+    tray = null;
+  }
+}
+
+let autoSettingsApplied = false;
+let appliedAutoAppSettings = null;
+function applyAutoConvertAppSettings(settings) {
+  // Status updates arrive often; only act when these settings change.
+  const key = JSON.stringify([settings?.enabled === true, settings?.keepRunning === true, settings?.openAtLogin === true]);
+  if (key === appliedAutoAppSettings) return;
+  appliedAutoAppSettings = key;
+  keepRunningInBackground = settings?.enabled === true && settings?.keepRunning === true;
+  if (keepRunningInBackground) createAppTray();
+  else if (tray) { tray.destroy(); tray = null; }
+  try {
+    if (app.isPackaged) {
+      // Like background mode, starting at sign-in belongs to automatic conversion.
+      app.setLoginItemSettings({ openAtLogin: settings?.enabled === true && settings?.openAtLogin === true, openAsHidden: true, args: ['--background'] });
+    }
+  } catch (_) { /* not supported on this platform */ }
+  // A background launch without background mode still needs a visible window
+  // (normally the window does not exist yet and shows itself when ready).
+  if (!autoSettingsApplied && launchedInBackground && !keepRunningInBackground
+      && mainWindow && !mainWindow.isDestroyed()) showMainWindow();
+  autoSettingsApplied = true;
+}
+
+app.on('before-quit', () => { appQuitting = true; });
+
+// The converter is composed once in the Electron main process. Its runtime
+// owns the singleton job store, recovery, child processes, and safe shutdown;
+// this file only resolves app paths/tools and connects the IPC boundary.
+const converterLifecycle = createConverterLifecycle({
+  app,
+  initialize: async ({ retainRuntime, runtime: existingRuntime, isQuitting }) => {
+    const ffmpegPath = findFFmpegPath();
+    const ffprobePath = findFFprobePath(ffmpegPath);
+    if (!ffmpegPath || !ffprobePath) {
+      throw Object.assign(new Error('Bundled converter tools are unavailable'), { code: 'CONVERTER_TOOLS_UNAVAILABLE' });
+    }
+    const runtime = existingRuntime || await createConverterRuntime({
+      userDataPath: app.getPath('userData'),
+      tempPath: app.getPath('temp'),
+      ffmpegPath,
+      ffprobePath,
+      spawn,
+      fs,
+      pathApi: path,
+      platform: process.platform,
+      onClipConverted: (outputPath) => getClipThumbnails()?.prewarm(outputPath),
+      onError: error => console.error('[CONVERTER] Recovery execution failed:', error?.code || 'RECOVERY_FAILED')
+    });
+    retainRuntime(runtime);
+    await runtime.start();
+    if (isQuitting()) throw Object.assign(new Error('Converter shutdown requested'), { code: 'SERVICE_SHUTDOWN' });
+    registerConverterIpc({
+      ipcMain,
+      dialog,
+      service: runtime.service,
+      capabilities: runtime.capabilities,
+      benchmark: { run: (request) => runtime.runBenchmark(request), cancel: () => runtime.cancelBenchmark() },
+      auto: runtime.auto
+    });
+    autoConvertApi = runtime.auto;
+    applyAutoConvertAppSettings(runtime.auto.get().settings);
+    runtime.auto.subscribe((state) => applyAutoConvertAppSettings(state.settings));
+    return runtime;
+  },
+  onError: (error) => console.error('[CONVERTER] Shutdown failed:', error?.code || 'SHUTDOWN_FAILED')
+});
 
 // Session-scoped map provider fallback: set when any renderer window reports
 // that Google tile loads are failing, so export tile downloads follow the
@@ -138,7 +272,19 @@ function getEffectiveMapProvider() {
   return settings.mapTileProvider || 'google';
 }
 
+// Whether exported maps should show labels. Reads the same persisted setting
+// the renderer writes; defaults to the registry default (labels hidden) when
+// unset. The menu toggle isn't wired up yet — this is the plumbing for it.
+function getEffectiveMapLabels() {
+  const settings = loadSettings();
+  const saved = settings[MapProviders.LABELS_SETTING_KEY];
+  return (saved === undefined || saved === null)
+    ? MapProviders.DEFAULT_LABELS_ENABLED
+    : !!saved;
+}
+
 function createWindow() {
+  mainWindowEverCreated = true;
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -158,8 +304,28 @@ function createWindow() {
       webSecurity: false, // Required for file:// video playback from local TeslaCam folders
     },
   });
+  smokeTest?.attachWindow(mainWindow);
   mainWindow.once('ready-to-show', () => {
-    if (!mainWindow.isDestroyed()) mainWindow.show();
+    if (mainWindow.isDestroyed()) return;
+    if (showWhenCreated) {
+      showWhenCreated = false;
+      mainWindow.show();
+      return;
+    }
+    // Started at sign-in for automatic conversion: stay in the tray.
+    if (launchedInBackground && !autoSettingsApplied) {
+      setTimeout(() => { if (!autoSettingsApplied || !keepRunningInBackground) showMainWindow(); }, 15_000);
+      return;
+    }
+    if (launchedInBackground && keepRunningInBackground) return;
+    mainWindow.show();
+  });
+  mainWindow.on('session-end', () => { appQuitting = true; });
+  mainWindow.on('close', (event) => {
+    if (keepRunningInBackground && !appQuitting) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
   });
   mainWindow.setMenuBarVisibility(false);
 
@@ -281,7 +447,7 @@ async function applyBlurZonesToStreams({ blurZones, blurType, streams, streamTag
 
 // Video Export Implementation
 async function performVideoExport(event, exportId, exportData, ffmpegPath) {
-  const { segments, startTimeMs, endTimeMs, outputPath, cameras, mobileExport, quality, includeDashboard, seiData, layoutData, overlayData = null, useMetric, dashboardStyle = 'standard', dashboardPosition = 'bottom-center', dashboardSize = 'medium', dashboardLabelScale = 1, dashboardValueScale = 1, dashboardDateValueScale = 1, includeTimestamp = false, timestampPosition = 'bottom-center', timestampDateFormat = 'mdy', timestampTimeFormat = '12h', blurZones = [], blurType = 'solid', language = 'en', includeMinimap = false, minimapPosition = 'top-right', minimapSize = 'small', minimapRenderMode = 'ass', minimapDarkMode = false, mapPath = [], mirrorCameras = true, accelPedMode = 'iconbar', enableTimelapse = false, timelapseSpeed = 1 } = exportData;
+  const { segments, startTimeMs, endTimeMs, outputPath, cameras, mobileExport, quality, bitrateKbps: requestedBitrateKbps = null, includeDashboard, seiData, layoutData, overlayData = null, useMetric, dashboardStyle = 'standard', dashboardPosition = 'bottom-center', dashboardSize = 'medium', dashboardLabelScale = 1, dashboardValueScale = 1, dashboardDateValueScale = 1, includeTimestamp = false, timestampPosition = 'bottom-center', timestampDateFormat = 'mdy', timestampTimeFormat = '12h', blurZones = [], blurType = 'solid', language = 'en', includeMinimap = false, minimapPosition = 'top-right', minimapSize = 'small', minimapRenderMode = 'ass', minimapDarkMode = false, mapPath = [], mirrorCameras = true, accelPedMode = 'iconbar', enableTimelapse = false, timelapseSpeed = 1 } = exportData;
   const isAdvancedLayout = !!(layoutData && layoutData.layoutMode === 'advanced');
 
   console.log(`[EXPORT] Received exportData - includeMinimap: ${includeMinimap}, mapPath.length: ${mapPath?.length || 0}, minimapPosition: ${minimapPosition}, minimapSize: ${minimapSize}, renderMode: ${minimapRenderMode}`);
@@ -319,6 +485,25 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
   };
 
   const cleanup = () => tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch { } });
+
+  const runPreparationTool = (tool, args) => new Promise((resolve, reject) => {
+    if (cancelledExports.has(exportId)) return reject(new Error('Export cancelled'));
+    const child = spawn(tool, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    activeExports[exportId] = child;
+    let stdout = '', stderr = '';
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; child.kill(); }, 120000);
+    child.stdout.on('data', data => { stdout = (stdout + data).slice(-65536); });
+    child.stderr.on('data', data => { stderr = (stderr + data).slice(-65536); });
+    child.on('error', reject);
+    child.on('close', code => {
+      clearTimeout(timeout);
+      if (activeExports[exportId] === child) delete activeExports[exportId];
+      if (cancelledExports.has(exportId)) return reject(new Error('Export cancelled'));
+      if (timedOut || code !== 0) return reject(new Error(`Export input preparation failed: ${timedOut ? 'timed out' : stderr.slice(-1000)}`));
+      resolve(stdout);
+    });
+  });
 
   // Minimap temp file path (set during pre-render)
   let minimapTempPath = null;
@@ -391,8 +576,13 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
           isConcat: false
         });
       } else {
+        const preparedFiles = await prepareConcatFiles(files, {
+          ffmpegPath, ffprobePath: findFFprobePath(ffmpegPath),
+          run: runPreparationTool, tempFiles,
+          isCancelled: () => cancelledExports.has(exportId)
+        });
         const concatPath = path.join(os.tmpdir(), `export_${camera}_${Date.now()}.txt`);
-        fs.writeFileSync(concatPath, files.map(f => `file '${f.replace(/\\/g, '/')}'`).join('\n'));
+        fs.writeFileSync(concatPath, concatFileList(preparedFiles));
         tempFiles.push(concatPath);
 
         const firstSeg = relevantSegments.find(s => s.files?.[camera] === files[0]);
@@ -496,6 +686,14 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
         default:       w = makeEven(nativeW * 0.75); h = makeEven(nativeH * 0.75); crf = 20;
       }
     }
+
+    // Optional fixed bitrate (kbps) chosen in the export dialog; null keeps the
+    // quality preset's constant-quality encode.
+    const bitrateKbps = Number.isSafeInteger(requestedBitrateKbps)
+      && requestedBitrateKbps >= 500 && requestedBitrateKbps <= 200_000 ? requestedBitrateKbps : null;
+    const bitrateArgs = () => ['-b:v', `${bitrateKbps}k`, '-maxrate', `${Math.round(bitrateKbps * 1.5)}k`,
+      '-bufsize', `${bitrateKbps * 2}k`];
+    if (bitrateKbps) console.log(`[EXPORT] Fixed bitrate ${bitrateKbps} kbps`);
 
     // Detect GPU encoder
     const gpu = detectGpuEncoder(ffmpegPath);
@@ -903,7 +1101,21 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
               minimapTargetSize,
               ffmpegPath,
               minimapDarkMode,
-              getEffectiveMapProvider()
+              getEffectiveMapProvider(),
+              getEffectiveMapLabels(),
+              (p) => {
+                // Tile download/stitch occupy the first ~half of the minimap
+                // bar (0-47%); the composite-video encode fills 50-100%.
+                if (p.phase === 'stitch') {
+                  sendMinimapProgress(47, 'Stitching map background...');
+                } else {
+                  const pct = p.total > 0 ? Math.round((p.completed / p.total) * 45) : 0;
+                  sendMinimapProgress(
+                    pct,
+                    `Downloading map tiles... ${p.completed.toLocaleString()}/${p.total.toLocaleString()}`
+                  );
+                }
+              }
             );
             mapBgPath = mapResult.imagePath;
             mapBounds = mapResult.bounds;
@@ -915,7 +1127,7 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
             // Continue without map background - will use dark bg from ASS
           }
 
-          sendMinimapProgress(30, 'Generating route overlay...');
+          sendMinimapProgress(49, 'Generating route overlay...');
 
           // Step 2: Generate ASS with route path and markers
           // If we have a map background, use standalone mode with map bounds
@@ -978,6 +1190,16 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
             ? `,format=rgba,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*min(1\\,X/W*5)*min(1\\,(H-Y)/H*5)'`
             : '';
 
+          // The minimap overlay is composited and THEN frame-selected by the
+          // timelapse filter, so at high speed-ups nearly all of its frames are
+          // discarded. Match its frame rate to the timelapse (floored at 6fps so
+          // the marker stays fluid) so this lossless .mov stays small — a 6-7h
+          // drive at 64x drops from ~21GB to ~3.5GB (6x), avoiding the
+          // "No space left on device" crash. Non-timelapse exports keep 36fps.
+          const minimapFps = (enableTimelapse && timelapseSpeed > 1)
+            ? Math.max(6, Math.ceil(FPS / timelapseSpeed))
+            : FPS;
+
           let minimapFfmpegArgs;
           if (mapBgPath) {
             // Use map image as background, loop it for video duration
@@ -990,7 +1212,7 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
               '-vf', `scale=${minimapTargetSize}:${minimapTargetSize},format=rgba,ass='${escapedAssPath}'${featherFilter}`,
               '-c:v', 'qtrle',
               '-pix_fmt', 'argb',
-              '-r', '36',
+              '-r', minimapFps.toString(),
               minimapVideoPath
             ];
           } else {
@@ -998,11 +1220,11 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
             minimapFfmpegArgs = [
               '-y',
               '-f', 'lavfi',
-              '-i', `color=c=black@0:s=${minimapTargetSize}x${minimapTargetSize}:d=${durationSec}:r=36,format=rgba`,
+              '-i', `color=c=black@0:s=${minimapTargetSize}x${minimapTargetSize}:d=${durationSec}:r=${minimapFps},format=rgba`,
               '-vf', `ass='${escapedAssPath}'${featherFilter}`,
               '-c:v', 'qtrle',
               '-pix_fmt', 'argb',
-              '-r', '36',
+              '-r', minimapFps.toString(),
               minimapVideoPath
             ];
           }
@@ -1016,7 +1238,18 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
             // previously ran to completion (or outlived the app) untracked.
             activeExports[exportId] = proc;
             let stderr = '';
-            proc.stderr.on('data', d => stderr += d.toString());
+            proc.stderr.on('data', d => {
+              const chunk = d.toString();
+              stderr += chunk;
+              // Advance the minimap bar 50->100% as the composite encodes.
+              const times = [...chunk.matchAll(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/g)];
+              if (times.length && durationSec > 0) {
+                const m = times[times.length - 1];
+                const t = (+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3]);
+                const frac = Math.max(0, Math.min(1, t / durationSec));
+                sendMinimapProgress(50 + Math.round(frac * 50), `Creating minimap video... ${Math.round(frac * 100)}%`);
+              }
+            });
             proc.on('close', code => {
               if (activeExports[exportId] === proc) delete activeExports[exportId];
               if (cancelledExports.has(exportId)) reject(new Error('Export cancelled'));
@@ -1082,7 +1315,8 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
             sendMinimapProgress,
             cancelledExports,
             minimapDarkMode,
-            getEffectiveMapProvider()
+            getEffectiveMapProvider(),
+            getEffectiveMapLabels()
           );
 
           tempFiles.push(minimapTempPath);
@@ -1616,7 +1850,8 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
         if (enc.codec === 'h264_nvenc' || enc.codec === 'hevc_nvenc') {
           // NVIDIA NVENC: CQP mode prevents quality pulsing/glitches
           const cq = Math.max(0, Math.min(51, crf));
-          args.push('-preset', 'p4', '-rc', 'constqp', '-qp', cq.toString());
+          if (bitrateKbps) args.push('-preset', 'p4', '-rc', 'vbr', ...bitrateArgs());
+          else args.push('-preset', 'p4', '-rc', 'constqp', '-qp', cq.toString());
           args.push('-g', (FPS * 2).toString()); // Keyframe every 2 seconds
           args.push('-forced-idr', '1');
         } else if (enc.codec === 'h264_amf' || enc.codec === 'hevc_amf') {
@@ -1626,16 +1861,20 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
           else if (crf >= 24) quality = 'balanced';
 
           args.push('-quality', quality);
-          args.push('-rc', 'cqp');
-          args.push('-qp_i', Math.max(18, Math.min(46, crf)).toString());
-          args.push('-qp_p', Math.max(18, Math.min(46, crf + 2)).toString());
-          args.push('-qp_b', Math.max(18, Math.min(46, crf + 4)).toString());
+          if (bitrateKbps) {
+            args.push('-rc', 'vbr_peak', ...bitrateArgs());
+          } else {
+            args.push('-rc', 'cqp');
+            args.push('-qp_i', Math.max(18, Math.min(46, crf)).toString());
+            args.push('-qp_p', Math.max(18, Math.min(46, crf + 2)).toString());
+            args.push('-qp_b', Math.max(18, Math.min(46, crf + 4)).toString());
+          }
           args.push('-g', (FPS * 2).toString());
         } else if (enc.codec === 'h264_videotoolbox' || enc.codec === 'hevc_videotoolbox') {
           // Apple VideoToolbox: Use bitrate mode for better compatibility
           const baseBitrate = 8000;
           const bitrateMultiplier = Math.max(0.3, 1 - (crf - 18) * 0.03);
-          const targetBitrate = Math.round(baseBitrate * bitrateMultiplier);
+          const targetBitrate = bitrateKbps || Math.round(baseBitrate * bitrateMultiplier);
           args.push('-b:v', `${targetBitrate}k`);
           args.push('-maxrate', `${Math.round(targetBitrate * 1.5)}k`);
           args.push('-bufsize', `${targetBitrate * 2}k`);
@@ -1646,17 +1885,23 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
           // Intel QuickSync: CQP mode
           const qsvQp = Math.max(18, Math.min(46, crf));
           args.push('-preset', 'medium');
-          args.push('-global_quality', qsvQp.toString());
+          if (bitrateKbps) args.push(...bitrateArgs());
+          else args.push('-global_quality', qsvQp.toString());
           args.push('-g', (FPS * 2).toString());
         } else if (enc.codec === 'h264_vaapi' || enc.codec === 'hevc_vaapi') {
           // VAAPI (Linux AMD/Intel): constant-QP rate control
           const vaapiQp = Math.max(18, Math.min(46, crf));
-          args.push('-rc_mode', 'CQP');
-          args.push('-qp', vaapiQp.toString());
+          if (bitrateKbps) {
+            args.push('-rc_mode', 'VBR', ...bitrateArgs());
+          } else {
+            args.push('-rc_mode', 'CQP');
+            args.push('-qp', vaapiQp.toString());
+          }
           args.push('-g', (FPS * 2).toString());
         } else {
           console.log(`[WARN] Using generic settings for unknown GPU encoder: ${enc.codec}`);
-          args.push('-preset', 'fast', '-crf', crf.toString());
+          if (bitrateKbps) args.push('-preset', 'fast', ...bitrateArgs());
+          else args.push('-preset', 'fast', '-crf', crf.toString());
           args.push('-g', (FPS * 2).toString());
         }
         console.log(`[GPU] Using GPU encoder: ${enc.name}`);
@@ -1676,7 +1921,8 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
         const perThreadBytes = totalW * totalH * 7.5;
         const ramCap = Math.max(4, Math.floor((os.freemem() * 0.25) / perThreadBytes));
         const maxThreads = Math.min(coreCap, ramCap, 32);
-        args.push('-c:v', 'libx264', '-preset', mobileExport ? 'faster' : 'fast', '-crf', crf.toString());
+        args.push('-c:v', 'libx264', '-preset', mobileExport ? 'faster' : 'fast',
+          ...(bitrateKbps ? bitrateArgs() : ['-crf', crf.toString()]));
         args.push('-threads', maxThreads.toString());
         args.push('-x264-params', `threads=${maxThreads}:thread-input=1`);
       }
@@ -1830,8 +2076,10 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
             sendComplete(false, { key: 'ui.export.exportFailedGpuEncoderInit' });
           } else if (errLower.includes('invalid argument') && (errLower.includes('error opening output file') || errLower.includes('no such file') || errLower.includes('filename'))) {
             sendComplete(false, { key: 'ui.export.exportFailedInvalidPath' });
-          } else if (errLower.includes('openencodesessionex failed') || errLower.includes('out of memory') || errLower.includes('cannot allocate memory')) {
+          } else if (errLower.includes('openencodesessionex failed')) {
             sendComplete(false, { key: 'ui.export.exportFailedGpuMemory' });
+          } else if (errLower.includes('out of memory') || errLower.includes('cannot allocate memory')) {
+            sendComplete(false, 'Export failed: the video pipeline ran out of memory. Try a shorter export or fewer cameras.');
           } else if (errLower.includes('no nvenc capable devices found') || errLower.includes('cannot load nvenc')) {
             sendComplete(false, { key: 'ui.export.exportFailedGpuUnavailable' });
           } else if (errLower.includes('broken pipe') || errLower.includes('connection reset')) {
@@ -1884,7 +2132,23 @@ async function performVideoExport(event, exportId, exportData, ffmpegPath) {
   }
 }
 
+// One copy of the app at a time: a second launch (e.g. from the Start menu
+// while it runs in the tray) just brings the existing window forward, so two
+// converters never work on the same job files.
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
+else app.on('second-instance', () => showMainWindow());
+
+// Updates and Windows shutdown/sign-out must be able to close a window that
+// is otherwise hidden to the tray.
+try {
+  require('electron').autoUpdater?.on?.('before-quit-for-update', () => { appQuitting = true; });
+} catch (_) { /* no built-in updater on this platform */ }
+
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return;
+  // Clear export temp files a crash or forced close left behind (best effort, in the background).
+  void require('./main/tempCleanup').removeLeftoverTempFiles({ tempDir: app.getPath('temp') }).catch(() => {});
   // Check for new packages after update (dev mode only)
   // This runs before window creation to ensure packages are installed
   const packageResult = await checkAndInstallPackages();
@@ -1908,7 +2172,17 @@ app.whenReady().then(async () => {
     }
   }
 
-  createWindow();
+  const converterRuntime = await startConverterWithRecoveryPrompt({
+    lifecycle: converterLifecycle,
+    createWindow,
+    dialog: smokeTest?.dialog || dialog,
+    app,
+    onError: (error) => console.error(
+      '[CONVERTER] Runtime initialization failed:',
+      error?.code || 'INITIALIZATION_FAILED'
+    )
+  });
+  if (!converterRuntime) return;
 
   // Pre-cache FFmpeg path in background after window is ready. preCacheFFmpegPath
   // is now async (uses spawn, not spawnSync) so the main-process event loop
@@ -1924,6 +2198,7 @@ app.whenReady().then(async () => {
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    else if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) showMainWindow(); // hidden to the tray
   });
 });
 
@@ -1933,7 +2208,8 @@ app.on('window-all-closed', () => {
 
 // Clean up all active FFmpeg processes before quitting
 // This prevents orphaned processes that can block the Windows installer
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  void converterLifecycle.beforeQuit(event);
   console.log('[APP] before-quit: cleaning up active exports...');
   const exportIds = Object.keys(activeExports);
   if (exportIds.length > 0) {
@@ -1975,13 +2251,20 @@ ipcMain.handle('dialog:openFile', async (_event, filters) => {
 // Settings module (extracted to src/main/settings.js)
 registerSettingsIpc();
 
+// Relaunch the app. Used after toggling settings that only take effect at
+// startup (e.g. hardware video acceleration, which is a Chromium switch).
+ipcMain.handle('app:relaunch', () => {
+  app.relaunch();
+  app.exit(0);
+});
+
 /**
  * Check if npm packages need to be installed after an update (dev mode only)
  * @returns {Promise<{needed: boolean, installed: boolean, error?: string}>}
  */
 async function checkAndInstallPackages() {
-  // Only run for dev mode (npm start users)
-  if (app.isPackaged) {
+  // Only run for dev mode (npm start users), never during the launch check
+  if (app.isPackaged || smokeTest) {
     return { needed: false, installed: false };
   }
 
@@ -2684,6 +2967,26 @@ ipcMain.handle('fs:readDir', async (_event, dirPath) => {
   }
 });
 
+// Clip preview filmstrips (made on first preview, or right after conversion).
+let clipThumbnails = null;
+function getClipThumbnails() {
+  if (!clipThumbnails) {
+    const ffmpegPath = findFFmpegPath();
+    const ffprobePath = ffmpegPath ? findFFprobePath(ffmpegPath) : null;
+    if (!ffmpegPath || !ffprobePath) return null;
+    clipThumbnails = createClipThumbnails({
+      directory: path.join(app.getPath('userData'), 'clip-thumbnails'),
+      ffmpegPath, ffprobePath, spawn
+    });
+  }
+  return clipThumbnails;
+}
+
+ipcMain.handle('thumbnails:get', async (_event, filePath) => {
+  if (typeof filePath !== 'string' || filePath.length > 4096) return null;
+  try { return await getClipThumbnails()?.get(filePath) ?? null; } catch (_) { return null; }
+});
+
 // Check if path exists
 ipcMain.handle('fs:exists', async (_event, filePath) => {
   try {
@@ -2736,7 +3039,8 @@ ipcMain.handle('fs:readFile', async (_event, filePath) => {
 // for minutes (frozen UI). Points arrive from the worker as transferable
 // Float64Array buffers (zero-copy), stay cached here, and are inflated
 // per-drive via sentryUsb:getDriveDetail when a drive is opened.
-let sentryUsbCache = { filePath: null, mtimeMs: 0, drives: null, routeCount: 0, routesLen: 0 };
+const sentryUsbCache = createSentryUsbCache();
+const activeSentryUsbWorkers = new Set();
 
 function makeLightSentryUsbDrives(drives) {
   return drives.map(d => {
@@ -2753,17 +3057,19 @@ ipcMain.handle('sentryUsb:loadAndGroup', async (_event, filePath) => {
     // Serve from cache when the same unmodified file is requested again
     // (e.g. a renderer reload) — re-parsing a 400MB+ file takes minutes.
     const stat = fs.statSync(filePath);
-    if (sentryUsbCache.drives && sentryUsbCache.filePath === filePath && sentryUsbCache.mtimeMs === stat.mtimeMs) {
+    const cached = sentryUsbCache.get();
+    if (cached.drives && cached.filePath === filePath && cached.mtimeMs === stat.mtimeMs) {
       console.log('[SentryUSB] Serving drives from cache (file unchanged)');
       return {
         success: true,
-        drives: makeLightSentryUsbDrives(sentryUsbCache.drives),
-        driveCount: sentryUsbCache.drives.length,
-        routeCount: sentryUsbCache.routeCount,
-        routesLen: sentryUsbCache.routesLen,
+        drives: makeLightSentryUsbDrives(cached.drives),
+        driveCount: cached.drives.length,
+        routeCount: cached.routeCount,
+        routesLen: cached.routesLen,
         topKeys: ['routes', 'driveTags'],
       };
     }
+    const cacheGeneration = sentryUsbCache.generation;
 
     const { Worker } = require('worker_threads');
     const fileSize = stat.size;
@@ -2777,7 +3083,10 @@ ipcMain.handle('sentryUsb:loadAndGroup', async (_event, filePath) => {
         const worker = new Worker(path.join(__dirname, 'main', 'driveTagsWorker.js'), {
           workerData: { filePath },
         });
+        activeSentryUsbWorkers.add(worker);
+        const releaseWorker = () => activeSentryUsbWorkers.delete(worker);
         worker.once('message', (msg) => {
+          releaseWorker();
           if (msg?.ok) {
             console.log(`[SentryUSB] Tags worker: ${Object.keys(msg.driveTags).length} drive tags in ${Date.now() - t0}ms`);
             resolve(msg.driveTags);
@@ -2787,12 +3096,16 @@ ipcMain.handle('sentryUsb:loadAndGroup', async (_event, filePath) => {
           }
         });
         worker.once('error', (err) => {
+          releaseWorker();
           console.warn('[SentryUSB] Tags worker error:', err?.message || err);
           resolve({});
         });
         // A worker killed without emitting 'message'/'error' (e.g. OOM) must
         // still resolve, or the load worker waits on the tags forever.
-        worker.once('exit', () => resolve({}));
+        worker.once('exit', () => {
+          releaseWorker();
+          resolve({});
+        });
       } catch (err) {
         console.warn('[SentryUSB] Could not start tags worker:', err?.message || err);
         resolve({});
@@ -2811,6 +3124,7 @@ ipcMain.handle('sentryUsb:loadAndGroup', async (_event, filePath) => {
         if (!settled) {
           settled = true;
           fn(v);
+          activeSentryUsbWorkers.delete(worker);
           try { worker.terminate(); } catch {}
         }
       };
@@ -2818,6 +3132,7 @@ ipcMain.handle('sentryUsb:loadAndGroup', async (_event, filePath) => {
         worker = new Worker(path.join(__dirname, 'main', 'driveLoadWorker.js'), {
           workerData: { filePath },
         });
+        activeSentryUsbWorkers.add(worker);
       } catch (err) { reject(err); return; }
 
       worker.on('message', (msg) => {
@@ -2846,13 +3161,16 @@ ipcMain.handle('sentryUsb:loadAndGroup', async (_event, filePath) => {
 
     console.log(`[SentryUSB] Grouped into ${result.driveCount} drives in ${result.groupMs}ms (total ${Date.now() - t0}ms)`);
 
-    sentryUsbCache = {
+    const cacheStored = sentryUsbCache.replace({
       filePath,
       mtimeMs: stat.mtimeMs,
       drives: result.drives,
       routeCount: result.routeCount,
       routesLen: result.routesLen,
-    };
+    }, cacheGeneration);
+    if (!cacheStored) {
+      return { success: false, cancelled: true, error: 'Drive data load was cleared' };
+    }
 
     return {
       success: true,
@@ -2866,6 +3184,14 @@ ipcMain.handle('sentryUsb:loadAndGroup', async (_event, filePath) => {
     console.error('[SentryUSB] Load failed:', err);
     return { success: false, error: err?.message || String(err) };
   }
+});
+
+ipcMain.handle('sentryUsb:clear', async () => {
+  for (const worker of activeSentryUsbWorkers) {
+    try { worker.terminate(); } catch {}
+  }
+  activeSentryUsbWorkers.clear();
+  return sentryUsbCache.clear();
 });
 
 // Reverse-geocode a coordinate into a short place label for the drive list's
@@ -2892,7 +3218,7 @@ ipcMain.handle('geo:reverseGeocode', async (_event, { lat, lng } = {}) => {
 // shipping all drives' points up front which froze the app. Points are
 // cached as a flat Float64Array (5 values per point) and inflated here.
 ipcMain.handle('sentryUsb:getDriveDetail', async (_event, driveId) => {
-  const drives = sentryUsbCache.drives;
+  const drives = sentryUsbCache.get().drives;
   if (!drives) return { success: false, error: 'No drive data loaded' };
   const drive = drives.find(d => d.id === driveId);
   if (!drive) return { success: false, error: 'Drive not found: ' + driveId };
@@ -2914,6 +3240,7 @@ registerAutoUpdateIpc({
   getMainWindow: () => mainWindow,
   getUpdateBranch,
   loadSettings,
+  saveSettings,
   checkUpdateWithTelemetry,
   processApiResponse
 });
@@ -3068,4 +3395,3 @@ registerDiagnosticsStorageIpc(SUPPORT_SERVER_URL);
 
 // Support chat module (extracted to src/main/supportChat.js)
 registerSupportChatIpc();
-

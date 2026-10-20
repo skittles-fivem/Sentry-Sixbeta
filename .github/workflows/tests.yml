@@ -1,0 +1,199 @@
+name: Tests
+
+# Every automated test, on the platforms the app ships for:
+#   - unit: main-process (Jest) and interface (node --test) tests on Windows,
+#     macOS and Linux, including the real main.js start-up / tray scenarios;
+#   - real-ffmpeg: real conversions with real FFmpeg (the bundled Windows
+#     build, and Ubuntu's FFmpeg on Linux) - integration matrix plus
+#     end-to-end runs of automatic conversion, the time window across a
+#     restart, verification modes, keep-original, the benchmark and live
+#     window updates;
+#   - app-launch: the real Electron app starts, its screens load without
+#     errors, a conversion runs through the app itself, and it quits cleanly.
+# Failures are reported as annotations on the run page.
+#
+# The beta release calls this workflow and only builds when it passes.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, Dev-SEI, 'ci/**']
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  unit:
+    name: Unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use a plain temp folder
+        # Many unit tests build expected paths from the temp folder they
+        # create; give them one without links (macOS /var) or short 8.3 names
+        # (Windows runners). The app itself resolves such folders - the jobs
+        # below keep the runner's default temp folder to prove it.
+        run: |
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          # These tests never start Electron itself.
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      - name: Main-process tests
+        # Real-FFmpeg suites run in their own job below.
+        run: >-
+          npx jest --ci --reporters=default --reporters=github-actions
+          --json --outputFile=jest-results.json
+          --testPathIgnorePatterns integration studioTelemetry
+
+      - name: List failed main-process tests
+        if: failure()
+        run: node tests/ci/jestFailures.js jest-results.json "Unit tests (${{ matrix.os }})"
+
+      - name: Interface tests
+        run: >-
+          node --test
+          --test-reporter=spec --test-reporter-destination=stdout
+          --test-reporter=./tests/ci/githubAnnotations.mjs --test-reporter-destination=stdout
+          tests/renderer/*.test.mjs
+
+  studio-telemetry:
+    # Checks that converted clips keep the dashcam telemetry the player reads.
+    name: Studio telemetry tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - name: Studio telemetry tests
+        env:
+          # Two tests load the player's ES-module reader through vm.SourceTextModule.
+          NODE_OPTIONS: --experimental-vm-modules
+        run: >-
+          npx jest --ci --reporters=default
+          --json --outputFile=jest-results.json tests/main/converter/studioTelemetry
+      - name: List failed telemetry tests
+        if: failure()
+        run: node tests/ci/jestFailures.js jest-results.json "Studio telemetry"
+
+  real-ffmpeg:
+    name: Real FFmpeg conversions (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use a plain temp folder
+        # These tests start jobs directly with folders under the temp folder;
+        # in the app those folders always come from the folder picker, which
+        # gives their real names. (App launch below keeps the default.)
+        run: |
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      - name: FFmpeg for Linux
+        # The repository bundles Windows and macOS builds; Linux uses Ubuntu's.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg > /dev/null
+          install -m 0755 "$(command -v ffmpeg)" ffmpeg_bin/ffmpeg
+          install -m 0755 "$(command -v ffprobe)" ffmpeg_bin/ffprobe
+
+      - name: FFmpeg in use
+        run: |
+          FF=ffmpeg_bin/ffmpeg; [ "$RUNNER_OS" = "Windows" ] && FF=ffmpeg_bin/ffmpeg.exe
+          "$FF" -hide_banner -version | head -1
+          "$FF" -hide_banner -encoders | grep -E "libx265|libsvtav1|libaom-av1"
+
+      - name: Converter integration and end-to-end tests
+        env:
+          # The real scanner loads a shared ES module with import(); Jest
+          # only allows that with this flag (the app itself needs nothing).
+          NODE_OPTIONS: --experimental-vm-modules
+        run: >-
+          npx jest --ci --reporters=default --reporters=github-actions
+          --json --outputFile=jest-results.json
+          --runInBand tests/main/converter/integration
+
+      - name: List failed conversion tests
+        if: failure()
+        run: node tests/ci/jestFailures.js jest-results.json "Real FFmpeg (${{ matrix.os }})"
+
+  app-launch:
+    name: App launch (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies (with Electron)
+        run: npm ci
+
+      - name: FFmpeg for Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg > /dev/null
+          install -m 0755 "$(command -v ffmpeg)" ffmpeg_bin/ffmpeg
+          install -m 0755 "$(command -v ffprobe)" ffmpeg_bin/ffprobe
+
+      - name: Start the app, convert through it, and quit
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a --server-args="-screen 0 1600x1000x24" node tests/smoke/launchApp.js
+          else
+            node tests/smoke/launchApp.js
+          fi
