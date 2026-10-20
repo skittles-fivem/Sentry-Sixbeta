@@ -21,8 +21,9 @@ const TYPE_BY_FOLDER = {
 // Folders that are never descended into (NAS recycle bins, metadata, ours).
 const SKIP_DIRS = new Set(['#recycle', '#snapshot', '$recycle.bin', 'system volume information', 'lost+found']);
 
-// Our own in-flight files on the share: .<name>.sentrymgr.tmp / .sentrymgr.orig
-const LEFTOVER_RE = /^\.(.+)\.sentrymgr\.(tmp|orig)$/;
+// Files the converter owns while it works (src/main/converter/staging.js):
+// never list, trash or delete them from the manager.
+const CONVERTER_ARTIFACT_RE = /^(TEMP-H265-|TEMP-AV1-|BACKUP-)|\.sentry-six-[^/]*\.(partial|candidate|backup)$|^\.sentry-owned-remove-/;
 
 function isValidDay(day) {
   if (!DAY_RE.test(day)) return false;
@@ -95,9 +96,8 @@ function safeJoin(root, relPath) {
   return abs;
 }
 
-function leftoverInfo(name) {
-  const m = name.match(LEFTOVER_RE);
-  return m ? { original: m[1], kind: m[2] } : null;
+function isConverterArtifact(name) {
+  return CONVERTER_ARTIFACT_RE.test(name);
 }
 
 module.exports = {
@@ -107,7 +107,7 @@ module.exports = {
   localDay,
   safeJoin,
   shouldSkipDir,
-  leftoverInfo,
+  isConverterArtifact,
   EVENT_DIR_RE,
   TYPE_BY_FOLDER
 };

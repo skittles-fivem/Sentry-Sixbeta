@@ -57,7 +57,9 @@ function buildMountOptions(smb, credFile) {
   if (smb.username) defaults.push(`credentials=${credFile}`);
   else defaults.push('guest');
   if (smb.version && smb.version.toLowerCase() !== 'default') defaults.push(`vers=${smb.version}`);
-  defaults.push(`uid=${smb.uid}`, `gid=${smb.gid}`, 'file_mode=0664', 'dir_mode=0775', 'noserverino');
+  // serverino (the default) keeps inode numbers stable, which the converter's
+  // identity checks rely on.
+  defaults.push(`uid=${smb.uid}`, `gid=${smb.gid}`, 'file_mode=0664', 'dir_mode=0775');
   return [...defaults.filter((o) => !userKeys.has(optionKey(o))), ...user].join(',');
 }
 
@@ -96,7 +98,7 @@ function explainMountError(output) {
 }
 
 class ShareManager extends EventEmitter {
-  constructor({ config, log, runCmd = run, mountinfoPath = '/proc/self/mountinfo', credDir = '/run/sentry-manager' }) {
+  constructor({ config, log, runCmd = run, mountinfoPath = '/proc/self/mountinfo', credDir = '/run/sentry-manager', id = 'default' }) {
     super();
     this.config = config;
     this.root = config.footagePath;
@@ -104,7 +106,7 @@ class ShareManager extends EventEmitter {
     this.log = log;
     this.runCmd = runCmd;
     this.mountinfoPath = mountinfoPath;
-    this.credFile = path.join(credDir, 'smb-credentials');
+    this.credFile = path.join(credDir, `${String(id).replace(/[^a-z0-9_-]/gi, '_')}-smb-credentials`);
     this.mode = this.smb.share ? 'smb' : 'local';
     this.mountedByUs = false;
     this.failures = 0;

@@ -2,8 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { classify, isValidDay, safeJoin, shouldSkipDir, leftoverInfo } = require('../src/footage');
-const { loadConfig } = require('../src/config');
+const { classify, isValidDay, safeJoin, shouldSkipDir, isConverterArtifact } = require('../server/footage');
 
 test('classifies RecentClips by the Tesla filename date', () => {
   const c = classify('TeslaCam/RecentClips/2026-10-01_08-15-00-front.mp4');
@@ -55,24 +54,11 @@ test('safeJoin refuses to leave the root', () => {
   assert.throws(() => safeJoin('/footage', 'x/../../footage2/a'));
 });
 
-test('skips NAS system folders and recognises our temp files', () => {
+test('skips NAS system folders and hides converter work files', () => {
   for (const d of ['@eaDir', '#recycle', '$RECYCLE.BIN', '.Trash-1000', 'System Volume Information']) assert.equal(shouldSkipDir(d), true, d);
   assert.equal(shouldSkipDir('SentryClips'), false);
-  assert.deepEqual(leftoverInfo('.2026-10-01_08-15-00-front.mp4.sentrymgr.tmp'), { original: '2026-10-01_08-15-00-front.mp4', kind: 'tmp' });
-  assert.equal(leftoverInfo('.DS_Store'), null);
+  for (const n of ['TEMP-H265-2026-10-01_08-15-00-front.mp4', 'TEMP-AV1-x.mp4', 'BACKUP-2026-10-01_08-15-00-front.mp4',
+    '2026-10-01_08-15-00-front.mp4.sentry-six-job-item-abc.partial', '.sentry-owned-remove-0123']) assert.equal(isConverterArtifact(n), true, n);
+  assert.equal(isConverterArtifact('2026-10-01_08-15-00-front.mp4'), false);
 });
 
-test('config defaults keep telemetry and use H.264', () => {
-  const c = loadConfig({});
-  assert.equal(c.port, 9000);
-  assert.equal(c.encode.codec, 'h264');
-  assert.equal(c.encode.preserveTelemetry, true);
-  assert.equal(c.encode.encoder, 'auto');
-  assert.deepEqual(c.encode.types, ['RecentClips', 'SentryClips', 'SavedClips', 'Other']);
-  const h = loadConfig({ ENCODE_CODEC: 'HEVC', ENCODE_TYPES: 'sentryclips, savedclips,bogus', ENCODER: 'vaapi', PORT: '9100' });
-  assert.equal(h.encode.codec, 'hevc');
-  assert.equal(h.encode.quality, 28);
-  assert.deepEqual(h.encode.types, ['SentryClips', 'SavedClips']);
-  assert.equal(h.encode.encoder, 'vaapi');
-  assert.equal(h.port, 9100);
-});

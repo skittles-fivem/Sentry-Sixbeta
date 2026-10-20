@@ -5,10 +5,12 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
-const { ShareManager, findMount, buildMountOptions, credentialsFile, explainMountError } = require('../src/share');
-const { loadConfig } = require('../src/config');
-const { Logger } = require('../src/log');
-const { tmpDir, rmrf } = require('./helpers/fixtures');
+const { ShareManager, findMount, buildMountOptions, credentialsFile, explainMountError } = require('../server/share');
+const os = require('os');
+const { Logger } = require('../server/log');
+
+const tmpDir = () => fsp.mkdtemp(path.join(os.tmpdir(), 'share-test-'));
+const rmrf = (p) => fs.rmSync(p, { recursive: true, force: true });
 
 const MOUNTINFO = [
   '22 1 0:21 / / rw,relatime - overlay overlay rw',
@@ -28,12 +30,12 @@ test('findMount reads /proc/self/mountinfo', () => {
 test('mount options keep the password off the command line and let users override', () => {
   const smb = { username: 'tesla', password: 'p,a=s s', domain: '', version: '3.0', options: '', uid: 1000, gid: 1000 };
   const opts = buildMountOptions(smb, '/run/sentry-manager/smb-credentials');
-  assert.equal(opts, 'credentials=/run/sentry-manager/smb-credentials,vers=3.0,uid=1000,gid=1000,file_mode=0664,dir_mode=0775,noserverino');
+  assert.equal(opts, 'credentials=/run/sentry-manager/smb-credentials,vers=3.0,uid=1000,gid=1000,file_mode=0664,dir_mode=0775');
   assert.ok(!opts.includes('p,a=s s'));
   assert.equal(credentialsFile(smb), 'username=tesla\npassword=p,a=s s\n');
 
   const guest = buildMountOptions({ ...smb, username: '', version: 'default', options: 'vers=2.1, file_mode=0777,seal' }, '/x');
-  assert.equal(guest, 'guest,uid=1000,gid=1000,dir_mode=0775,noserverino,vers=2.1,file_mode=0777,seal');
+  assert.equal(guest, 'guest,uid=1000,gid=1000,dir_mode=0775,vers=2.1,file_mode=0777,seal');
   assert.equal(credentialsFile({ username: 'a\nb', password: 'c', domain: 'HOME' }), 'username=ab\npassword=c\ndomain=HOME\n');
 });
 
@@ -48,12 +50,12 @@ test('mount errors come with actionable hints', () => {
 });
 
 function makeShare({ root, mountinfo, smbShare = '', runCmd, credDir }) {
-  const config = loadConfig({
-    FOOTAGE_PATH: root, DATA_PATH: path.join(root, '..', 'data'),
-    SMB_SHARE: smbShare, SMB_USERNAME: 'tesla', SMB_PASSWORD: 'secret!', PUID: '1000', PGID: '1000'
-  });
+  const config = {
+    footagePath: root,
+    smb: { share: smbShare, username: 'tesla', password: 'secret!', domain: '', version: '3.0', options: '', uid: 1000, gid: 1000 }
+  };
   return new ShareManager({
-    config, log: new Logger({ silent: true }).scope('share'), runCmd, mountinfoPath: mountinfo, credDir
+    config, log: new Logger({ silent: true }).scope('share'), runCmd, mountinfoPath: mountinfo, credDir, id: 'car1'
   });
 }
 
@@ -93,7 +95,7 @@ test('SMB mode mounts the share, writes a 0600 credentials file and passes the w
 
     await share.stop();
     assert.equal(calls[calls.length - 1][0], 'umount');
-    assert.equal(fs.existsSync(path.join(dir, 'run', 'smb-credentials')), false, 'credentials removed on stop');
+    assert.equal(fs.existsSync(path.join(dir, 'run', 'car1-smb-credentials')), false, 'credentials removed on stop');
   } finally {
     rmrf(dir);
   }
