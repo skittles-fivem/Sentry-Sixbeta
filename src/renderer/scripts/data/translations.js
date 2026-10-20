@@ -255,7 +255,7 @@ export const translations = {
                 solidColor: "Solid Color", iconBar: "Icon Bar", sideBar: "Side Bar",
                 fixedToFrontCamera: "Fixed to Front Camera", fixedToFrontCameraDesc: "Keep compact dashboard on front camera",
                 mirrorCameras: "Mirror Cameras", mirrorCamerasDesc: "Mirror back and repeater cameras (as seen in mirrors)",
-                glassBlur: "Glass Blur", glassBlurDesc: "Overlay blur intensity", telemetryRail: "Telemetry Rail", seasonalThemes: "Seasonal Themes", seasonalSeason: "Season", seasonalAuto: "Follow the calendar", seasonSpring: "Spring", seasonSummer: "Summer", seasonAutumn: "Autumn", seasonWinter: "Winter", seasonalEffects: "Seasonal Effects", seasonalEffectsFull: "Full", seasonalEffectsCalm: "Calm", seasonalEffectsOff: "Off",
+                glassBlur: "Glass Blur", glassBlurDesc: "Overlay blur intensity", appearanceSection: "Appearance", telemetryRail: "Telemetry Rail", seasonalThemes: "Seasonal Themes", seasonalSeason: "Season", seasonalAuto: "Follow the calendar", seasonSpring: "Spring", seasonSummer: "Summer", seasonAutumn: "Autumn", seasonWinter: "Winter", seasonalEffects: "Seasonal Effects", seasonalEffectsFull: "Full", seasonalEffectsCalm: "Calm", seasonalEffectsOff: "Off",
                 metricUnits: "Metric Units (KM/H)", metricUnitsDesc: "Use kilometers per hour (KM/H)",
                 dateFormat: "Date Format", dateFormatDesc: "Display format for dates", globalSetting: "Global setting",
                 mdyFormat: "MM/DD/YYYY", dmyFormat: "DD/MM/YYYY", ymdFormat: "YYYY-MM-DD",

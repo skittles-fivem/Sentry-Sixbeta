@@ -356,3 +356,36 @@ body.fd-rail .dashboard-vis:not(.dashboard-vis-compact) .right-cluster { min-wid
    the full width. */
 body.fd-rail.fx-welcome .video-container { margin-right: 0; }
 body.fd-rail.fx-welcome::after { display: none; }
+
+/* ==========================================================================
+   Export (stage 4): a wide, flat sheet
+   ========================================================================== */
+.export-modal {
+    max-width: min(1180px, calc(100vw - 48px));
+    background: var(--fd-card);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border: 1px solid var(--fd-border);
+    border-radius: 16px;
+}
+.export-modal .modal-header::after { display: none; }
+.export-modal .modal-header { border-bottom: 1px solid var(--fd-border); }
+.export-modal .stat-value { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--text-color); }
+.export-modal .collapsible-section { background: var(--fd-inner); border-color: var(--fd-border); border-radius: 12px; }
+.export-modal .collapsible-section.open { border-color: oklch(from var(--accent-color) l c h / 0.45); }
+.export-modal .layout-canvas-container { min-height: 180px; background: #05070A; border-radius: 10px; }
+.export-modal .modal-footer { border-top: 1px solid var(--fd-border); }
+
+/* ==========================================================================
+   Settings (stage 5): flat sheet, accent marker on the active section
+   ========================================================================== */
+.settings-modal {
+    background: var(--fd-card);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border: 1px solid var(--fd-border);
+    border-radius: 16px;
+}
+.settings-modal .modal-header::after { display: none; }
+.settings-sidebar { background: var(--fd-inner); border-right: 1px solid var(--fd-border); }
+.settings-nav-item.active { background: var(--fd-raised); color: var(--accent-color); }
