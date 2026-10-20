@@ -90,6 +90,12 @@ Saved so the work can resume without re-asking or re-mapping.
 
 ## Status
 
-- Done: merge of ai-testing, mapping (3 of 5 areas complete, converter-UI screenshots and
-  test run saved from the 2 interrupted agents).
-- Next: step 1.
+- Done and pushed: backend (step 1), UI (step 2), Docker image, tests:
+  manager `npm test` (18 + 4 end-to-end server tests), converter Jest (24 suites,
+  935 tests) inside the image, real AV1 conversion through the web Encoder with
+  identical telemetry, web viewer playing the AV1 output, README rewritten.
+- In progress: adversarial review (file safety, security, Studio integration,
+  Docker/GPU/updates), then fix confirmed findings and push.
+- Known gaps: export / clip sharing / SentryUSB not available in the web viewer;
+  no real GPU or kernel CIFS here (the sandbox kernel has no cifs module); the
+  native rename helper ships with the image, not with GitHub updates.

@@ -1,178 +1,194 @@
 # Sentry Manager
 
-A self-hosted Docker service that manages your TeslaCam archive on a NAS. It
-connects to the SMB share your footage lives on and gives you a web UI on
-port **9000** to:
+Sentry Studio as a self-hosted web app, plus a manager for your TeslaCam
+archive. It runs in Docker and serves a web UI on port **9000**.
 
-- **See every day's size**: total, split into Recent / Sentry / Saved clips,
-  number of events, and how much of it has been encoded.
-- **Purge old days**: click a day and it is selected together with every
-  older day ("purge up to here"); use the checkboxes to pick single days.
-  The confirm dialog shows exactly how much will be deleted and lets you keep
-  SavedClips.
-- **Shrink footage automatically**: clips are re-encoded in place with the
-  best encoder the container can actually use (NVIDIA NVENC, Intel Quick
-  Sync, VAAPI or CPU), and never encoded twice.
+- **Viewer.** The Sentry Studio viewer, unchanged, in the browser. It plays
+  H.264, H.265 and AV1 clips with the telemetry dashboard.
+- **Encoder.** The Sentry Studio converter from the `ai-testing` branch,
+  unchanged: H.265 / AV1 conversion with telemetry transplant and
+  verification, auto-convert, benchmark, and GPU encoding (NVIDIA, AMD
+  including APUs, Intel).
+- **Footage.** Recordings per vehicle, filtered by category and capture date,
+  with Play, Show files, Protect and Move to trash. **Select shown** selects up
+  to 100 recordings at once.
+- **Recycle Bin.** Trashed recordings stay on the share until you restore them
+  or delete them for good. Nothing is ever deleted automatically.
+- **Policies.** Each vehicle can move recordings older than N days to the
+  Recycle Bin, per category. Protected recordings are never touched.
+- **Jobs, Notifications, Settings.** Every conversion, trash run and policy
+  run is listed under Jobs. Notifications covers shares that are offline,
+  read-only or almost full, and failed jobs. Settings holds vehicles, the
+  account and updates.
 
 ## Quick start
 
 ```bash
-cd manager
-cp .env.example .env      # set SMB_SHARE, SMB_USERNAME, SMB_PASSWORD
+git clone -b claude/sentry-manager-docker-ui-q31i6f https://github.com/skittles-fivem/Sentry-Sixbeta
+cd Sentry-Sixbeta/manager
 docker compose up -d --build
 ```
 
-Open `http://<docker-host>:9000`.
+Open `http://<docker-host>:9000`. On the first visit you create the account.
+Then go to **Settings → Add vehicle**.
 
-## Getting at the footage
+The image is built from the repository root (`context: ..` in the compose
+file), so it ships the same `src/` the desktop app uses.
 
-**Option A: the container mounts the share (default).** Set `SMB_SHARE`,
-`SMB_USERNAME` and `SMB_PASSWORD` in `.env`. The compose file grants the
-`SYS_ADMIN` / `DAC_READ_SEARCH` capabilities and the AppArmor exception that
-`mount.cifs` needs. The manager then:
+Everything else is configured in the UI. `.env` (see `.env.example`) is
+optional. Use it to create the account or a first vehicle without the UI, or
+to set the time zone.
 
-- writes the password to a `0600` credentials file instead of putting it on a
-  command line;
-- checks the share every 30 s and remounts it if the NAS drops or stops
-  answering (soft mount, 15 s timeouts, backoff on repeated failures);
-- runs a write test on start and every 10 minutes that does exactly what an
-  encode needs (create, flush, rename over an existing file, set mtime,
-  delete), and shows the result in the UI;
-- shows mount errors with a hint (wrong password, missing capability, SMB
-  version mismatch, host kernel without CIFS, ...). **Reconnect** in the UI
-  retries immediately.
+## Vehicles and SMB
 
-The Docker host kernel needs CIFS support (`sudo modprobe cifs`; it is built
-in on Synology, Unraid, TrueNAS and most distros).
+Each vehicle is one footage source:
 
-**Option B: you mount it.** Remove `SMB_*`, `cap_add` and `security_opt`
-and give the container the folder at `/footage`, either as a bind mount (when
-Docker runs on the NAS itself):
+- **SMB share** (`//nas/TeslaCam`, username and password). The container
+  mounts it at `/footage/<vehicle-id>` itself. The password is stored in a
+  `0600` credentials file, never on a command line.
+- **Folder** inside the container, for footage you mount yourself: a bind
+  mount on the NAS, or a Docker CIFS volume.
+
+For SMB shares the manager:
+
+- checks the mount every 30 s and remounts with backoff if the NAS drops;
+- every 10 minutes, runs a write test that does what a conversion does
+  (create, rename, set mtime, delete);
+- shows mount errors with a hint (wrong password, SMB version, missing
+  capability, host kernel without CIFS). **Reconnect** retries at once.
+
+The compose file grants `SYS_ADMIN` / `DAC_READ_SEARCH` and
+`apparmor:unconfined`, which `mount.cifs` needs. The Docker host kernel needs
+CIFS (`sudo modprobe cifs`). It is built in on Synology, Unraid, TrueNAS and
+most distros. Shares are mounted with `serverino`, so the converter's file
+identity checks stay valid on CIFS.
+
+If you only use folder vehicles, you can remove `cap_add` and `security_opt`.
+
+## Encoder
+
+The Encoder tab is the desktop converter's own UI and code. The manager
+connects it to the server over HTTP and server-sent events.
+
+- **Telemetry is always kept.** The converter writes Tesla's per-frame
+  telemetry (speed, GPS, gear, Autopilot) into the H.265 / AV1 output and
+  verifies it. Verification **Off** is removed. Quick is the minimum, and the
+  server enforces that too (insurance requirement). The benchmark still
+  compares Off, Quick and Full encode times.
+- **Never converted twice.** Clips that are already H.265 or AV1 are skipped
+  as `already-converted`, which covers replaced files and re-runs.
+  Auto-convert only picks up clips it hasn't seen. Trashed clips are renamed
+  to `.binned`, so the converter ignores them.
+- **Safe replacement on Linux and SMB.** The desktop app's replace mode uses
+  Windows-only file operations. In the container they are replaced by
+  `server/posixOwnedFs.js`:
+  - the file's identity (device, inode, size, sha256) is checked before it is
+    removed or replaced;
+  - removal goes through a quarantine rename;
+  - the new file is promoted with `renameat2(RENAME_NOREPLACE)` (native
+    helper `native/noreplace-rename.c`). On CIFS this rename is no-replace on
+    the server side.
+- **Output.** Converted copies go next to the originals (replace mode), or
+  to any folder under a vehicle. The **Converted copies** folder is
+  `/data/converted`, or set `EXTRA_ROOTS`.
+
+### GPU
+
+The converter tries every encoder ffmpeg offers with a real test encode and
+uses the fastest one that works. In the compose file, uncomment:
+
+| GPU | Encoders | What to uncomment in `docker-compose.yml` |
+| --- | --- | --- |
+| NVIDIA | `hevc_nvenc`, `av1_nvenc` | the `deploy:` block (needs the NVIDIA Container Toolkit) |
+| AMD dGPU or APU | `hevc_vaapi`, `av1_vaapi` (mesa radeonsi) | `devices: - /dev/dri:/dev/dri` |
+| Intel iGPU / Arc | `hevc_qsv`, `av1_qsv`, VA-API | `devices: - /dev/dri:/dev/dri` |
+| none | `libx265`, `libsvtav1` | nothing |
+
+AMD's Windows encoder (AMF) does not exist on Linux, so AMD cards and APUs
+encode through VA-API. AV1 encoding needs RDNA3 or newer.
+
+VA-API uses `/dev/dri/renderD128`. On a host with several GPUs, map the
+one you want to that name:
 
 ```yaml
-    volumes:
-      - ./data:/data
-      - /volume1/TeslaCam:/footage
+    devices:
+      - /dev/dri/renderD129:/dev/dri/renderD128
 ```
 
-or as a Docker-managed CIFS volume:
+**Settings → System** lists the GPUs the container can see, what VA-API
+reports for each, and hints when a device is missing.
 
-```yaml
-services:
-  sentry-manager:
-    volumes:
-      - ./data:/data
-      - teslacam:/footage
-volumes:
-  teslacam:
-    driver: local
-    driver_opts:
-      type: cifs
-      device: //192.168.1.50/TeslaCam
-      o: username=tesla,password=change-me,vers=3.0,uid=0,gid=0,file_mode=0664,dir_mode=0775
-```
+## Recycle Bin and policies
 
-Either way, `/footage` can be the `TeslaCam` folder or any folder that
-contains `RecentClips`, `SentryClips` and `SavedClips` (or Tesla-named clips
-anywhere below it).
+**Move to trash** moves a recording's files into
+`.sentry-recycle-bin/<item>/` on the same share. It is a rename, not a copy,
+so it is instant and needs no space. Protected recordings, and recordings the
+converter is working on, can't be trashed.
 
-## Encoding
+From the Recycle Bin you can restore a recording to where it was, or delete it
+for good. Deleting always needs a confirmation. A restore that would
+overwrite a file is refused, and the recording stays in the bin.
 
-### Which encoder
+A policy picks a run time and a number of days to keep for each category
+(Recent, Sentry, Saved, Other). Recordings older than that, by capture day in
+the vehicle's time zone, are moved to the Recycle Bin. The policy page
+previews what the next run would move.
 
-At start-up (and when you press **Re-detect**) every encoder ffmpeg offers is
-tried with a real test encode using the exact production settings. Being
-listed by `ffmpeg -encoders` is not enough: NVENC is compiled into most builds
-whether or not a GPU exists. Each candidate's output is checked for codec,
-frame count, and whether Tesla's telemetry survived. The UI shows every
-candidate with the reason it was or wasn't used.
+## Updates from GitHub
 
-| GPU | What to add to `docker-compose.yml` |
-| --- | --- |
-| NVIDIA | the `deploy:` block (needs the NVIDIA Container Toolkit) |
-| Intel iGPU / Arc | `devices: - /dev/dri:/dev/dri` |
-| AMD | `devices: - /dev/dri:/dev/dri` |
-| none | nothing, the CPU (x264/x265) is used |
+**Settings → Updates** checks a repository and branch on GitHub (pick from
+the list) and installs that commit. For a private repository, add a token
+with read access. With **automatic updates** on, it checks every 1–24 hours
+and installs when nothing is converting.
 
-`ENCODER=nvenc|qsv|vaapi|software` forces a choice (it falls back if that
-encoder fails its test). `ENCODER_DEVICE` picks a render node on multi-GPU
-hosts; otherwise every `/dev/dri/renderD*` node is tried.
-
-### Telemetry
-
-Tesla stores speed, GPS, gear and Autopilot state as an SEI message on every
-video frame, which is what Sentry Studio's dashboard reads. A plain re-encode
-throws that away. Sentry Manager copies it into the new file (`-udu_sei`) and,
-with `PRESERVE_TELEMETRY=true` (the default), refuses encoders that can't:
-NVENC and the CPU encoders keep it; VAAPI and Quick Sync in current ffmpeg
-builds do not. The output also keeps every frame and timestamp, no B-frames
-and one slice per frame, so Sentry Studio still plays it and its telemetry
-stays in sync.
-
-`ENCODE_CODEC=h264` (default) keeps clips playable in Sentry Studio and in
-the car. `hevc` saves more space, but Sentry Studio can't open HEVC clips.
-
-### Never encoding the same clip twice
-
-Three independent checks, any one of which is enough:
-
-1. The state database (`/data/sentry-manager.db`) remembers every clip it
-   finished, keyed by path, size and mtime. Unchanged clips are skipped
-   without touching the share.
-2. Every encoded file carries a `SentryManager` tag in its MP4 metadata. If
-   the database is lost or a clip is moved or renamed, the tag is found and
-   the clip is recorded as done.
-3. Only H.264 sources are encoded, and an output that isn't at least
-   `ENCODE_MIN_SAVINGS_PERCENT` smaller is thrown away, the original kept, and
-   the clip recorded as skipped so it is not retried.
-
-### How a clip is replaced
-
-1. Only clips older than `ENCODE_MIN_AGE_MINUTES` are touched, so files still
-   being copied are left alone.
-2. The encode is written to local scratch space (`/data/scratch`), not the
-   share, and checked: right codec, tag present, same frame count, same
-   duration.
-3. It is uploaded next to the original as a hidden `.<name>.sentrymgr.tmp`
-   file, size-checked, then renamed over the original. If the server refuses
-   rename-over, the original is parked as `.sentrymgr.orig` first and put back
-   if anything fails.
-4. The original's timestamps are restored. If the source changed meanwhile,
-   nothing is replaced.
-
-Leftovers from a crash or power cut are cleaned up on the next scan; a parked
-original with no replacement is restored.
-
-Newest footage is encoded first, since it is kept longest. ffmpeg runs at
-low priority. **Pause** stops the current encode and holds the queue; the
-lightning button on a day moves that day to the front of the queue.
-
-## Purging
-
-Purging only deletes files the scan identified as Tesla footage on the
-chosen days: per-camera clips, plus `event.json` / `thumb.png` / `event.mp4`
-of events on those days. Folders left empty are removed with `rmdir` (never
-recursively), and the root, its top-level folders and the
-RecentClips / SentryClips / SavedClips folders are always kept. Anything else
-on the share is ignored.
+An update is downloaded to `/data/app/releases/<commit>`. It is checked
+(required files, syntax), and the app restarts into it. If the new version
+crashes within 60 seconds, the container goes back to the previous version,
+or the one built into the image. Updates replace the app's code. ffmpeg,
+drivers and the native rename helper come with the image, so rebuild the image
+(`docker compose up -d --build`) to update those.
 
 ## Settings
 
-All settings are environment variables; `.env.example` lists and explains
-them. A few others: `PORT` (9000), `FOOTAGE_PATH` (`/footage`), `DATA_PATH`
-(`/data`), `SCRATCH_PATH` (`/data/scratch`), `UI_PASSWORD` (enables a login),
-`SCAN_INTERVAL_MINUTES` (15), `LOG_LEVEL` (`info`).
+| Variable | Default | |
+| --- | --- | --- |
+| `TZ` | `UTC` | Server time zone (logs, default vehicle time zone) |
+| `UI_USERNAME` / `UI_PASSWORD` | | Create the account on first start |
+| `VEHICLE_NAME`, `SMB_SHARE`, `SMB_USERNAME`, `SMB_PASSWORD`, `SMB_DOMAIN`, `SMB_VERSION`, `SMB_OPTIONS` | | Create a first SMB vehicle on first start |
+| `FOOTAGE_PATH` | | Create a first folder vehicle instead |
+| `PUID` / `PGID` | `0` | Owner of files written on SMB shares |
+| `UPDATE_REPO` / `UPDATE_BRANCH` | this repo / the built branch | Update defaults |
+| `EXTRA_ROOTS` | | More container folders the converter may write to (`:`-separated) |
+| `SCAN_INTERVAL_MINUTES` | `15` | Re-scan every vehicle |
+| `SECURE_COOKIES` | `false` | Send the session cookie only over HTTPS |
+| `PORT`, `DATA_PATH`, `LOG_LEVEL` | `9000`, `/data`, `info` | |
 
-Without `UI_PASSWORD` anyone who can reach port 9000 can delete footage, so
-set one unless the port is only reachable on a trusted network.
+`/data` holds the account, settings, job history, thumbnails, converter
+staging and installed updates. Keep it on local disk, not on a share.
+
+Sign-in is required. Five failed sign-ins slow down further attempts. If the
+port is reachable from outside your network, put it behind a TLS reverse proxy
+and set `SECURE_COOKIES=true`.
+
+## Not in the web version (yet)
+
+- Export, clip sharing and the SentryUSB drive tools from the desktop app.
+  They show "not available" in the web viewer.
+- Desktop-only converter options (keep running when closed, start with
+  Windows) are hidden.
 
 ## Development
 
-Requires Node.js 22.13+ (uses the built-in `node:sqlite`, no npm packages)
-and ffmpeg for the integration tests.
+Node.js 22.13+ (it uses the built-in `node:sqlite`; there are no npm
+packages) and ffmpeg.
 
 ```bash
 cd manager
+gcc -O2 -o build/noreplace-rename native/noreplace-rename.c
 npm test
-FOOTAGE_PATH=/path/to/TeslaCam DATA_PATH=./data npm start
+DATA_PATH=./data FOOTAGE_PATH=/path/to/TeslaCam SENTRY_NOREPLACE_RENAME=build/noreplace-rename npm start
 ```
+
+The converter's own tests are the repository's Jest suites
+(`tests/main/converter`). `manager/test/server.test.js` starts the server and
+tests it over HTTP, including an update install and a rollback.
