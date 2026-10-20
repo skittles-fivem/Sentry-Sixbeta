@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="style.css">
     <link rel="stylesheet" href="styles/advancedEditor.css">
     <link rel="stylesheet" href="styles/footageConverter.css">
+    <link rel="stylesheet" href="styles/flightDeck.css">
 </head>
 
 <body>
@@ -797,6 +798,9 @@
                                 Waiting for the affected source or destination to reconnect. This job will resume without rescanning the archive.
                             </div>
                             <div id="converterCleanupBanner" class="converter-banner converter-banner-info" role="status" hidden></div>
+                            <div id="converterScanNotice" class="converter-banner converter-banner-info" role="status" hidden data-i18n="ui.converter.scanNotice">
+                                Still finding clips. Discovered and time remaining keep rising until the scan reaches the end of the folder.
+                            </div>
 
                             <div class="converter-current-file">
                                 <div class="converter-current-label" data-i18n="ui.converter.currentFile">Current file</div>
@@ -2407,6 +2411,37 @@
                                     <input type="range" id="settingsGlassBlur" min="0" max="30" value="7" step="1">
                                     <span id="glassBlurValue" class="slider-row-value">7px</span>
                                 </div>
+                            </div>
+                            <label class="toggle-row">
+                                <span class="toggle-row-label" data-i18n="ui.settings.seasonalThemes">Seasonal Themes</span>
+                                <div class="toggle-switch">
+                                    <input type="checkbox" id="settingsSeasonalTheme">
+                                    <div class="toggle-switch-track">
+                                        <div class="toggle-switch-thumb"></div>
+                                    </div>
+                                </div>
+                            </label>
+                            <div class="select-row hidden" id="settingsSeasonalSeasonRow">
+                                <div class="select-row-info">
+                                    <span class="select-row-label" data-i18n="ui.settings.seasonalSeason">Season</span>
+                                </div>
+                                <select id="settingsSeasonalSeason" class="settings-select">
+                                    <option value="auto" selected data-i18n="ui.settings.seasonalAuto">Follow the calendar</option>
+                                    <option value="spring" data-i18n="ui.settings.seasonSpring">Spring</option>
+                                    <option value="summer" data-i18n="ui.settings.seasonSummer">Summer</option>
+                                    <option value="autumn" data-i18n="ui.settings.seasonAutumn">Autumn</option>
+                                    <option value="winter" data-i18n="ui.settings.seasonWinter">Winter</option>
+                                </select>
+                            </div>
+                            <div class="select-row hidden" id="settingsSeasonalEffectsRow">
+                                <div class="select-row-info">
+                                    <span class="select-row-label" data-i18n="ui.settings.seasonalEffects">Seasonal Effects</span>
+                                </div>
+                                <select id="settingsSeasonalEffects" class="settings-select">
+                                    <option value="full" selected data-i18n="ui.settings.seasonalEffectsFull">Full</option>
+                                    <option value="calm" data-i18n="ui.settings.seasonalEffectsCalm">Calm</option>
+                                    <option value="off" data-i18n="ui.settings.seasonalEffectsOff">Off</option>
+                                </select>
                             </div>
                         </div>
                     </div>

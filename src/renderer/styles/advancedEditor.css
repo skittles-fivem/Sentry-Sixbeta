@@ -62,8 +62,8 @@
     align-items: center;
     gap: 12px;
     padding: 10px 22px;
-    background: oklch(0.82 0.18 150 / 0.08);
-    border-bottom: 1px solid oklch(0.82 0.18 150 / 0.18);
+    background: oklch(from var(--accent-color) l c h / 0.08);
+    border-bottom: 1px solid oklch(from var(--accent-color) l c h / 0.18);
     color: var(--text-color);
     font-size: 12.5px;
     line-height: 1.4;
@@ -169,7 +169,7 @@
     width: 100%;
     height: 100%;
     background: #000;
-    border: 2px solid oklch(0.82 0.18 150 / 0.25);
+    border: 2px solid oklch(from var(--accent-color) l c h / 0.25);
     border-radius: 6px;
     overflow: hidden;
 }
@@ -290,7 +290,7 @@
 .ae-tile {
     position: absolute;
     box-sizing: border-box;
-    background: oklch(0.82 0.18 150 / 0.05);
+    background: oklch(from var(--accent-color) l c h / 0.05);
     border: 2px solid var(--accent-glow);
     border-radius: 6px;
     cursor: move;
@@ -303,7 +303,7 @@
 
 .ae-tile.selected {
     border-color: var(--accent-color);
-    box-shadow: 0 0 0 2px oklch(0.82 0.18 150 / 0.2);
+    box-shadow: 0 0 0 2px oklch(from var(--accent-color) l c h / 0.2);
 }
 
 .ae-tile.dragging {

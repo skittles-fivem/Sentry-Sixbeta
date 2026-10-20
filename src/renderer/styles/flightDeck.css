@@ -1,0 +1,170 @@
+/* ==========================================================================
+   Flight Deck theme
+   Loaded after every other stylesheet. The app is already driven by the
+   tokens in style.css :root, so the theme is almost entirely a token swap:
+   flat graphite surfaces, crisp 1px borders and a single lime accent.
+   Seasonal themes (opt-in, see scripts/ui/seasonalTheme.js) swap the same
+   tokens again under html[data-season].
+   ========================================================================== */
+
+:root {
+    --fd-bg: #0B0E13;
+    --fd-card: #12161D;
+    --fd-inner: #0F1318;
+    --fd-raised: #171C24;
+    --fd-border: #1F2530;
+    --fd-border-strong: #2A313D;
+    --fd-track: #1C222C;
+    --fd-info: #5AD1F2;
+    --fd-warn: #FF9F5A;
+    --fd-scenery: none;
+
+    --bg-color: var(--fd-bg);
+    --bg-gradient: var(--fd-bg);
+    --accent-color: #C8F25A;
+    --accent-solid-hover: #D8FA82;
+    --accent-deep: #8FB33A;
+    --accent-glow: oklch(from var(--accent-color) l c h / 0.35);
+    --accent-hover: oklch(from var(--accent-color) l c h / 0.12);
+    --accent-bg: oklch(from var(--accent-color) l c h / 0.10);
+
+    --text-color: #E6EAF0;
+    --text-secondary: #C3CAD5;
+    --text-muted: #8A94A6;
+    --text-faint: #7D8798;
+
+    --panel-bg: oklch(from var(--fd-card) l c h / 0.94);
+    --panel-bg-solid: var(--fd-card);
+    --panel-bg-gradient: var(--fd-card);
+    --glass-bg: oklch(from var(--fd-card) l c h / 0.9);
+    --glass-border: var(--fd-border);
+    --card-gradient: var(--fd-card);
+    --card-gradient-hover: var(--fd-raised);
+    --card-bg: var(--fd-card);
+    --card-hover-bg: var(--fd-raised);
+    --card-shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 10px 28px rgba(0, 0, 0, 0.35);
+    --card-border: var(--fd-border);
+    --border-color: var(--fd-border);
+    --border-subtle: oklch(from var(--fd-border) l c h / 0.7);
+    --border-strong: var(--fd-border-strong);
+    --surface-hover: var(--fd-raised);
+    --surface-active: oklch(from var(--fd-raised) calc(l + 0.04) c h);
+    --surface-raised: var(--fd-inner);
+    --input-bg: var(--fd-inner);
+    --input-border: var(--fd-border-strong);
+    --modal-bg: var(--fd-card);
+    --modal-header-bg: var(--fd-inner);
+    --toast-bg: oklch(from var(--fd-card) l c h / 0.96);
+    --tooltip-bg: oklch(from var(--fd-inner) l c h / 0.97);
+    --info-color: var(--fd-info);
+    --sky-color: var(--fd-info);
+    --inset-highlight: rgba(255, 255, 255, 0.03);
+}
+
+/* Numbers read as instruments: tabular mono figures on the converter. */
+.converter-counters dd,
+.converter-current-progress,
+.converter-timing-rows {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------------------
+   Seasonal palettes (only when the user opts in; the attribute is absent
+   otherwise). Text colors stay the same so contrast never changes.
+   -------------------------------------------------------------------------- */
+html[data-season="spring"] {
+    --fd-bg: #0C1212; --fd-card: #121A19; --fd-inner: #0F1616; --fd-raised: #16201F;
+    --fd-border: #22302D; --fd-border-strong: #2C3D39; --fd-track: #1B2625;
+    --accent-color: #8FE3B0; --accent-solid-hover: #A8EDC3; --accent-deep: #4E9C70;
+    --fd-info: #F2A7C9; --fd-warn: #FFB36B;
+    --bg-gradient: radial-gradient(520px 520px at 100% 0%, rgba(242, 167, 201, 0.16), transparent 70%), var(--fd-bg);
+    --fd-scenery: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1440 300' preserveAspectRatio='none'%3E%3Cpath d='M0 170C220 90 420 120 640 160S1080 100 1440 150V300H0Z' fill='%23132320'/%3E%3Cpath d='M0 230C260 170 520 200 760 230S1180 190 1440 220V300H0Z' fill='%2317302A'/%3E%3C/svg%3E");
+}
+html[data-season="summer"] {
+    --fd-bg: #0F0D0A; --fd-card: #18150F; --fd-inner: #13110C; --fd-raised: #1D1A12;
+    --fd-border: #2F2A1B; --fd-border-strong: #3B3523; --fd-track: #241F15;
+    --accent-color: #FFC94A; --accent-solid-hover: #FFD772; --accent-deep: #B88A1F;
+    --fd-info: #4FD6E8; --fd-warn: #FF7A59;
+    --bg-gradient: radial-gradient(640px 640px at 100% 0%, rgba(255, 201, 74, 0.22), transparent 70%), var(--fd-bg);
+    --fd-scenery: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1440 260' preserveAspectRatio='none'%3E%3Cpath d='M0 150C180 120 360 170 560 140S940 110 1140 140 1360 120 1440 130V260H0Z' fill='%231E1A10'/%3E%3Cpath d='M0 200C240 180 420 215 680 195S1120 180 1440 200V260H0Z' fill='%23252013'/%3E%3C/svg%3E");
+}
+html[data-season="autumn"] {
+    --fd-bg: #110D0B; --fd-card: #1A1411; --fd-inner: #150F0D; --fd-raised: #1F1814;
+    --fd-border: #33271F; --fd-border-strong: #42332A; --fd-track: #261C17;
+    --accent-color: #FF8A3D; --accent-solid-hover: #FFA166; --accent-deep: #B85A1C;
+    --fd-info: #E8C35A; --fd-warn: #F26B7A;
+    --bg-gradient: radial-gradient(420px 420px at 88% 0%, rgba(255, 138, 61, 0.18), transparent 70%), var(--fd-bg);
+    --fd-scenery: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1440 300' preserveAspectRatio='none'%3E%3Cpath d='M0 300 L-50 296 L-20 155 L10 296 L8 296 L35 169 L62 296 L60 296 L84 181 L108 296 L121 296 L143 190 L165 296 L162 296 L184 193 L206 296 L204 296 L227 187 L250 296 L251 296 L270 206 L289 296 L292 296 L315 188 L338 296 L344 296 L365 198 L386 296 L383 296 L404 198 L425 296 L429 296 L453 181 L477 296 L475 296 L507 144 L539 296 L535 296 L554 207 L573 296 L577 296 L608 148 L639 296 L625 296 L654 157 L683 296 L664 296 L698 134 L732 296 L722 296 L754 145 L786 296 L791 296 L812 195 L833 296 L830 296 L861 150 L892 296 L892 296 L916 181 L940 296 L928 296 L957 160 L986 296 L967 296 L997 153 L1027 296 L1010 296 L1035 175 L1060 296 L1064 296 L1083 205 L1102 296 L1105 296 L1131 171 L1157 296 L1143 296 L1177 135 L1211 296 L1200 296 L1234 136 L1268 296 L1260 296 L1277 214 L1294 296 L1304 296 L1323 206 L1342 296 L1354 296 L1376 192 L1398 296 L1394 296 L1416 190 L1438 296 L1440 300Z' fill='%23261B15'/%3E%3Crect y='282' width='1440' height='18' fill='%232B1F17'/%3E%3C/svg%3E");
+}
+html[data-season="winter"] {
+    --fd-bg: #0A0E15; --fd-card: #111724; --fd-inner: #0D131D; --fd-raised: #151C2A;
+    --fd-border: #222C3E; --fd-border-strong: #2D3A50; --fd-track: #1A2233;
+    --accent-color: #9CCBFF; --accent-solid-hover: #B7D9FF; --accent-deep: #4F7FB8;
+    --fd-info: #D7E3F5; --fd-warn: #FFB36B;
+    --bg-gradient: linear-gradient(170deg, rgba(90, 242, 192, 0.10), transparent 32%), radial-gradient(900px 300px at 60% 0%, rgba(180, 156, 255, 0.10), transparent 70%), var(--fd-bg);
+    --fd-scenery: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1440 320' preserveAspectRatio='none'%3E%3Cpath d='M0 220L140 120L230 190L380 70L520 200L640 140L800 40L960 190L1080 110L1220 200L1340 120L1440 170V320H0Z' fill='%23131B29'/%3E%3Cpath d='M380 70L345 102L362 98L380 112L398 96L418 104ZM800 40L760 78L782 72L800 90L822 74L842 82ZM1080 110L1052 136L1068 132L1080 144L1094 132L1110 138Z' fill='%233A4C68'/%3E%3Cpath d='M0 270C200 240 420 262 700 250S1200 238 1440 258V320H0Z' fill='%231B2535'/%3E%3C/svg%3E");
+}
+
+/* Scenery sits at the bottom of the two full-screen surfaces that are not
+   video: the converter and the empty "choose a folder" screen. It is a
+   static background image — no per-frame cost. */
+html[data-season] body,
+html[data-season] .converter-workspace {
+    background: var(--fd-scenery) center bottom / 100% 280px no-repeat fixed, var(--bg-gradient);
+    background-attachment: fixed;
+}
+html[data-season] .drop-overlay {
+    background: var(--fd-scenery) center bottom / 100% 280px no-repeat, var(--bg-gradient);
+}
+
+/* --------------------------------------------------------------------------
+   Seasonal effects layer
+   Only displayed over the converter and the empty start screen — never over
+   playing video. display:none stops every animation outright, and the
+   particles animate transform/opacity only, so they stay on the compositor.
+   -------------------------------------------------------------------------- */
+#seasonalFx {
+    position: fixed;
+    inset: 0;
+    z-index: 85;
+    pointer-events: none;
+    overflow: hidden;
+    contain: strict;
+    display: none;
+}
+html[data-season] body.converter-mode #seasonalFx,
+html[data-season] body.fx-welcome #seasonalFx {
+    display: block;
+}
+#seasonalFx.is-paused .fx-p,
+#seasonalFx.is-paused .fx-p > i {
+    animation-play-state: paused;
+}
+.fx-p {
+    position: absolute;
+    top: -40px;
+    will-change: transform;
+    animation: fx-fall var(--fx-d, 20s) linear var(--fx-delay, 0s) infinite;
+}
+.fx-p > i {
+    display: block;
+    will-change: transform, opacity;
+    animation: var(--fx-inner);
+}
+.fx-petal > i { width: var(--fx-w); height: calc(var(--fx-w) * 0.66); border-radius: 50%; background: var(--fx-c); }
+.fx-leaf > i { width: var(--fx-w); height: var(--fx-w); border-radius: 0 70% 0 70%; background: var(--fx-c); }
+.fx-snow > i { width: var(--fx-w); height: var(--fx-w); border-radius: 50%; background: #F2F7FF; }
+.fx-firefly { animation-name: fx-wander; top: var(--fx-top); }
+.fx-firefly > i { width: var(--fx-w); height: var(--fx-w); border-radius: 50%; background: #FFE28A; box-shadow: 0 0 10px 3px rgba(255, 214, 90, 0.55); }
+
+@keyframes fx-fall { from { transform: translateY(0); } to { transform: translateY(calc(100vh + 80px)); } }
+@keyframes fx-sway { from { transform: translateX(-22px) rotate(-30deg); } to { transform: translateX(22px) rotate(40deg); } }
+@keyframes fx-tumble { 0% { transform: translateX(-34px) rotate(0deg); } 50% { transform: translateX(34px) rotate(180deg); } 100% { transform: translateX(-34px) rotate(360deg); } }
+@keyframes fx-drift { from { transform: translateX(-10px); } to { transform: translateX(10px); } }
+@keyframes fx-wander { 0% { transform: translate(0, 0); } 33% { transform: translate(38px, -26px); } 66% { transform: translate(-26px, -52px); } 100% { transform: translate(14px, 12px); } }
+@keyframes fx-blink { 0%, 100% { opacity: 0.12; } 50% { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+    #seasonalFx { display: none !important; }
+}

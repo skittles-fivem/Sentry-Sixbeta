@@ -37,19 +37,19 @@
     --bg-color: #07090c;
     /* Ambient accent glow behind everything — the liquid glass backdrop */
     --bg-gradient:
-        radial-gradient(1600px 820px at 50% -30%, oklch(0.82 0.18 150 / 0.20), transparent 72%),
-        radial-gradient(1200px 800px at 0% -8%, oklch(0.82 0.18 150 / 0.12), transparent 60%),
+        radial-gradient(1600px 820px at 50% -30%, oklch(from var(--accent-color) l c h / 0.20), transparent 72%),
+        radial-gradient(1200px 800px at 0% -8%, oklch(from var(--accent-color) l c h / 0.12), transparent 60%),
         radial-gradient(1200px 800px at 100% -4%, oklch(0.62 0.19 285 / 0.12), transparent 60%),
-        radial-gradient(900px 560px at 50% 118%, oklch(0.82 0.18 150 / 0.11), transparent 64%),
+        radial-gradient(900px 560px at 50% 118%, oklch(from var(--accent-color) l c h / 0.11), transparent 64%),
         #07090c;
     --text-color: #e6e9ef;
     --text-secondary: #b8bfcf;
     --text-muted: #8a93a3;
     --text-faint: #7a8294;
     --accent-color: oklch(0.82 0.18 150);
-    --accent-glow: oklch(0.82 0.18 150 / 0.4);
-    --accent-hover: oklch(0.82 0.18 150 / 0.15);
-    --accent-bg: oklch(0.82 0.18 150 / 0.10);
+    --accent-glow: oklch(from var(--accent-color) l c h / 0.4);
+    --accent-hover: oklch(from var(--accent-color) l c h / 0.15);
+    --accent-bg: oklch(from var(--accent-color) l c h / 0.10);
     --accent-solid-hover: oklch(0.87 0.16 150);
     --accent-deep: oklch(0.62 0.16 150);
     --dashboard-accent: #0048ff;
@@ -418,14 +418,14 @@ canvas,
 .multi-tile.dragging {
     opacity: 0.4;
     cursor: grabbing;
-    outline: 3px solid oklch(0.82 0.18 150 / 0.6);
+    outline: 3px solid oklch(from var(--accent-color) l c h / 0.6);
     outline-offset: -3px;
 }
 
 .multi-tile.drag-over {
-    outline: 3px solid oklch(0.82 0.18 150 / 1);
+    outline: 3px solid oklch(from var(--accent-color) l c h / 1);
     outline-offset: -3px;
-    box-shadow: 0 0 20px oklch(0.82 0.18 150 / 0.7), inset 0 0 30px oklch(0.82 0.18 150 / 0.15);
+    box-shadow: 0 0 20px oklch(from var(--accent-color) l c h / 0.7), inset 0 0 30px oklch(from var(--accent-color) l c h / 0.15);
 }
 
 .multi-cam-grid.drag-active .multi-tile:not(.dragging) {
@@ -437,7 +437,7 @@ canvas,
     position: fixed;
     pointer-events: none;
     z-index: 9999;
-    background: oklch(0.82 0.18 150 / 0.9);
+    background: oklch(from var(--accent-color) l c h / 0.9);
     color: #fff;
     padding: 6px 12px;
     border-radius: 4px;
@@ -676,11 +676,11 @@ canvas,
     border-bottom: none;
     /* Sentry Drive ambient panel: green/violet glows over opaque slate */
     background:
-        radial-gradient(660px 480px at 24% -8%, oklch(0.82 0.18 150 / 0.28), transparent 70%),
+        radial-gradient(660px 480px at 24% -8%, oklch(from var(--accent-color) l c h / 0.28), transparent 70%),
         radial-gradient(560px 440px at 112% 4%, rgba(139, 92, 246, 0.22), transparent 66%),
-        radial-gradient(700px 560px at 50% 48%, oklch(0.82 0.18 150 / 0.07), transparent 70%),
+        radial-gradient(700px 560px at 50% 48%, oklch(from var(--accent-color) l c h / 0.07), transparent 70%),
         radial-gradient(620px 500px at 12% 112%, rgba(139, 92, 246, 0.20), transparent 68%),
-        radial-gradient(540px 460px at 106% 108%, oklch(0.82 0.18 150 / 0.18), transparent 66%),
+        radial-gradient(540px 460px at 106% 108%, oklch(from var(--accent-color) l c h / 0.18), transparent 66%),
         #0b0e13;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
@@ -709,7 +709,7 @@ canvas,
 
 .sidebar-resize-handle:hover,
 .sidebar-resize-handle:active {
-    background: linear-gradient(90deg, transparent 0%, oklch(0.82 0.18 150 / 0.3) 50%, transparent 100%);
+    background: linear-gradient(90deg, transparent 0%, oklch(from var(--accent-color) l c h / 0.3) 50%, transparent 100%);
 }
 
 .sidebar-resize-handle::after {
@@ -835,7 +835,7 @@ canvas,
     width: 30px;
     height: 30px;
     border-radius: 10px;
-    background: oklch(0.82 0.18 150 / 0.18);
+    background: oklch(from var(--accent-color) l c h / 0.18);
     color: var(--accent-color);
     display: inline-flex;
     align-items: center;
@@ -895,7 +895,7 @@ canvas,
 
 .clip-item.event-item {
     margin-left: 0;
-    border-left: 2px solid oklch(0.82 0.18 150 / 0.4);
+    border-left: 2px solid oklch(from var(--accent-color) l c h / 0.4);
     background: var(--surface-raised);
 }
 
@@ -1240,7 +1240,7 @@ canvas,
 }
 
 .icon-btn:focus-visible {
-    outline: 2px solid oklch(0.82 0.18 150 / 0.55);
+    outline: 2px solid oklch(from var(--accent-color) l c h / 0.55);
     outline-offset: 2px;
 }
 
@@ -1251,8 +1251,8 @@ canvas,
 }
 
 .icon-btn.active {
-    border-color: oklch(0.82 0.18 150 / 0.55);
-    background: oklch(0.82 0.18 150 / 0.18);
+    border-color: oklch(from var(--accent-color) l c h / 0.55);
+    background: oklch(from var(--accent-color) l c h / 0.18);
 }
 
 .icon-btn.swapped {
@@ -1310,12 +1310,12 @@ canvas,
 
 .clip-item:hover {
     background: var(--card-hover-bg);
-    border-color: oklch(0.87 0.16 150 / 0.45);
+    border-color: oklch(from var(--accent-solid-hover) l c h / 0.45);
 }
 
 .clip-item.selected {
-    border-color: oklch(0.82 0.18 150 / 0.55);
-    background: linear-gradient(150deg, oklch(0.82 0.18 150 / 0.18), oklch(0.82 0.18 150 / 0.06) 60%, oklch(0.82 0.18 150 / 0.10));
+    border-color: oklch(from var(--accent-color) l c h / 0.55);
+    background: linear-gradient(150deg, oklch(from var(--accent-color) l c h / 0.18), oklch(from var(--accent-color) l c h / 0.06) 60%, oklch(from var(--accent-color) l c h / 0.10));
 }
 
 .clip-meta {
@@ -1350,9 +1350,9 @@ canvas,
     font-size: 10px;
     padding: 3px 7px;
     border-radius: 999px;
-    background: oklch(0.82 0.18 150 / 0.15);
-    border: 1px solid oklch(0.82 0.18 150 / 0.25);
-    color: oklch(0.82 0.18 150 / 0.95);
+    background: oklch(from var(--accent-color) l c h / 0.15);
+    border: 1px solid oklch(from var(--accent-color) l c h / 0.25);
+    color: oklch(from var(--accent-color) l c h / 0.95);
 }
 
 .badge.muted {
@@ -1414,8 +1414,8 @@ canvas,
 
 .speed-select:focus {
     outline: none;
-    border-color: oklch(0.82 0.18 150 / 0.5);
-    box-shadow: 0 0 0 2px oklch(0.82 0.18 150 / 0.2);
+    border-color: oklch(from var(--accent-color) l c h / 0.5);
+    box-shadow: 0 0 0 2px oklch(from var(--accent-color) l c h / 0.2);
 }
 
 .speed-select option {
@@ -2684,8 +2684,8 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .toast-action {
-    background: oklch(0.82 0.18 150 / 0.3);
-    border: 1px solid oklch(0.82 0.18 150 / 0.5);
+    background: oklch(from var(--accent-color) l c h / 0.3);
+    border: 1px solid oklch(from var(--accent-color) l c h / 0.5);
     color: #fff;
     padding: 4px 10px;
     border-radius: 6px;
@@ -2698,7 +2698,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .toast-action:hover {
-    background: oklch(0.82 0.18 150 / 0.5);
+    background: oklch(from var(--accent-color) l c h / 0.5);
 }
 
 .toast-dismiss {
@@ -2754,9 +2754,9 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     justify-content: center;
     width: 28px;
     height: 28px;
-    background: oklch(0.82 0.18 150 / 0.2);
+    background: oklch(from var(--accent-color) l c h / 0.2);
     border-radius: 6px;
-    color: oklch(0.82 0.18 150 / 1);
+    color: oklch(from var(--accent-color) l c h / 1);
     flex-shrink: 0;
 }
 
@@ -2801,7 +2801,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 .export-floating-bar-fill {
     height: 100%;
     width: 0%;
-    background: linear-gradient(90deg, oklch(0.82 0.18 150 / 0.8), rgba(56, 189, 248, 0.95));
+    background: linear-gradient(90deg, oklch(from var(--accent-color) l c h / 0.8), rgba(56, 189, 248, 0.95));
     border-radius: 2px;
     transition: width 1.5s linear;
 }
@@ -2834,8 +2834,8 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     gap: 10px;
     padding: 12px 14px;
     margin-top: 12px;
-    background: linear-gradient(135deg, oklch(0.82 0.18 150 / 0.12) 0%, oklch(0.82 0.18 150 / 0.08) 100%);
-    border: 1px solid oklch(0.82 0.18 150 / 0.25);
+    background: linear-gradient(135deg, oklch(from var(--accent-color) l c h / 0.12) 0%, oklch(from var(--accent-color) l c h / 0.08) 100%);
+    border: 1px solid oklch(from var(--accent-color) l c h / 0.25);
     border-radius: 8px;
     animation: hint-pulse 2s ease-in-out infinite;
 }
@@ -2844,17 +2844,17 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
     0%,
     100% {
-        border-color: oklch(0.82 0.18 150 / 0.25);
+        border-color: oklch(from var(--accent-color) l c h / 0.25);
     }
 
     50% {
-        border-color: oklch(0.82 0.18 150 / 0.5);
+        border-color: oklch(from var(--accent-color) l c h / 0.5);
     }
 }
 
 .export-minimize-hint svg {
     flex-shrink: 0;
-    color: oklch(0.82 0.18 150 / 0.9);
+    color: oklch(from var(--accent-color) l c h / 0.9);
     margin-top: 1px;
 }
 
@@ -2905,7 +2905,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     width: 48px;
     height: 48px;
     border: 3px solid rgba(255, 255, 255, 0.15);
-    border-top-color: oklch(0.82 0.18 150 / 0.9);
+    border-top-color: oklch(from var(--accent-color) l c h / 0.9);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
     margin-bottom: 20px;
@@ -2939,7 +2939,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 .loading-bar {
     height: 100%;
-    background: linear-gradient(90deg, oklch(0.82 0.18 150 / 0.8), rgba(56, 189, 248, 0.9));
+    background: linear-gradient(90deg, oklch(from var(--accent-color) l c h / 0.8), rgba(56, 189, 248, 0.9));
     width: 0%;
     transition: width 0.15s ease-out;
     border-radius: 2px;
@@ -3062,7 +3062,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     top: 50%;
     transform: translateY(-50%);
     height: 10px;
-    background: oklch(0.82 0.18 150 / 0.3);
+    background: oklch(from var(--accent-color) l c h / 0.3);
     border-radius: 5px;
     pointer-events: none;
     z-index: 5;
@@ -3260,13 +3260,13 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 /* Export Button */
 .export-btn {
-    background: oklch(0.82 0.18 150 / 0.15);
-    border-color: oklch(0.82 0.18 150 / 0.3);
+    background: oklch(from var(--accent-color) l c h / 0.15);
+    border-color: oklch(from var(--accent-color) l c h / 0.3);
 }
 
 .export-btn:not(:disabled):hover {
-    background: oklch(0.82 0.18 150 / 0.25);
-    border-color: oklch(0.82 0.18 150 / 0.5);
+    background: oklch(from var(--accent-color) l c h / 0.25);
+    border-color: oklch(from var(--accent-color) l c h / 0.5);
 }
 
 /* ============================================================
@@ -3451,8 +3451,8 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .collapsible-section.open {
-    border-color: oklch(0.82 0.18 150 / 0.25);
-    background: oklch(0.82 0.18 150 / 0.03);
+    border-color: oklch(from var(--accent-color) l c h / 0.25);
+    background: oklch(from var(--accent-color) l c h / 0.03);
 }
 
 .collapsible-header {
@@ -3646,7 +3646,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .toggle-switch input:checked+.toggle-switch-track {
-    background: oklch(0.82 0.18 150 / 0.35);
+    background: oklch(from var(--accent-color) l c h / 0.35);
 }
 
 .toggle-switch input:checked+.toggle-switch-track .toggle-switch-thumb {
@@ -3656,7 +3656,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .toggle-switch input:focus-visible+.toggle-switch-track {
-    outline: 2px solid oklch(0.82 0.18 150 / 0.5);
+    outline: 2px solid oklch(from var(--accent-color) l c h / 0.5);
     outline-offset: 2px;
 }
 
@@ -3786,8 +3786,8 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 .settings-select:focus {
     outline: none;
-    border-color: oklch(0.82 0.18 150 / 0.5);
-    box-shadow: 0 0 0 2px oklch(0.82 0.18 150 / 0.2);
+    border-color: oklch(from var(--accent-color) l c h / 0.5);
+    box-shadow: 0 0 0 2px oklch(from var(--accent-color) l c h / 0.2);
 }
 
 .settings-select option {
@@ -3866,7 +3866,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 .keybind-row-compact .keybind-input:focus {
     outline: none;
     border-color: var(--accent-color);
-    background: oklch(0.82 0.18 150 / 0.1);
+    background: oklch(from var(--accent-color) l c h / 0.1);
 }
 
 .keybind-row-compact .keybind-clear {
@@ -3919,7 +3919,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 .option-card.selected,
 .option-card:has(input:checked) {
-    background: oklch(0.82 0.18 150 / 0.12);
+    background: oklch(from var(--accent-color) l c h / 0.12);
     border-color: var(--accent-color);
 }
 
@@ -3970,9 +3970,9 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .info-box.info-blue {
-    background: oklch(0.82 0.18 150 / 0.1);
-    border: 1px solid oklch(0.82 0.18 150 / 0.25);
-    color: oklch(0.82 0.18 150 / 0.9);
+    background: oklch(from var(--accent-color) l c h / 0.1);
+    border: 1px solid oklch(from var(--accent-color) l c h / 0.25);
+    color: oklch(from var(--accent-color) l c h / 0.9);
 }
 
 .info-box.info-yellow {
@@ -4234,7 +4234,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 .export-modal .stat-item {
     padding: 12px;
     background: var(--input-bg);
-    border: 1px solid oklch(0.82 0.18 150 / 0.1);
+    border: 1px solid oklch(from var(--accent-color) l c h / 0.1);
     border-radius: 10px;
     text-align: center;
 }
@@ -4255,12 +4255,12 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .export-modal .stat-item.timelapse-active {
-    border-color: oklch(0.82 0.18 150 / 0.35);
-    background: oklch(0.82 0.18 150 / 0.06);
+    border-color: oklch(from var(--accent-color) l c h / 0.35);
+    background: oklch(from var(--accent-color) l c h / 0.06);
 }
 
 .export-modal .stat-item.timelapse-active .stat-label {
-    color: oklch(0.82 0.18 150 / 0.9);
+    color: oklch(from var(--accent-color) l c h / 0.9);
 }
 
 .dev-modal {
@@ -4302,7 +4302,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     position: relative;
     width: 100%;
     background: rgba(0, 0, 0, 0.4);
-    border: 1px solid oklch(0.82 0.18 150 / 0.1);
+    border: 1px solid oklch(from var(--accent-color) l c h / 0.1);
     border-radius: 12px;
     padding: 16px;
     overflow: visible;
@@ -4316,7 +4316,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     max-width: 100%;
     aspect-ratio: 16 / 9;
     background: #000;
-    border: 2px solid oklch(0.82 0.18 150 / 0.2);
+    border: 2px solid oklch(from var(--accent-color) l c h / 0.2);
     border-radius: 6px;
     overflow: hidden;
     touch-action: none;
@@ -4336,19 +4336,19 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .layout-card:hover {
-    background: oklch(0.82 0.18 150 / 0.25);
+    background: oklch(from var(--accent-color) l c h / 0.25);
     border-color: var(--accent-solid-hover);
 }
 
 .layout-card.dragging {
     cursor: grabbing;
     z-index: 1000;
-    box-shadow: 0 4px 20px oklch(0.82 0.18 150 / 0.5);
+    box-shadow: 0 4px 20px oklch(from var(--accent-color) l c h / 0.5);
 }
 
 .layout-card.snapping {
     border-color: var(--accent-solid-hover);
-    box-shadow: 0 0 0 2px oklch(0.82 0.18 150 / 0.5), 0 0 20px var(--accent-glow);
+    box-shadow: 0 0 0 2px oklch(from var(--accent-color) l c h / 0.5), 0 0 20px var(--accent-glow);
 }
 
 .layout-card .card-label {
@@ -4387,7 +4387,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     margin: 16px -20px -16px -20px;
     padding-bottom: 16px;
     z-index: 10;
-    border-top: 1px solid oklch(0.82 0.18 150 / 0.1);
+    border-top: 1px solid oklch(from var(--accent-color) l c h / 0.1);
 }
 
 .export-progress-sticky:empty,
@@ -4490,12 +4490,12 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 /* Share section highlight */
 .share-clip-section {
-    border: 1px solid oklch(0.82 0.18 150 / 0.2) !important;
-    background: linear-gradient(135deg, oklch(0.82 0.18 150 / 0.04) 0%, oklch(0.82 0.18 150 / 0.01) 100%) !important;
+    border: 1px solid oklch(from var(--accent-color) l c h / 0.2) !important;
+    background: linear-gradient(135deg, oklch(from var(--accent-color) l c h / 0.04) 0%, oklch(from var(--accent-color) l c h / 0.01) 100%) !important;
 }
 
 .share-clip-section .collapsible-header {
-    background: oklch(0.82 0.18 150 / 0.06);
+    background: oklch(from var(--accent-color) l c h / 0.06);
 }
 
 .share-new-badge,
@@ -4556,7 +4556,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     height: 8px;
     border-radius: 50%;
     background: var(--accent-color);
-    box-shadow: 0 0 6px oklch(0.82 0.18 150 / 0.8);
+    box-shadow: 0 0 6px oklch(from var(--accent-color) l c h / 0.8);
     animation: badgeDotPulse 1.5s ease-in-out infinite;
     flex-shrink: 0;
 }
@@ -4663,7 +4663,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 .btn-share:not(:disabled):hover {
     background: linear-gradient(135deg, var(--accent-deep), var(--accent-solid-hover)) !important;
-    box-shadow: 0 4px 16px oklch(0.82 0.18 150 / 0.35);
+    box-shadow: 0 4px 16px oklch(from var(--accent-color) l c h / 0.35);
 }
 
 .btn-share.hidden {
@@ -4674,7 +4674,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 .share-link-result {
     margin-top: 16px;
     padding: 14px 16px;
-    background: oklch(0.82 0.18 150 / 0.06);
+    background: oklch(from var(--accent-color) l c h / 0.06);
     border: 1px solid var(--accent-hover);
     border-radius: 10px;
 }
@@ -4693,7 +4693,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     flex: 1;
     padding: 8px 12px;
     border-radius: 6px;
-    border: 1px solid oklch(0.82 0.18 150 / 0.2);
+    border: 1px solid oklch(from var(--accent-color) l c h / 0.2);
     background: rgba(0, 0, 0, 0.3);
     color: var(--accent-color);
     font-size: 13px;
@@ -4823,8 +4823,8 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .shared-clip-item.selected {
-    background: oklch(0.82 0.18 150 / 0.08);
-    border-color: oklch(0.82 0.18 150 / 0.25);
+    background: oklch(from var(--accent-color) l c h / 0.08);
+    border-color: oklch(from var(--accent-color) l c h / 0.25);
 }
 
 .shared-clip-item.expired {
@@ -5431,7 +5431,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .soft-tc-link:hover {
-    background: oklch(0.82 0.18 150 / 0.25);
+    background: oklch(from var(--accent-color) l c h / 0.25);
     transform: translateY(-1px);
 }
 
@@ -5794,8 +5794,8 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     width: 72px;
     height: 72px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--guide-accent-soft) 0%, oklch(0.82 0.18 150 / 0.05) 100%);
-    border: 1px solid oklch(0.82 0.18 150 / 0.3);
+    background: linear-gradient(135deg, var(--guide-accent-soft) 0%, oklch(from var(--accent-color) l c h / 0.05) 100%);
+    border: 1px solid oklch(from var(--accent-color) l c h / 0.3);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -5890,7 +5890,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 .welcome-indicator.active {
     background: var(--accent-color, var(--accent-color));
-    box-shadow: 0 0 8px oklch(0.82 0.18 150 / 0.5);
+    box-shadow: 0 0 8px oklch(from var(--accent-color) l c h / 0.5);
 }
 
 .welcome-indicator.completed {
@@ -5938,7 +5938,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 .welcome-guide-modal .btn-secondary:not(:disabled):hover {
     background: var(--guide-accent-soft);
-    border-color: oklch(0.82 0.18 150 / 0.3);
+    border-color: oklch(from var(--accent-color) l c h / 0.3);
 }
 
 /* Element Highlight Overlay (for pointing to UI elements) */
@@ -6174,7 +6174,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     justify-content: space-between;
     padding: 14px 16px;
     background: linear-gradient(180deg,
-            oklch(0.82 0.18 150 / 0.08) 0%,
+            oklch(from var(--accent-color) l c h / 0.08) 0%,
             rgba(0, 0, 0, 0.2) 100%);
     border-bottom: 1px solid var(--accent-hover);
     border-radius: 16px 16px 0 0;
@@ -6202,7 +6202,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     background: var(--accent-hover);
     padding: 3px 8px;
     border-radius: 6px;
-    border: 1px solid oklch(0.82 0.18 150 / 0.2);
+    border: 1px solid oklch(from var(--accent-color) l c h / 0.2);
 }
 
 .support-chat-actions {
@@ -6222,7 +6222,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 .support-chat-btn:hover {
     background: var(--accent-hover);
-    border-color: oklch(0.82 0.18 150 / 0.3);
+    border-color: oklch(from var(--accent-color) l c h / 0.3);
     color: var(--accent-color);
 }
 
@@ -6511,7 +6511,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .composer-option:has(input:checked) {
-    background: oklch(0.82 0.18 150 / 0.2);
+    background: oklch(from var(--accent-color) l c h / 0.2);
     color: var(--accent-color);
 }
 
@@ -6540,7 +6540,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 .composer-textarea:focus {
     outline: none;
-    border-color: oklch(0.82 0.18 150 / 0.5);
+    border-color: oklch(from var(--accent-color) l c h / 0.5);
     background: rgba(255, 255, 255, 0.1);
 }
 
@@ -6602,7 +6602,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 .support-chat-status.loading {
     color: var(--accent-color);
-    background: oklch(0.82 0.18 150 / 0.1);
+    background: oklch(from var(--accent-color) l c h / 0.1);
 }
 
 .support-chat-status.success {
@@ -6708,7 +6708,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     --settings-accent-glow: var(--accent-glow);
     --settings-accent-soft: var(--accent-hover);
     --settings-secondary: var(--accent-solid-hover);
-    --settings-secondary-glow: oklch(0.87 0.16 150 / 0.3);
+    --settings-secondary-glow: oklch(from var(--accent-solid-hover) l c h / 0.3);
 }
 
 /* Horizontal settings layout */
@@ -6805,7 +6805,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .settings-nav-item.search-highlight {
-    background: oklch(0.82 0.18 150 / 0.08);
+    background: oklch(from var(--accent-color) l c h / 0.08);
     color: var(--accent-color);
 }
 
@@ -7040,7 +7040,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 .settings-modal .toggle-switch input:checked+.toggle-switch-track,
 .dev-modal .toggle-switch input:checked+.toggle-switch-track {
-    background: oklch(0.82 0.18 150 / 0.35);
+    background: oklch(from var(--accent-color) l c h / 0.35);
     box-shadow: 0 0 12px var(--settings-accent-glow);
 }
 
@@ -7171,7 +7171,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 .settings-modal .keybind-input:focus {
     border-color: var(--settings-accent);
     background: var(--settings-accent-soft);
-    box-shadow: 0 0 0 3px oklch(0.82 0.18 150 / 0.1);
+    box-shadow: 0 0 0 3px oklch(from var(--accent-color) l c h / 0.1);
 }
 
 /* Modal footer with subtle gradient */
@@ -7289,7 +7289,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 /* Changelog button in settings with accent */
 .settings-modal #viewChangelogBtn {
-    border-color: oklch(0.82 0.18 150 / 0.3);
+    border-color: oklch(from var(--accent-color) l c h / 0.3);
     transition: all 0.2s ease;
 }
 
@@ -7363,12 +7363,12 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .settings-accordion:hover {
-    border-color: oklch(0.82 0.18 150 / 0.2);
+    border-color: oklch(from var(--accent-color) l c h / 0.2);
 }
 
 .settings-accordion.open {
-    border-color: oklch(0.82 0.18 150 / 0.3);
-    background: oklch(0.82 0.18 150 / 0.05);
+    border-color: oklch(from var(--accent-color) l c h / 0.3);
+    background: oklch(from var(--accent-color) l c h / 0.05);
 }
 
 /* Settings search bar */
@@ -7453,7 +7453,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .settings-accordion.search-match {
-    border-color: oklch(0.82 0.18 150 / 0.3);
+    border-color: oklch(from var(--accent-color) l c h / 0.3);
 }
 
 /* Accordion header */
@@ -7742,7 +7742,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .clip-drive-tab.active .tab-count {
-    background: oklch(0.82 0.18 150 / 0.15);
+    background: oklch(from var(--accent-color) l c h / 0.15);
     color: var(--accent-color);
 }
 
@@ -7862,12 +7862,12 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 .drive-item:hover {
     background: var(--card-hover-bg);
-    border-color: oklch(0.87 0.16 150 / 0.45);
+    border-color: oklch(from var(--accent-solid-hover) l c h / 0.45);
 }
 
 .drive-item.selected {
-    background: linear-gradient(150deg, oklch(0.82 0.18 150 / 0.18), oklch(0.82 0.18 150 / 0.06) 60%, oklch(0.82 0.18 150 / 0.10));
-    border-color: oklch(0.82 0.18 150 / 0.55);
+    background: linear-gradient(150deg, oklch(from var(--accent-color) l c h / 0.18), oklch(from var(--accent-color) l c h / 0.06) 60%, oklch(from var(--accent-color) l c h / 0.10));
+    border-color: oklch(from var(--accent-color) l c h / 0.55);
 }
 
 /* Journey block: times row with origin/destination pins, Departed/Arrived
@@ -7915,7 +7915,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 .jt-pin--dest {
     background: var(--accent-color);
-    box-shadow: 0 0 0 2px oklch(0.82 0.18 150 / 0.3);
+    box-shadow: 0 0 0 2px oklch(from var(--accent-color) l c h / 0.3);
 }
 
 .jt-dash {
@@ -8011,9 +8011,9 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 }
 
 .drive-chip--accent {
-    background: oklch(0.82 0.18 150 / 0.15);
+    background: oklch(from var(--accent-color) l c h / 0.15);
     color: var(--accent-color);
-    border-color: oklch(0.82 0.18 150 / 0.22);
+    border-color: oklch(from var(--accent-color) l c h / 0.22);
 }
 
 .drive-chip--slate {

@@ -85,28 +85,23 @@ function detectSystemLanguage() {
  * @param {Object} params - Optional parameters for string interpolation
  * @returns {string} Translated string
  */
+function lookupTranslation(language, keys) {
+    let value = translations[language];
+    for (const k of keys) {
+        if (!value || typeof value !== 'object') return undefined;
+        value = value[k];
+    }
+    return value;
+}
+
 export function t(key, params = {}) {
     const keys = key.split('.');
-    let value = translations[currentLanguage];
-    
-    // Navigate through nested keys
-    for (const k of keys) {
-        if (value && typeof value === 'object') {
-            value = value[k];
-        } else {
-            // Fallback to English if key not found
-            value = translations['en'];
-            for (const fallbackKey of keys) {
-                if (value && typeof value === 'object') {
-                    value = value[fallbackKey];
-                } else {
-                    break;
-                }
-            }
-            break;
-        }
-    }
-    
+    // Fall back to English whenever the current language lacks the string —
+    // including when only the last segment is missing, which previously
+    // leaked the raw key (e.g. "ui.settings.foo") into the interface.
+    let value = lookupTranslation(currentLanguage, keys);
+    if (typeof value !== 'string') value = lookupTranslation('en', keys);
+
     // If still not found, return the key itself
     if (typeof value !== 'string') {
         console.warn(`Translation key not found: ${key}`);

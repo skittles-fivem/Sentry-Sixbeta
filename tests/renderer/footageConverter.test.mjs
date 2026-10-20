@@ -114,6 +114,7 @@ function makeElements() {
     processedBytes: new FakeElement(),
     reconnectBanner: new FakeElement(),
     cleanupBanner: new FakeElement(),
+    scanNotice: new FakeElement({ hidden: true }),
     errorRows: new FakeElement(),
     pipeline: new FakeElement(),
     pipelineStages: [
@@ -723,6 +724,21 @@ test('marks converter navigation and disclosure copy for translation and accessi
   assert.match(html, /id="converterCustomBitrateRow"[^>]*hidden/);
   assert.doesNotMatch(html, /name="converterNetwork"|ui\.converter\.networkHandling/);
   assert.match(css, /\.converter-segments input:focus-visible \+ span[\s\S]*outline:/);
+});
+
+test('marks discovered as a running total and shows the scan notice while discovery is unfinished', async () => {
+  const elements = { ...makeElements(), eta: new FakeElement() };
+  const api = fakeApi({ current: activeSnapshot({ discoveryComplete: false }) });
+  const controller = createFootageConverterController({ api, elements });
+  await controller.init();
+  assert.equal(elements.countDiscovered.textContent, '5+');
+  assert.equal(elements.scanNotice.hidden, false);
+  assert.doesNotMatch(elements.eta.textContent, /^\d/);
+
+  api.emit({ jobId: 'job-1', revision: 99, snapshot: activeSnapshot({ revision: 99, discoveryComplete: true }) });
+  assert.equal(elements.countDiscovered.textContent, '5');
+  assert.equal(elements.scanNotice.hidden, true);
+  controller.destroy();
 });
 
 test('renders exact aggregate counts from a bounded snapshot whose item list was truncated', async () => {

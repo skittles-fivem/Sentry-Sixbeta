@@ -24,6 +24,7 @@ import { zoomPanState, initZoomPan, resetZoomPan, applyZoomPan, applyMirrorTrans
 import { initSettingsModalDeps, initSettingsModal, initDevSettingsModal, openDevSettings, initChangelogModal, initSettingsSearch } from './scripts/ui/settingsModal.js';
 import { initWelcomeGuide, checkAndShowWelcomeGuide, resetWelcomeGuide, openWelcomeGuide } from './scripts/ui/welcomeGuide.js';
 import { initDiagnostics, logDiagnosticEvent } from './scripts/ui/diagnostics.js';
+import { initSeasonalTheme } from './scripts/ui/seasonalTheme.js';
 import { 
     initCameraRearrange, initCustomCameraOrder, getCustomCameraOrder,
     resetCameraOrder, getEffectiveSlots, initCameraDragAndDrop, updateTileLabels, updateCompactDashboardPosition
@@ -1775,6 +1776,12 @@ initSettingsModalDeps({
 });
 initSettingsModal();
 initSettingsSearch();
+try {
+    initSeasonalTheme();
+} catch (error) {
+    // Cosmetic only: a failure here must never block the app from starting.
+    console.warn('[SEASONAL] init failed', error);
+}
 initDevSettingsModal();
 initChangelogModal();
 
