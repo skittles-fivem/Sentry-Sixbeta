@@ -171,7 +171,7 @@ export function initSettingsModal() {
                 // Sync layout style toggle
                 const settingsLayoutStyle = $('settingsLayoutStyle');
                 if (settingsLayoutStyle) {
-                    const currentStyle = getLayoutStyle?.() || 'modern';
+                    const currentStyle = getLayoutStyle?.() || 'classic';
                     settingsLayoutStyle.checked = currentStyle === 'classic';
                 }
 
@@ -499,7 +499,7 @@ export function initSettingsModal() {
     const settingsLayoutStyle = $('settingsLayoutStyle');
     if (settingsLayoutStyle) {
         // Initialize checkbox state from current layout
-        const currentStyle = getLayoutStyle?.() || 'modern';
+        const currentStyle = getLayoutStyle?.() || 'classic';
         settingsLayoutStyle.checked = currentStyle === 'classic';
 
         settingsLayoutStyle.onchange = () => {

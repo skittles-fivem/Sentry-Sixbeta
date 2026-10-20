@@ -240,3 +240,83 @@ body.converter-mode.clips-mode-docked .video-container { margin-left: 0; }
     .app-topbar { gap: 10px; }
     .app-topbar .clip-drive-tab { padding: 0 10px; }
 }
+
+/* ==========================================================================
+   Telemetry rail (stage 2 — Viewer)
+   body.fd-rail pins the dashboard and map into a right-hand column and
+   shrinks the camera area to fit. Pure CSS over the existing elements: the
+   floating, compact and fixed-to-camera dashboard modes are untouched when
+   the rail is off, and the compact dashboard keeps riding on the front tile.
+   ========================================================================== */
+:root { --rail-w: 360px; --rail-dash-h: 0px; --controls-h: 60px; }
+
+body.fd-rail .video-container { margin-right: var(--rail-w); }
+body.fd-rail.converter-mode .video-container { margin-right: 0; }
+
+body.fd-rail::after {
+    content: '';
+    position: fixed;
+    top: var(--app-topbar-h);
+    right: 0;
+    bottom: var(--controls-h);
+    width: var(--rail-w);
+    background: var(--panel-bg-solid);
+    border-left: 1px solid var(--border-color);
+    z-index: 100;
+    pointer-events: none;
+}
+body.fd-rail.converter-mode::after { display: none; }
+
+body.fd-rail .dashboard-vis:not(.dashboard-vis-compact) {
+    top: var(--app-topbar-h);
+    right: 0;
+    width: var(--rail-w);
+    border-radius: 0;
+    border: 0;
+    border-bottom: 1px solid var(--border-color);
+    box-shadow: none;
+    transform: none !important;
+    background: var(--panel-bg-solid);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+body.fd-rail .dashboard-vis:not(.dashboard-vis-compact) .vis-content { gap: 6px; padding-left: 8px; padding-right: 8px; }
+
+body.fd-rail .map-vis {
+    top: calc(var(--app-topbar-h) + var(--rail-dash-h));
+    left: auto;
+    right: 0;
+    bottom: var(--controls-h);
+    width: var(--rail-w);
+    height: auto;
+    border-radius: 0;
+    border: 0;
+    box-shadow: none;
+    transform: none !important;
+}
+body.fd-rail .dashboard-vis:not(.dashboard-vis-compact) .drag-handle,
+body.fd-rail .map-vis .drag-handle,
+body.fd-rail .map-vis .map-hint { display: none; }
+body.fd-rail.converter-mode .dashboard-vis,
+body.fd-rail.converter-mode .map-vis { visibility: hidden; }
+
+@media (max-width: 1100px) {
+    :root { --rail-w: 300px; }
+}
+
+/* The floating dashboard was laid out for 480px; tighten it for the rail. */
+body.fd-rail .dashboard-vis:not(.dashboard-vis-compact) .vis-content { gap: 8px; }
+body.fd-rail .dashboard-vis:not(.dashboard-vis-compact) .autosteer-section { width: 88px; margin-left: 0; }
+body.fd-rail .dashboard-vis:not(.dashboard-vis-compact) .autosteer-wrapper { width: 88px; }
+body.fd-rail .dashboard-vis:not(.dashboard-vis-compact) .autosteer-icon { width: 52px; height: 52px; }
+body.fd-rail .dashboard-vis:not(.dashboard-vis-compact) .center-cluster { margin-left: 0; gap: 6px; }
+body.fd-rail .dashboard-vis:not(.dashboard-vis-compact) .right-cluster { min-width: 72px; padding-right: 12px; margin-left: 4px; }
+
+/* Docked clip list: flat Flight Deck surface instead of the glass gradient. */
+.clips-mode-docked .clip-browser {
+    background: var(--panel-bg-solid);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow: none;
+    border-right: 1px solid var(--border-color);
+}

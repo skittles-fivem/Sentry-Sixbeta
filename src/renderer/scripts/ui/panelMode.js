@@ -6,7 +6,8 @@ const MIN_SIDEBAR_WIDTH = 280;
 const MAX_SIDEBAR_WIDTH = 600;
 
 // In-memory cache for layout style (loaded async from settings.json)
-let cachedLayoutStyle = 'modern';
+// Flight Deck: the docked clip list is the default; a saved choice still wins.
+let cachedLayoutStyle = 'classic';
 let cachedSidebarWidth = DEFAULT_SIDEBAR_WIDTH;
 
 // Clips panel mode (floating/collapsed or docked/hidden based on layout style)
@@ -64,7 +65,7 @@ export function createClipsPanelMode({ map, clipsCollapseBtn } = {}) {
     // Load settings from settings.json
     if (window.electronAPI?.getSetting) {
       const savedStyle = await window.electronAPI.getSetting('layoutStyle');
-      cachedLayoutStyle = savedStyle || 'modern';
+      cachedLayoutStyle = savedStyle || 'classic';
       
       const savedWidth = await window.electronAPI.getSetting('sidebarWidth');
       cachedSidebarWidth = savedWidth || DEFAULT_SIDEBAR_WIDTH;

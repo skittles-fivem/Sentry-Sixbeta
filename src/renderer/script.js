@@ -25,6 +25,7 @@ import { initSettingsModalDeps, initSettingsModal, initDevSettingsModal, openDev
 import { initWelcomeGuide, checkAndShowWelcomeGuide, resetWelcomeGuide, openWelcomeGuide } from './scripts/ui/welcomeGuide.js';
 import { initDiagnostics, logDiagnosticEvent } from './scripts/ui/diagnostics.js';
 import { initSeasonalTheme } from './scripts/ui/seasonalTheme.js';
+import { initViewerLayout } from './scripts/ui/viewerLayout.js';
 import { 
     initCameraRearrange, initCustomCameraOrder, getCustomCameraOrder,
     resetCameraOrder, getEffectiveSlots, initCameraDragAndDrop, updateTileLabels, updateCompactDashboardPosition
@@ -1772,7 +1773,7 @@ initSettingsModalDeps({
     resetCameraOrder,
     openDevSettingsModal: openDevSettings,
     setLayoutStyle: (style) => window._panelMode?.setLayoutStyle?.(style),
-    getLayoutStyle: () => window._panelMode?.getLayoutStyle?.() || 'modern'
+    getLayoutStyle: () => window._panelMode?.getLayoutStyle?.() || 'classic'
 });
 initSettingsModal();
 initSettingsSearch();
@@ -1781,6 +1782,14 @@ try {
 } catch (error) {
     // Cosmetic only: a failure here must never block the app from starting.
     console.warn('[SEASONAL] init failed', error);
+}
+try {
+    initViewerLayout({
+        // The map changes size when the rail is switched; Leaflet must re-measure.
+        onLayoutChange: () => setTimeout(() => { try { map?.invalidateSize(); } catch { } }, 150)
+    });
+} catch (error) {
+    console.warn('[LAYOUT] init failed', error);
 }
 initDevSettingsModal();
 initChangelogModal();
