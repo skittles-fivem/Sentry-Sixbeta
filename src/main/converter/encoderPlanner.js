@@ -86,7 +86,11 @@ function qualityRateArgs(codec, encoder, level) {
     const qp = codec === 'av1' ? pick('hw255') : pick('hw51');
     return ['-rc', 'cqp', '-qp_i', qp, '-qp_p', qp];
   }
-  if (encoder.endsWith('_vaapi')) return ['-rc_mode', 'CQP', '-qp', codec === 'av1' ? pick('hw255') : pick('hw51')];
+  // av1_vaapi has no -qp option (FFmpeg ignores it with a warning); every
+  // VA-API encoder takes the constant-QP value from -global_quality instead.
+  if (encoder.endsWith('_vaapi')) return codec === 'av1'
+    ? ['-rc_mode', 'CQP', '-global_quality', pick('hw255')]
+    : ['-rc_mode', 'CQP', '-qp', pick('hw51')];
   if (encoder.endsWith('_videotoolbox')) return ['-q:v', pick('videotoolbox')];
   if (encoder === 'libx265') return ['-crf', pick('x265')];
   if (encoder === 'libaom-av1') return ['-crf', pick('av1crf'), '-b:v', '0'];
