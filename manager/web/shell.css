@@ -243,3 +243,4 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .table td[data-label]:not(:first-child)::before { content: attr(data-label); display: block; font-size: 11.5px; color: var(--muted); }
   .table .actions { text-align: left; white-space: normal; padding-top: 8px; }
 }
+.bad-text { color: var(--danger); }

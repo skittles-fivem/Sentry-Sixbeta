@@ -5,6 +5,12 @@
 // that commit's tarball into /data/app/releases/<sha>, checks it, points
 // /data/app/current.json at it and exits with code 75 so the supervisor
 // restarts into it (and rolls back if the new version will not start).
+//
+// Updates run code, so they are locked down: the repository is fixed (set
+// UPDATE_REPO, and UPDATE_ALLOW_REPO_CHANGE=true only if it must be editable
+// in the UI), downloads are HTTPS from api.github.com with certificate checks,
+// and changing the branch or installing needs the password again (index.js).
+// The installed code runs as the unprivileged app user, never as root.
 
 const fs = require('fs');
 const fsp = require('fs/promises');
@@ -15,6 +21,9 @@ const { run, tail } = require('./proc');
 
 const RESTART_CODE = 75;
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+// a conservative subset of git's ref rules: no "..", "//", "@{", leading "-" or "/",
+// trailing "/", "." or ".lock", and only plain characters
+const BRANCH_RE = /^(?![-/])(?!.*\.\.)(?!.*\/\/)(?!.*@\{)[A-Za-z0-9._\/-]{1,200}(?<![/.])(?<!\.lock)$/;
 
 function defaults(env = process.env) {
   return {
@@ -28,8 +37,8 @@ function defaults(env = process.env) {
 }
 
 class Updater {
-  constructor({ db, log, dataDir, appRoot, buildInfo = {}, isIdle = () => true, fetchImpl = globalThis.fetch, exit = (c) => process.exit(c) }) {
-    Object.assign(this, { db, log, dataDir, appRoot, buildInfo, isIdle, fetch: fetchImpl, exit });
+  constructor({ db, log, dataDir, appRoot, buildInfo = {}, isIdle = () => true, fetchImpl = globalThis.fetch, exit = (c) => process.exit(c), allowRepoChange = process.env.UPDATE_ALLOW_REPO_CHANGE === 'true' }) {
+    Object.assign(this, { db, log, dataDir, appRoot, buildInfo, isIdle, fetch: fetchImpl, exit, allowRepoChange });
     this.appDir = path.join(dataDir, 'app');
     // tests point this at a local fake of the GitHub API
     this.apiBase = (process.env.UPDATE_API_BASE || 'https://api.github.com').replace(/\/$/, '');
@@ -37,18 +46,21 @@ class Updater {
   }
 
   settings() {
-    return { ...defaults(), ...(this.db.get('updater') || {}) };
+    const s = { ...defaults(), ...(this.db.get('updater') || {}) };
+    if (!this.allowRepoChange) s.repo = defaults().repo;
+    return s;
   }
 
   setSettings(input) {
     const s = this.settings();
-    if (input.repo !== undefined) {
+    if (input.repo !== undefined && String(input.repo) !== s.repo) {
+      if (!this.allowRepoChange) throw Object.assign(new Error('The update repository is fixed. Set UPDATE_REPO (and UPDATE_ALLOW_REPO_CHANGE=true) in the container environment to change it.'), { status: 403 });
       if (!REPO_RE.test(String(input.repo))) throw Object.assign(new Error('Repository must look like owner/name.'), { status: 400 });
       s.repo = String(input.repo);
     }
     if (input.branch !== undefined) {
       const b = String(input.branch).trim();
-      if (!b || b.length > 200 || /[\s~^:?*[\\]|\.\.|@\{/.test(b)) throw Object.assign(new Error('That is not a valid branch name.'), { status: 400 });
+      if (!BRANCH_RE.test(b)) throw Object.assign(new Error('That is not a valid branch name.'), { status: 400 });
       s.branch = b;
     }
     if (input.enabled !== undefined) s.enabled = Boolean(input.enabled);
@@ -65,7 +77,7 @@ class Updater {
 
   publicSettings() {
     const { token, ...rest } = this.settings();
-    return { ...rest, tokenSet: Boolean(token) };
+    return { ...rest, tokenSet: Boolean(token), repoLocked: !this.allowRepoChange };
   }
 
   current() {
@@ -205,4 +217,4 @@ class Updater {
   }
 }
 
-module.exports = { Updater, RESTART_CODE };
+module.exports = { Updater, RESTART_CODE, BRANCH_RE };

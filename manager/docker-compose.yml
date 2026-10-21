@@ -1,10 +1,11 @@
-# Sentry Manager: web UI on http://<docker-host>:9000
+# Sentry Manager: web UI on https://<docker-host>:9000
 #
 #   cd manager
 #   docker compose up -d --build
+#   docker logs sentry-manager     # the setup code and the HTTPS fingerprint
 #
-# Sign in on first visit to create the account, then add vehicles (one SMB
-# share each) under Settings. Optional defaults go in .env (see .env.example).
+# Create the account with the setup code from the log, then add vehicles (one
+# SMB share each) under Settings. Optional defaults go in .env (.env.example).
 services:
   sentry-manager:
     build:
@@ -22,12 +23,25 @@ services:
       # Accounts, settings, job journals, thumbnails, converter staging and
       # the default output folder. Keep it on local disk, not on a share.
       - ./data:/data
-    # Lets the container mount each vehicle's SMB share itself.
+    # Only the small root supervisor keeps these; the web app, ffmpeg and
+    # updates run as PUID:PGID with no capabilities at all.
+    #   SYS_ADMIN, DAC_READ_SEARCH, DAC_OVERRIDE  mount.cifs (SMB shares)
+    #   SETUID, SETGID, SETPCAP                   start the app unprivileged
+    #   CHOWN, KILL                               own /data, stop the app
+    cap_drop:
+      - ALL
     cap_add:
       - SYS_ADMIN
       - DAC_READ_SEARCH
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+      - SETPCAP
+      - CHOWN
+      - KILL
     security_opt:
-      - apparmor:unconfined
+      - no-new-privileges:true
+      - apparmor:unconfined      # Docker's default AppArmor profile forbids mount
       # - label=disable          # SELinux hosts (Fedora/RHEL)
 
     # ---- AMD (dGPU or APU) / Intel GPU: uncomment

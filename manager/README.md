@@ -27,43 +27,74 @@ archive. It runs in Docker and serves a web UI on port **9000**.
 git clone -b claude/sentry-manager-docker-ui-q31i6f https://github.com/skittles-fivem/Sentry-Sixbeta
 cd Sentry-Sixbeta/manager
 docker compose up -d --build
+docker logs sentry-manager
 ```
 
-Open `http://<docker-host>:9000`. On the first visit you create the account.
+The log shows two things you need once:
+
+- the **setup code**. Open `https://<docker-host>:9000`, enter the code and
+  choose the account's user name and password. Without the code nobody, not
+  even someone who reaches the page before you, can create the account.
+- the **HTTPS fingerprint** of Sentry Manager's certificate authority. See
+  [Security](#security) for installing it on your devices, so browsers trust
+  the page and nobody can pose as it.
+
 Then go to **Settings → Add vehicle**.
 
 The image is built from the repository root (`context: ..` in the compose
 file), so it ships the same `src/` the desktop app uses.
 
 Everything else is configured in the UI. `.env` (see `.env.example`) is
-optional. Use it to create the account or a first vehicle without the UI, or
-to set the time zone.
+optional. Use it to create the account or a first vehicle without the UI, to
+set the time zone, or the names the HTTPS certificate covers.
 
 ## Vehicles and SMB
 
 Each vehicle is one footage source:
 
-- **SMB share** (`//nas/TeslaCam`, username and password). The container
-  mounts it at `/footage/<vehicle-id>` itself. The password is stored in a
-  `0600` credentials file, never on a command line.
-- **Folder** inside the container, for footage you mount yourself: a bind
-  mount on the NAS, or a Docker CIFS volume.
+- **SMB share** (`//nas/TeslaCam`, user name and password). The container
+  mounts it at `/footage/<vehicle-id>` itself.
+- **Folder** inside the container, for footage you mount yourself (a bind
+  mount on the NAS, or a Docker CIFS volume). It must be below `/footage`
+  (for example `- /volume1/TeslaCam:/footage/car` in the compose file), or
+  below a folder listed in `FOLDER_ROOTS`.
 
-For SMB shares the manager:
+Every SMB mount is protected against a man in the middle, with no settings
+that can weaken it:
+
+- **SMB 3 only**: 3.1.1 by default, or 3.02 / 3.0 for older servers. SMB 1
+  and 2 cannot encrypt and are easier to downgrade, so they are refused.
+- **Encrypted and signed.** Encryption is on by default. If your NAS cannot
+  encrypt, you can turn encryption off for that vehicle; signing then stays
+  required. Either way, someone on the network who does not know the password
+  cannot change the footage or pose as your NAS. Without encryption they could
+  watch it.
+- **A real account**: guest access has no keys to sign or encrypt with, so it
+  is not allowed. Use a dedicated NAS user with access to the TeslaCam share
+  only, and a long random password.
+- **Nothing on a share can run**: shares are mounted `nosuid,nodev,noexec`,
+  and symlinks on a share are never followed outside it.
+- **Credentials stay with root**: the password goes in a `0600` file only the
+  root supervisor can read, never on a command line. Mount options are built
+  from the fields above; there is no free-form options field.
+
+For SMB shares the manager also:
 
 - checks the mount every 30 s and remounts with backoff if the NAS drops;
 - every 10 minutes, runs a write test that does what a conversion does
   (create, rename, set mtime, delete);
-- shows mount errors with a hint (wrong password, SMB version, missing
-  capability, host kernel without CIFS). **Reconnect** retries at once.
+- shows mount errors with a hint (wrong password, no SMB 3 encryption on the
+  NAS, missing capability, host kernel without CIFS). **Reconnect** retries
+  at once.
 
-The compose file grants `SYS_ADMIN` / `DAC_READ_SEARCH` and
-`apparmor:unconfined`, which `mount.cifs` needs. The Docker host kernel needs
-CIFS (`sudo modprobe cifs`). It is built in on Synology, Unraid, TrueNAS and
-most distros. Shares are mounted with `serverino`, so the converter's file
-identity checks stay valid on CIFS.
+To turn on SMB 3 encryption on the NAS: Synology: *Control Panel > File
+Services > SMB > Advanced* (minimum SMB 3, encryption on); Samba / TrueNAS /
+Unraid: `server min protocol = SMB3` and `server smb encrypt = desired`;
+Windows: `Set-SmbServerConfiguration -EncryptData $true`.
 
-If you only use folder vehicles, you can remove `cap_add` and `security_opt`.
+The Docker host kernel needs CIFS (`sudo modprobe cifs`). It is built in on
+Synology, Unraid, TrueNAS and most distros. Shares are mounted with
+`serverino`, so the converter's file identity checks stay valid on CIFS.
 
 ## Encoder
 
@@ -153,22 +184,83 @@ drivers and the native rename helper come with the image, so rebuild the image
 | Variable | Default | |
 | --- | --- | --- |
 | `TZ` | `UTC` | Server time zone (logs, default vehicle time zone) |
-| `UI_USERNAME` / `UI_PASSWORD` | | Create the account on first start |
-| `VEHICLE_NAME`, `SMB_SHARE`, `SMB_USERNAME`, `SMB_PASSWORD`, `SMB_DOMAIN`, `SMB_VERSION`, `SMB_OPTIONS` | | Create a first SMB vehicle on first start |
+| `UI_USERNAME` / `UI_PASSWORD` | | Create the account on first start (instead of the setup code) |
+| `VEHICLE_NAME`, `SMB_SHARE`, `SMB_USERNAME`, `SMB_PASSWORD`, `SMB_DOMAIN`, `SMB_VERSION`, `SMB_ENCRYPT`, `SMB_PORT` | | Create a first SMB vehicle on first start |
 | `FOOTAGE_PATH` | | Create a first folder vehicle instead |
-| `PUID` / `PGID` | `0` | Owner of files written on SMB shares |
-| `UPDATE_REPO` / `UPDATE_BRANCH` | this repo / the built branch | Update defaults |
+| `FOLDER_ROOTS` | | More folders (`:`-separated) folder vehicles may be in, besides `/footage` |
+| `PUID` / `PGID` | `1000` | The unprivileged user the app runs as; it owns `/data` and the files on the shares |
+| `TLS_HOSTNAMES` | | Names / IP addresses the HTTPS certificate covers (more in Settings > Security) |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` | | Use your own certificate instead of the local CA |
+| `TLS_MODE` | `auto` | `off` = plain HTTP, only behind a reverse proxy that does HTTPS |
+| `TRUST_PROXY` | `false` | Trust `X-Forwarded-Proto` / `-Host` from that reverse proxy |
+| `TRUSTED_HOSTS` | | If set, refuse requests for any other host name |
+| `UPDATE_REPO` / `UPDATE_BRANCH` | this repo / the built branch | Update source |
+| `UPDATE_ALLOW_REPO_CHANGE` | `false` | Allow changing the update repository in the UI |
 | `EXTRA_ROOTS` | | More container folders the converter may write to (`:`-separated) |
 | `SCAN_INTERVAL_MINUTES` | `15` | Re-scan every vehicle |
-| `SECURE_COOKIES` | `false` | Send the session cookie only over HTTPS |
 | `PORT`, `DATA_PATH`, `LOG_LEVEL` | `9000`, `/data`, `info` | |
 
 `/data` holds the account, settings, job history, thumbnails, converter
-staging and installed updates. Keep it on local disk, not on a share.
+staging, installed updates and the HTTPS certificate authority. Keep it on
+local disk, not on a share.
 
-Sign-in is required. Five failed sign-ins slow down further attempts. If the
-port is reachable from outside your network, put it behind a TLS reverse proxy
-and set `SECURE_COOKIES=true`.
+## Security
+
+What protects what, if someone is on your network (a man in the middle) or
+gets into the web UI:
+
+**The page (HTTPS).** Port 9000 speaks HTTPS; plain HTTP there only redirects
+to it. Sentry Manager is its own small certificate authority (CA): install
+it once on each phone and computer and browsers trust the page, so nobody
+can read your password or session, change the page, or pose as the server.
+
+1. Download it in *Settings > Security* (or copy `/data/tls/ca.crt` from the
+   host).
+2. Compare its SHA-256 fingerprint with the one in `docker logs sentry-manager`
+   before you trust it.
+3. Install it (the steps for iPhone, Android, Windows, macOS and Firefox are
+   on that page).
+4. Add the IP address or name you type in the browser under *Settings >
+   Security* (or `TLS_HOSTNAMES`), so the certificate covers it.
+
+The CA is name-constrained: it can only vouch for local names (`.local`,
+`.lan`, `.home.arpa`, ...), private IP addresses and the names you add. Even
+if its key were stolen, it could not be used to impersonate other websites
+to your devices. Its key never leaves root's folder `/data/tls`. With your own
+certificate (`TLS_CERT_FILE`), none of this applies. Bookmark the `https://`
+address: the very first plain-HTTP request is the one a man in the middle
+could still intercept.
+
+**Signing in.** The first account needs the one-time setup code from the log.
+Five wrong passwords slow down further attempts. Session cookies are
+HttpOnly, SameSite=Strict, Secure and `__Host-` prefixed. Requests that
+change something must come from the page itself (a custom header plus an
+`Origin` check), and every page runs under a Content-Security-Policy with no
+inline scripts.
+
+**Changes that could hand someone your shares or the server** need your
+password again, even in a signed-in session:
+
+- adding a vehicle, or changing where its footage comes from;
+- update settings, and installing an update;
+- the HTTPS certificate names;
+- deleting from the Recycle Bin for good.
+
+The update repository is fixed (`UPDATE_REPO`), so nobody can point updates
+at their own code. Only the branch can be picked in the UI.
+
+**No root for the web app.** Only a small supervisor runs as root. It is
+image code and never loads anything from `/data`. It mounts shares (from
+validated fields only) and keeps the CA. The web app, ffmpeg and installed
+updates run as `PUID:PGID` with no capabilities and `no_new_privs`. The image
+has no setuid programs, and the compose file drops every capability except
+the few the supervisor needs. A bug in the web app, a malicious video on a
+share, or a bad update therefore cannot become root, and cannot read the SMB
+passwords or the CA key.
+
+**Files on a share are not trusted.** Symlinks are never followed out of a
+share, folder vehicles cannot point at `/`, `/data`, the app or system
+folders, and nothing on a share can execute.
 
 ## Not in the web version (yet)
 

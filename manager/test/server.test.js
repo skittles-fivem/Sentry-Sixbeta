@@ -59,7 +59,7 @@ async function startServer(dir, env = {}) {
     env: {
       ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: path.join(dir, 'data'), FOOTAGE_PATH: path.join(dir, 'footage'),
       VEHICLE_NAME: 'Daily Driver', RUN_DIR: path.join(dir, 'run'), UI_PASSWORD: 'correct horse', TZ: 'UTC',
-      SENTRY_NOREPLACE_RENAME: HELPER, LOG_LEVEL: 'warn', ...env
+      SENTRY_NOREPLACE_RENAME: HELPER, LOG_LEVEL: 'warn', TLS_MODE: 'off', ...env
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -100,7 +100,7 @@ async function startServer(dir, env = {}) {
     child.once('exit', (code) => resolve(code));
     child.kill('SIGTERM');
   });
-  return { base, call, child, stop, output: () => output, setCookie: (c) => { cookie = c; } };
+  return { base, call, child, stop, output: () => output, setCookie: (c) => { cookie = c; }, getCookie: () => cookie };
 }
 
 async function tmp() {
@@ -139,6 +139,22 @@ test('sign-in, CSRF header and throttling', async () => {
     assert.equal((await s2.call('GET', '/api/vehicles')).status, 200);
     const noHeader = await s2.call('POST', '/api/vehicles/daily-driver/scan', {}, { headers: { 'X-Requested-With': 'x' } });
     assert.equal(noHeader.status, 403, 'mutations need the X-Requested-With header');
+    const crossSite = await s2.call('POST', '/api/vehicles/daily-driver/scan', {}, { headers: { Origin: 'http://evil.example' } });
+    assert.equal(crossSite.status, 403, 'mutations from another site are refused');
+    // a stray cookie with bad %-encoding must not break the session
+    const stray = await s2.call('GET', '/api/vehicles', undefined, { headers: { Cookie: `other=100%; ${s2.getCookie()}` } });
+    assert.equal(stray.status, 200);
+    // static files: one decoded path decides; encoded tricks never reach a file
+    s2.setCookie('');
+    for (const u of ['/web/login%2F..%2Fapp.js', '/web/fonts/..%2Findex.html', '/web/login%2F..%2FelectronApiShim.js']) {
+      assert.equal((await s2.call('GET', u, undefined, { raw: true })).status, 400, u);
+    }
+    assert.equal((await s2.call('GET', '/web/app.js', undefined, { raw: true })).status, 302, 'the app needs sign-in');
+    assert.equal((await s2.call('GET', '/web/login.js', undefined, { raw: true })).status, 200, 'the sign-in script does not');
+    const headers = (await s2.call('GET', '/login', undefined, { raw: true })).headers;
+    assert.match(headers.get('content-security-policy'), /script-src 'self'(;|$)/);
+    assert.equal(headers.get('x-frame-options'), 'SAMEORIGIN');
+    await s2.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
     assert.equal((await s2.call('POST', '/api/auth/logout', {})).status, 200);
     assert.equal((await s2.call('GET', '/api/vehicles')).status, 401);
   } finally {
@@ -246,11 +262,15 @@ test('Studio is served with the web shim; converter bridge enforces Quick and al
   const s = await startServer(dir);
   try {
     await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
-    const html = await (await s.call('GET', '/studio/index.html', undefined, { raw: true })).text();
-    assert.match(html, /window\.__SENTRY_WEB__ = true;[\s\S]*electronApiShim\.js/);
+    const studioRes = await s.call('GET', '/studio/index.html', undefined, { raw: true });
+    assert.match(studioRes.headers.get('content-security-policy'), /script-src 'self' 'unsafe-eval'/, 'Studio needs eval for its protobuf decoder');
+    assert.doesNotMatch((await s.call('GET', '/', undefined, { raw: true })).headers.get('content-security-policy'), /unsafe-eval/, 'the shell does not');
+    const html = await studioRes.text();
+    assert.match(html, /webFlag\.js[\s\S]*electronApiShim\.js/);
+    assert.ok(!/<script>/.test(html.split('</head>')[0].split('<head>')[1].split('<title>')[0]), 'nothing inline is injected');
     assert.equal((await s.call('GET', '/shared/mapProviders.js', undefined, { raw: true })).status, 200);
     assert.equal((await s.call('GET', '/assets/pedal_brake.png', undefined, { raw: true })).headers.get('content-type'), 'image/png');
-    assert.equal((await s.call('GET', '/studio/../../manager/server/index.js', undefined, { raw: true })).status, 404);
+    assert.ok([400, 404].includes((await s.call('GET', '/studio/..%2F..%2Fmanager/server/index.js', undefined, { raw: true })).status));
 
     await waitFor(async () => (await s.call('POST', '/api/converter/invoke/getCapabilities')).data.ok);
     const outside = await s.call('POST', '/api/converter/invoke/start', {
@@ -304,7 +324,17 @@ test('GitHub update installs a branch and the supervisor rolls back a broken one
   });
   await new Promise((r) => gh.listen(0, '127.0.0.1', r));
   const api = `http://127.0.0.1:${gh.address().port}`;
-  const s = await startServer(dir, { UPDATE_API_BASE: api });
+  const locked = await startServer(dir, { UPDATE_API_BASE: api });
+  try {
+    await locked.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    const refused = await locked.call('PUT', '/api/updater/settings', { repo: 'o/r' });
+    assert.equal(refused.status, 403, 'the update repository is fixed unless the environment allows changing it');
+    assert.equal((await locked.call('GET', '/api/updater')).data.settings.repoLocked, true);
+    assert.equal((await locked.call('PUT', '/api/updater/settings', { branch: '<svg/onload=x>' })).status, 400);
+  } finally {
+    await locked.stop();
+  }
+  const s = await startServer(dir, { UPDATE_API_BASE: api, UPDATE_ALLOW_REPO_CHANGE: 'true' });
   try {
     await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
     assert.equal((await s.call('PUT', '/api/updater/settings', { repo: 'not a repo' })).status, 400);
@@ -330,7 +360,7 @@ test('GitHub update installs a branch and the supervisor rolls back a broken one
   await fsp.writeFile(path.join(dir, 'data/app/releases', fakeSha, 'manager/server/index.js'), 'process.exit(3);\n');
   const port = await freePort();
   const sup = spawn(process.execPath, [SUPERVISOR], {
-    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: path.join(dir, 'data'), FOOTAGE_PATH: path.join(dir, 'footage'), RUN_DIR: path.join(dir, 'run'), SENTRY_NOREPLACE_RENAME: HELPER, LOG_LEVEL: 'warn' },
+    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: path.join(dir, 'data'), FOOTAGE_PATH: path.join(dir, 'footage'), RUN_DIR: path.join(dir, 'run'), SENTRY_NOREPLACE_RENAME: HELPER, LOG_LEVEL: 'warn', TLS_MODE: 'off', PUID: '0', PGID: '0' },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   let out = '';
@@ -345,7 +375,10 @@ test('GitHub update installs a branch and the supervisor rolls back a broken one
       }
     }, 60000);
     assert.match(out, /going back/);
-    assert.equal(fs.existsSync(path.join(dir, 'data/app/current.json')), false, 'pointer cleared: running the built-in version');
+    assert.match(out.split('going back')[1], /starting built-in version/, 'falls back to the built-in version');
+    // root records the broken release in its own folder and never writes the app's /data/app
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'data/.supervisor/bad-releases.json'), 'utf8')), [fakeSha]);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'data/app/current.json'), 'utf8')).sha, fakeSha, 'the app\'s pointer is left alone');
   } finally {
     sup.kill('SIGTERM');
     await new Promise((r) => sup.once('exit', r));

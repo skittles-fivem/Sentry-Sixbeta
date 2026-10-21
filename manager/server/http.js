@@ -72,26 +72,28 @@ class Router {
       const m = pathname.match(r.re);
       if (!m) continue;
       const params = {};
-      r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]); });
+      try {
+        r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]); });
+      } catch {
+        return null;
+      }
       return { route: r, params };
     }
     return null;
   }
 }
 
-/** Serve a file below `root`; resolves false if there is none. */
-async function serveFile(req, res, root, rel, { transform, cache = 'no-cache' } = {}) {
-  let decoded;
-  try {
-    decoded = decodeURIComponent(rel);
-  } catch {
-    return false;
-  }
-  const abs = path.resolve(root, `.${path.sep}${decoded}`);
+/**
+ * Serve a file below `root`; resolves false if there is none. `rel` is the
+ * already decoded and normalized request path below the route prefix.
+ */
+async function serveFile(req, res, root, rel, { transform, cache = 'no-cache', headers = {} } = {}) {
+  if (typeof rel !== 'string' || rel.includes('\0') || rel.split('/').some((seg) => seg === '..')) return false;
+  const abs = path.resolve(root, `.${path.sep}${rel}`);
   if (abs !== root && !abs.startsWith(root + path.sep)) return false;
   let st;
   try {
-    st = await fsp.stat(abs);
+    st = await fsp.lstat(abs);
   } catch {
     return false;
   }
@@ -99,11 +101,11 @@ async function serveFile(req, res, root, rel, { transform, cache = 'no-cache' } 
   const type = STATIC_MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream';
   if (transform) {
     const body = transform(await fsp.readFile(abs, 'utf8'));
-    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff' });
+    res.writeHead(200, { ...headers, 'Content-Type': type, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff' });
     res.end(body);
     return true;
   }
-  res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, 'Cache-Control': cache, 'X-Content-Type-Options': 'nosniff' });
+  res.writeHead(200, { ...headers, 'Content-Type': type, 'Content-Length': st.size, 'Cache-Control': cache, 'X-Content-Type-Options': 'nosniff' });
   if (req.method === 'HEAD') {
     res.end();
     return true;

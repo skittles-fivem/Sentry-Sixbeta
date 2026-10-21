@@ -3,11 +3,27 @@
 // Sentry Manager server: the Sentry Studio viewer and converter as a web app,
 // plus file management (vehicles, footage, Recycle Bin, policies, jobs,
 // notifications, settings, sign-in, GitHub updates).
+//
+// Security, in short (README "Security" has the details):
+//   - HTTPS on the same port; plain HTTP only redirects to it.
+//   - Sign-in required; the first account needs the setup code from the log;
+//     cookies are HttpOnly, SameSite=Strict, Secure + __Host- over HTTPS.
+//   - Changes that could hand someone the shares or the server need the
+//     password again (vehicle sources, updates, certificates, deleting forever).
+//   - State-changing requests need X-Requested-With and a matching Origin.
+//   - Every file path is resolved through safePath's real-path guard.
+//   - When supervised (the Docker image), this process runs as an
+//     unprivileged user; the root supervisor only mounts shares and keeps
+//     the HTTPS certificate authority.
 
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
+// the database holds password hashes and SMB passwords: nothing we create is world-readable
+process.umask(0o027);
 
 const fs = require('fs');
 const http = require('http');
+const https = require('https');
+const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
 const { Logger } = require('./log');
@@ -23,20 +39,53 @@ const { Thumbnails } = require('./thumbnails');
 const { detectGpus } = require('./gpu');
 const { createConverterHost } = require('./converterHost');
 const { createConverterBridge } = require('./converterBridge');
-const { createPathGuard, hiddenPath, readDir, stat, sendMedia } = require('./studioApi');
+const { hiddenPath, readDir, stat, sendMedia, readTextConfined } = require('./studioApi');
+const { createRealGuard, isInside } = require('./safePath');
+const { createLocalMounter, createIpcMounter } = require('./mounter');
+const { VERSIONS, DEFAULT_VERSION, securitySummary } = require('./mountSpec');
+const { TlsManager, localTlsSource, supervisorTlsSource, parseHostnames } = require('./tls');
 const { Router, HttpError, sendJson, readJson, serveFile } = require('./http');
 
 const APP_ROOT = path.resolve(process.env.APP_ROOT || path.join(__dirname, '..', '..'));
 const SRC = path.join(APP_ROOT, 'src');
 const WEB = path.join(APP_ROOT, 'manager', 'web');
 const DATA = path.resolve(process.env.DATA_PATH || '/data');
+const RUN_DIR = path.resolve(process.env.RUN_DIR || '/run/sentry-manager');
+const FOOTAGE_ROOT = path.resolve(process.env.FOOTAGE_ROOT || '/footage');
 const PORT = Number(process.env.PORT || 9000);
 const HOST = process.env.HOST || '0.0.0.0';
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
+const TLS_MODE = (process.env.TLS_MODE || 'auto').toLowerCase(); // auto | off
+const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
+const SUPERVISED = process.env.SENTRY_SUPERVISED === '1' && typeof process.send === 'function';
+const TRUSTED_HOSTS = (process.env.TRUSTED_HOSTS || '').split(/[\s,]+/).filter(Boolean).map((h) => h.toLowerCase());
 
 const CONVERTER_ACTIVE = new Set(['discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry', 'verifying', 'copying', 'replacing', 'paused', 'paused_network']);
-const ITEM_DONE = new Set(['completed', 'skipped', 'failed']);
+const ITEM_DONE = new Set(['completed', 'skipped', 'failed', 'cancelled']);
+
+// Pages may load scripts, styles, frames and data only from this server, and
+// never run inline scripts. Styles allow inline attributes (both UIs set
+// style="" in markup). The embedded Studio viewer additionally needs
+// 'unsafe-eval' (its bundled protobuf.js builds the telemetry decoder with
+// new Function) and map tiles; the shell and sign-in pages get neither.
+const cspWith = ({ script = "'self'", img = "'self' data: blob:" }) => [
+  "default-src 'self'",
+  `script-src ${script}`,
+  "style-src 'self' 'unsafe-inline'",
+  `img-src ${img}`,
+  "media-src 'self' blob:",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  "worker-src 'self' blob:",
+  "frame-src 'self'",
+  "frame-ancestors 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'"
+].join('; ');
+const CSP = cspWith({});
+const STUDIO_CSP = cspWith({ script: "'self' 'unsafe-eval'", img: "'self' data: blob: https://*.google.com https://*.tile.openstreetmap.org" });
 
 function readBuildInfo() {
   try {
@@ -48,8 +97,39 @@ function readBuildInfo() {
 
 function studioHtml(html) {
   // Runs before any Studio script: marks web mode and installs window.electronAPI.
-  const inject = '<script>window.__SENTRY_WEB__ = true;</script>\n<script src="/web/electronApiShim.js"></script>\n<link rel="stylesheet" href="/web/studioEmbed.css">';
+  const inject = '<script src="/web/webFlag.js"></script>\n<script src="/web/electronApiShim.js"></script>\n<link rel="stylesheet" href="/web/studioEmbed.css">';
   return html.replace(/<head([^>]*)>/i, (m) => `${m}\n${inject}`);
+}
+
+function isSecure(req) {
+  if (req.socket?.encrypted) return true;
+  return TRUST_PROXY && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase() === 'https';
+}
+
+/** The Host header, if it is a plain host[:port] (and trusted, when TRUSTED_HOSTS is set). */
+function cleanHost(req) {
+  const raw = String((TRUST_PROXY && req.headers['x-forwarded-host']) || req.headers.host || '').split(',')[0].trim();
+  if (!/^[A-Za-z0-9.\-[\]:]{1,300}$/.test(raw)) return null;
+  if (TRUSTED_HOSTS.length) {
+    const name = raw.replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase();
+    if (!TRUSTED_HOSTS.includes(name)) return null;
+  }
+  return raw;
+}
+
+function securityHeaders(req, res, pathname = '') {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), usb=(), serial=(), payment=(), fullscreen=(self)');
+  res.setHeader('Content-Security-Policy', pathname.startsWith('/studio/') ? STUDIO_CSP : CSP);
+  if (isSecure(req)) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+}
+
+function confirmRequired() {
+  return Object.assign(new HttpError(403, 'Enter your password to confirm this change.'), { code: 'CONFIRM_PASSWORD', expose: true });
 }
 
 async function main() {
@@ -58,22 +138,61 @@ async function main() {
   fs.mkdirSync(DATA, { recursive: true });
   const buildInfo = readBuildInfo();
   const db = new ManagerDB(path.join(DATA, 'manager.db'));
-  const auth = new Auth({ db, log: logger.scope('auth'), secureCookies: process.env.SECURE_COOKIES === 'true' });
+  const auth = new Auth({ db, log: logger.scope('auth'), isSecure, setupFile: path.join(DATA, 'setup-code.txt') });
   auth.bootstrap();
   const jobs = new Jobs({ db });
   const notes = new Notifications({ db });
-  const vehicles = new VehicleManager({ db, footageRoot: process.env.FOOTAGE_ROOT || '/footage', logger, credDir: path.join(process.env.RUN_DIR || '/run/sentry-manager') });
+
+  const mounter = SUPERVISED
+    ? createIpcMounter({ channel: process, footageRoot: FOOTAGE_ROOT })
+    : createLocalMounter({
+      footageRoot: FOOTAGE_ROOT, credDir: RUN_DIR,
+      uid: Number(process.env.PUID ?? process.getuid?.() ?? 0), gid: Number(process.env.PGID ?? process.getgid?.() ?? 0)
+    });
+  const folderRoots = [FOOTAGE_ROOT, ...(process.env.FOLDER_ROOTS || '').split(':').filter(Boolean)];
+  // FOOTAGE_PATH comes from the container environment (trusted), not the UI
+  if (process.env.FOOTAGE_PATH) folderRoots.push(process.env.FOOTAGE_PATH);
+  const protectedDirs = [DATA, APP_ROOT, RUN_DIR];
+  const vehicles = new VehicleManager({ db, footageRoot: FOOTAGE_ROOT, folderRoots, protectedDirs, logger, mounter });
   vehicles.bootstrapFromEnv();
   const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory') });
   const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG });
 
-  // ---- converter
-  let converterSnapshot = null;
-  const isBusy = (abs) => {
-    const s = converterSnapshot;
-    if (!s || !CONVERTER_ACTIVE.has(s.state) || !s.config?.sourceRoot) return false;
-    return (s.items || []).some((i) => !ITEM_DONE.has(i.state) && i.relativePath && path.join(s.config.sourceRoot, i.relativePath) === abs);
+  // ---- paths
+  // Default place for converted copies ("keep originals" mode); EXTRA_ROOTS adds more.
+  fs.mkdirSync(path.join(DATA, 'converted'), { recursive: true });
+  const outputRoots = () => [path.join(DATA, 'converted'), ...(process.env.EXTRA_ROOTS || '').split(':').filter(Boolean)];
+  const allowedRoots = () => [...vehicles.roots(), ...outputRoots()];
+  const deny = () => [DATA, APP_ROOT, RUN_DIR, '/proc', '/sys', '/dev', '/etc', '/root', '/run', '/boot'];
+  const allowed = createRealGuard(allowedRoots, { deny });
+  const studioReadable = createRealGuard(() => [...allowedRoots(), path.join(DATA, 'thumbnails'), path.join(DATA, 'clip-thumbnails'), path.join(DATA, 'exports')], { deny });
+
+  /** The vehicle whose footage contains this real path, and that root. */
+  const vehicleForReal = (real) => {
+    for (const v of vehicles.list()) {
+      const root = vehicles.rootOf(v);
+      let realRoot = root;
+      try {
+        realRoot = fs.realpathSync(root);
+      } catch {
+        // not reachable
+      }
+      if (isInside(real, realRoot)) return { vehicle: v, root: realRoot };
+      if (isInside(real, root)) return { vehicle: v, root };
+    }
+    return null;
   };
+
+  // ---- converter
+  const converterJobs = new Map(); // job id -> latest snapshot
+  const isBusy = (abs) => {
+    for (const s of converterJobs.values()) {
+      if (!CONVERTER_ACTIVE.has(s.state) || !s.config?.sourceRoot) continue;
+      if ((s.items || []).some((i) => !ITEM_DONE.has(i.state) && i.relativePath && path.join(s.config.sourceRoot, i.relativePath) === abs)) return true;
+    }
+    return false;
+  };
+  const converterIdle = () => ![...converterJobs.values()].some((s) => CONVERTER_ACTIVE.has(s.state));
   const bin = new RecycleBin({ db, vehicles, inventory, jobs, log: logger.scope('bin'), isBusy });
   const policies = new Policies({ db, vehicles, inventory, bin, log: logger.scope('policies') });
 
@@ -84,19 +203,20 @@ async function main() {
     ffprobePath: FFPROBE,
     log: logger.scope('converter')
   });
-  // Default place for converted copies ("keep originals" mode); EXTRA_ROOTS adds more.
-  fs.mkdirSync(path.join(DATA, 'converted'), { recursive: true });
-  const outputRoots = () => [path.join(DATA, 'converted'), ...(process.env.EXTRA_ROOTS || '').split(':').filter(Boolean)];
-  const allowedRoots = () => [...vehicles.roots(), ...outputRoots()];
-  const allowed = createPathGuard(allowedRoots);
-  const studioReadable = createPathGuard(() => [...allowedRoots(), path.join(DATA, 'thumbnails'), path.join(DATA, 'clip-thumbnails'), path.join(DATA, 'exports')]);
   let bridge = null;
   let clipThumbs = null;
 
   const updater = new Updater({
-    db, log: logger.scope('updater'), dataDir: DATA, appRoot: APP_ROOT, buildInfo,
-    isIdle: () => !converterSnapshot || !CONVERTER_ACTIVE.has(converterSnapshot.state)
+    db, log: logger.scope('updater'), dataDir: DATA, appRoot: APP_ROOT, buildInfo, isIdle: converterIdle
   });
+
+  // ---- HTTPS
+  const tlsSource = TLS_MODE === 'off' ? null : SUPERVISED && process.env.SENTRY_TLS_DIR
+    ? supervisorTlsSource({ dir: process.env.SENTRY_TLS_DIR, channel: process })
+    : localTlsSource(new TlsManager({
+      dir: path.join(DATA, 'tls'), log: logger.scope('tls'), hostnames: parseHostnames(process.env.TLS_HOSTNAMES || ''),
+      certFile: process.env.TLS_CERT_FILE || null, keyFile: process.env.TLS_KEY_FILE || null
+    }));
 
   // ---- live events to the browser
   const clients = new Set();
@@ -121,7 +241,9 @@ async function main() {
     announce('vehicles');
   });
   vehicles.on('health', (id, healthy) => {
-    if (healthy) inventory.scan(id).then(() => announce('inventory')).catch(() => {});
+    if (!healthy) return;
+    bin.reconcile(id).catch((err) => log.warn(`Recycle Bin check of ${id}: ${err.message}`))
+      .then(() => inventory.scan(id)).then(() => announce('inventory'), () => {});
   });
 
   // ---- routes
@@ -131,58 +253,126 @@ async function main() {
     if (!v) throw new HttpError(404, 'No such vehicle.');
     return v;
   };
+  const requireConfirmed = (req) => {
+    if (!auth.recentlyConfirmed(req)) throw confirmRequired();
+  };
   const vehicleSummary = (v) => ({
     ...vehicles.publicView(v),
+    security: v.source.type === 'smb' ? securitySummary({ encrypt: v.source.encrypt !== false, version: v.source.version }) : null,
     inventory: inventory.totals(v.id),
     scanning: Boolean(inventory.get(v.id)?.scanning),
     binBytes: bin.binBytes(v.id),
     binItems: db.binItems(v.id).length,
     policy: policies.get(v.id)
   });
+  const clientKey = (req) => req.socket.remoteAddress || '?';
 
-  r.add('GET', '/api/auth/me', (req) => ({ user: auth.user(req), needsSetup: auth.needsSetup() }), { public: true });
+  r.add('GET', '/api/auth/me', (req) => ({ user: auth.user(req), needsSetup: auth.needsSetup(), secure: isSecure(req) }), { public: true });
   r.add('POST', '/api/auth/login', async (req, res, { body }) => {
-    const ip = req.socket.remoteAddress || '?';
-    const wait = auth.throttled(ip);
+    const keys = [clientKey(req), `user:${String(body?.username || '').toLowerCase()}`];
+    const wait = Math.max(...keys.map((k) => auth.throttled(k)));
     if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
     if (!auth.check(body?.username, body?.password)) {
-      auth.noteFailure(ip);
+      keys.forEach((k) => auth.noteFailure(k));
       throw new HttpError(401, 'Wrong user name or password.');
     }
-    auth.login(res, body.username);
+    keys.forEach((k) => auth.noteSuccess(k));
+    auth.login(req, res, body.username);
     return { ok: true };
   }, { public: true });
   r.add('POST', '/api/auth/setup', async (req, res, { body }) => {
-    if (!auth.needsSetup()) throw new HttpError(409, 'An account already exists.');
-    auth.setPassword(String(body?.username || ''), String(body?.password || ''));
-    auth.login(res, body.username);
+    const key = `setup:${clientKey(req)}`;
+    const wait = auth.throttled(key);
+    if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
+    try {
+      auth.setup(String(body?.username || ''), String(body?.password || ''), body?.code);
+    } catch (err) {
+      if (err.status === 403) auth.noteFailure(key);
+      throw err;
+    }
+    auth.login(req, res, body.username);
     return { ok: true };
   }, { public: true });
   r.add('POST', '/api/auth/logout', (req, res) => {
     auth.logout(req, res);
     return { ok: true };
   });
+  r.add('POST', '/api/auth/confirm', (req, res, { body, user }) => {
+    const key = `confirm:${user}`;
+    const wait = auth.throttled(key);
+    if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
+    if (!auth.confirm(req, user, body?.password)) {
+      auth.noteFailure(key);
+      throw new HttpError(401, 'That password is not right.');
+    }
+    auth.noteSuccess(key);
+    return { ok: true };
+  });
   r.add('POST', '/api/auth/password', (req, res, { body, user }) => {
     if (!auth.check(user, body?.current)) throw new HttpError(401, 'The current password is wrong.');
     auth.setPassword(user, String(body?.next || ''));
     db.deleteSessionsFor(user);
-    auth.login(res, user);
+    auth.forgetConfirmations();
+    auth.login(req, res, user);
     return { ok: true };
   });
 
-  r.add('GET', '/api/system', async () => ({
+  r.add('GET', '/api/system', async (req) => ({
     version: { ...buildInfo, ...updater.current() },
     converter: host.runtime ? { ready: true, capabilities: host.runtime.capabilities } : { ready: false, error: host.lastError?.code || null },
     nativeHelper: host.helperAvailable,
     gpu: await detectGpus(),
     dataFree: await fs.promises.statfs(DATA).then((s) => Number(s.bavail) * Number(s.bsize)).catch(() => null),
-    timezone: process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone
+    timezone: process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone,
+    security: {
+      https: isSecure(req), tlsMode: TLS_MODE, supervised: SUPERVISED,
+      runningAsRoot: process.getuid?.() === 0, uid: process.getuid?.() ?? null
+    },
+    smbVersions: VERSIONS,
+    smbDefaultVersion: DEFAULT_VERSION
   }));
 
+  r.add('GET', '/api/security', (req) => {
+    let tls = null;
+    try {
+      tls = tlsSource ? tlsSource.status() : null;
+    } catch (err) {
+      tls = { error: err.message };
+    }
+    return {
+      https: isSecure(req), tlsMode: TLS_MODE, trustProxy: TRUST_PROXY, tls,
+      supervised: SUPERVISED, runningAsRoot: process.getuid?.() === 0,
+      currentHost: cleanHost(req), confirmed: auth.recentlyConfirmed(req)
+    };
+  });
+  r.add('PUT', '/api/security/hostnames', async (req, res, { body }) => {
+    requireConfirmed(req);
+    if (!tlsSource) throw new HttpError(409, 'HTTPS is turned off (TLS_MODE=off).');
+    const list = parseHostnames(Array.isArray(body?.hostnames) ? body.hostnames.join(',') : String(body?.hostnames || ''));
+    const out = await tlsSource.setHostnames(list);
+    if (httpsServer) httpsServer.setSecureContext({ key: out.key, cert: out.cert });
+    return { ok: true, caReplaced: Boolean(out.caReplaced), tls: tlsSource.status() };
+  });
+  r.add('GET', '/api/security/ca.crt', (req, res) => {
+    const pem = tlsSource?.caPem();
+    if (!pem) throw new HttpError(404, 'This server uses its own certificate; there is no local certificate authority.');
+    res.writeHead(200, { 'Content-Type': 'application/x-x509-ca-cert', 'Content-Disposition': 'attachment; filename="sentry-manager-ca.crt"', 'Cache-Control': 'no-store' });
+    res.end(pem);
+    return undefined;
+  });
+
   r.add('GET', '/api/vehicles', () => ({ vehicles: vehicles.list().map(vehicleSummary) }));
-  r.add('POST', '/api/vehicles', (req, res, { body }) => vehicleSummary(vehicles.add(body || {})));
-  r.add('PUT', '/api/vehicles/:id', async (req, res, { params, body }) => vehicleSummary(await vehicles.update(params.id, body || {})));
+  r.add('POST', '/api/vehicles', (req, res, { body }) => {
+    requireConfirmed(req);
+    return vehicleSummary(vehicles.add(body || {}));
+  });
+  r.add('PUT', '/api/vehicles/:id', async (req, res, { params, body }) => {
+    vehicleOr404(params.id);
+    if (body?.source !== undefined) requireConfirmed(req);
+    return vehicleSummary(await vehicles.update(params.id, body || {}));
+  });
   r.add('DELETE', '/api/vehicles/:id', async (req, res, { params }) => {
+    requireConfirmed(req);
     await vehicles.remove(params.id);
     return { ok: true };
   });
@@ -233,16 +423,19 @@ async function main() {
     const rec = inventory.recording(v.id, params.rid);
     if (!rec) throw new HttpError(404, 'Not found');
     const root = vehicles.rootOf(v);
-    const file = rec.thumbRel ? path.join(root, rec.thumbRel) : rec.frontRel ? await thumbs.forClip(path.join(root, rec.frontRel)) : null;
+    const source = rec.thumbRel ? path.join(root, rec.thumbRel) : rec.frontRel ? path.join(root, rec.frontRel) : null;
+    const real = source && await allowed.resolve(source);
+    if (!real) throw new HttpError(404, 'No thumbnail');
+    const file = rec.thumbRel ? real : await thumbs.forClip(real);
     if (!file) throw new HttpError(404, 'No thumbnail');
-    await sendMedia(req, res, file);
+    await sendMedia(req, res, file, studioReadable.fdInside);
     return undefined;
   });
-  r.add('POST', '/api/vehicles/:id/protect', (req, res, { params, body }) => {
+  r.add('POST', '/api/vehicles/:id/protect', async (req, res, { params, body }) => {
     const v = vehicleOr404(params.id);
     const on = body?.protected !== false;
-    const recs = (body?.ids || []).map((id) => inventory.recording(v.id, id)).filter(Boolean);
-    db.setProtected(v.id, recs.flatMap((x) => x.files), on);
+    const recs = (Array.isArray(body?.ids) ? body.ids : []).map((id) => inventory.recording(v.id, id)).filter(Boolean);
+    await bin.setProtected(v.id, recs.flatMap((x) => x.files), on);
     inventory.rebuild(v.id);
     announce('inventory');
     return { ok: true, count: recs.length };
@@ -264,12 +457,14 @@ async function main() {
   });
   r.add('POST', '/api/bin/:item/delete', async (req, res, { params, body }) => {
     if (body?.confirm !== true) throw new HttpError(400, 'Confirm permanent deletion.');
+    requireConfirmed(req);
     const out = await bin.deleteForever(params.item);
     announce('bin');
     return out;
   });
   r.add('POST', '/api/bin/empty', async (req, res, { body }) => {
     if (body?.confirm !== true) throw new HttpError(400, 'Confirm emptying the Recycle Bin.');
+    requireConfirmed(req);
     if (body?.vehicle) vehicleOr404(body.vehicle);
     const out = await bin.empty(body?.vehicle || null);
     announce('bin');
@@ -296,7 +491,7 @@ async function main() {
     return { ok: true };
   });
   r.add('POST', '/api/notifications/read', (req, res, { body }) => {
-    notes.markRead((body?.ids || []).map(Number).filter(Number.isFinite));
+    notes.markRead((Array.isArray(body?.ids) ? body.ids : []).map(Number).filter(Number.isFinite));
     return { ok: true };
   });
 
@@ -307,10 +502,14 @@ async function main() {
     return next;
   });
   r.add('GET', '/api/updater', () => updater.status());
-  r.add('PUT', '/api/updater/settings', (req, res, { body }) => updater.setSettings(body || {}));
+  r.add('PUT', '/api/updater/settings', (req, res, { body }) => {
+    requireConfirmed(req);
+    return updater.setSettings(body || {});
+  });
   r.add('GET', '/api/updater/branches', async () => ({ branches: await updater.branches() }));
   r.add('POST', '/api/updater/check', async () => updater.check());
-  r.add('POST', '/api/updater/install', async () => {
+  r.add('POST', '/api/updater/install', async (req) => {
+    requireConfirmed(req);
     const out = await updater.install();
     jobs.finish(jobs.start({ type: 'update', title: `Update to ${out.sha.slice(0, 7)}` }), { detail: 'Installed; restarting' });
     return out;
@@ -323,50 +522,50 @@ async function main() {
   });
 
   // Viewer (Studio) file access, confined to the vehicle shares.
-  const confined = (p, guard = studioReadable) => {
-    const abs = guard(p);
-    if (!abs || hiddenPath(abs)) throw new HttpError(403, 'That path is outside the vehicle shares.');
-    return abs;
+  const confined = async (p, guard = studioReadable, opts) => {
+    const real = await guard.resolve(p, opts);
+    if (!real || hiddenPath(real)) throw new HttpError(403, 'That path is outside the vehicle shares.');
+    return real;
   };
   r.add('POST', '/api/studio/readDir', async (req, res, { body }) => {
+    const real = await confined(body?.path);
     try {
-      return await readDir(confined(body?.path));
-    } catch (err) {
-      if (err.status) throw err;
+      return await readDir(real);
+    } catch {
       return [];
     }
   });
   r.add('POST', '/api/studio/readFile', async (req, res, { body }) => {
-    const abs = confined(body?.path);
-    const st = await fs.promises.stat(abs).catch(() => null);
-    if (!st || st.size > 8 * 1024 * 1024) throw new HttpError(404, 'Not readable');
-    return { text: await fs.promises.readFile(abs, 'utf8') };
+    const real = await confined(body?.path);
+    const text = await readTextConfined(real, studioReadable.fdInside, 8 * 1024 * 1024);
+    if (text === null) throw new HttpError(404, 'Not readable');
+    return { text };
   });
   r.add('POST', '/api/studio/exists', async (req, res, { body }) => {
-    const abs = studioReadable(body?.path);
-    if (!abs || hiddenPath(abs)) return false;
-    return fs.promises.access(abs).then(() => true, () => false);
+    const real = await studioReadable.resolve(body?.path);
+    return Boolean(real && !hiddenPath(real));
   });
   r.add('POST', '/api/studio/stat', async (req, res, { body }) => {
-    const abs = studioReadable(body?.path);
-    return abs && !hiddenPath(abs) ? stat(abs) : null;
+    const real = await studioReadable.resolve(body?.path);
+    return real && !hiddenPath(real) ? stat(real) : null;
   });
   r.add('POST', '/api/studio/thumbnail', async (req, res, { body }) => {
-    const abs = studioReadable(body?.path);
-    if (!abs || !clipThumbs) return null;
+    const real = await studioReadable.resolve(body?.path);
+    if (!real || hiddenPath(real) || !clipThumbs) return null;
     try {
-      return await clipThumbs.get(abs);
+      return await clipThumbs.get(real);
     } catch {
       return null;
     }
   });
   r.add('POST', '/api/studio/trashFolder', async (req, res, { body }) => {
     // Studio's "delete folder" (trash icon on an event): goes to the Recycle Bin.
-    const abs = confined(body?.path, allowed);
-    const v = vehicles.vehicleForPath(abs);
-    if (!v) throw new HttpError(403, 'Not inside a vehicle share.');
+    const real = await confined(body?.path, allowed);
+    const found = vehicleForReal(real);
+    if (!found) throw new HttpError(403, 'Not inside a vehicle share.');
+    const v = found.vehicle;
     if (!inventory.get(v.id)?.recordings) await inventory.scan(v.id);
-    const rel = path.relative(vehicles.rootOf(v), abs).split(path.sep).join('/');
+    const rel = path.relative(found.root, real).split(path.sep).join('/');
     const ids = inventory.get(v.id).recordings.filter((x) => x.folder === rel || x.folder.startsWith(`${rel}/`)).map((x) => x.id);
     if (!ids.length) return { success: false, error: 'Nothing to move to the Recycle Bin in that folder.' };
     const out = await bin.trash(v.id, ids);
@@ -398,33 +597,62 @@ async function main() {
   }));
   r.add('POST', '/api/studio/browse', async (req, res, { body }) => {
     // Folder picker for the converter / viewer: only allowed roots and their subfolders.
-    const roots = allowedRoots();
+    const roots = allowedRoots().map((x) => (typeof x === 'string' ? x : x.path));
     if (!body?.path) return { path: null, parent: null, entries: roots.map((p) => ({ name: vehicles.vehicleForPath(p)?.name || (p === path.join(DATA, 'converted') ? 'Converted copies' : p), path: p, isDirectory: true })) };
-    const abs = confined(body.path, allowed);
-    const entries = (await readDir(abs).catch(() => [])).filter((e) => e.isDirectory && !e.name.startsWith('.'));
-    const atRoot = roots.some((p) => path.resolve(p) === abs);
-    return { path: abs, parent: atRoot ? null : path.dirname(abs), entries };
+    const real = await confined(body.path, allowed);
+    const entries = (await readDir(real).catch(() => [])).filter((e) => e.isDirectory && !e.name.startsWith('.'));
+    const realRoots = await Promise.all(roots.map((p) => fs.promises.realpath(p).catch(() => p)));
+    const atRoot = roots.some((p) => path.resolve(p) === real) || realRoots.includes(real);
+    return { path: real, parent: atRoot ? null : path.dirname(real), entries };
   });
 
-  // ---- HTTP server
-  const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, 'http://localhost');
-    const p = url.pathname;
+  // ---- HTTP handler
+  const PUBLIC_STATIC = new Set(['/login', '/web/login.js', '/web/shell.css', '/web/icon.png']);
+  const handler = async (req, res) => {
+    let url;
     try {
-      if (p === '/healthz') {
+      url = new URL(req.url, 'http://localhost');
+    } catch {
+      return sendJson(res, 400, { error: 'Bad request' });
+    }
+    const rawPath = url.pathname;
+    try {
+      securityHeaders(req, res, rawPath);
+      if (rawPath === '/healthz') {
         res.writeHead(200, { 'Content-Type': 'text/plain' });
         return res.end('ok');
       }
+      const reqHost = cleanHost(req);
+      if (!reqHost) return sendJson(res, 421, { error: 'Unknown host name.' });
+      // one decoded, normalized path for every static decision: no %2F tricks
+      let p;
+      try {
+        p = decodeURIComponent(rawPath);
+      } catch {
+        return sendJson(res, 400, { error: 'Bad request' });
+      }
+      if (p.includes('\0') || p.includes('\\') || path.posix.normalize(p) !== p) return sendJson(res, 400, { error: 'Bad request' });
+
       const user = auth.user(req);
       const isApi = p.startsWith('/api/');
-      const publicStatic = p === '/login' || p.startsWith('/web/login') || p.startsWith('/web/fonts/') || p === '/web/icon.png' || p === '/web/shell.css';
+      const publicStatic = PUBLIC_STATIC.has(p) || (p.startsWith('/web/fonts/') && !p.slice(11).includes('/'));
 
       if (isApi) {
-        const m = r.match(req.method, p);
+        const m = r.match(req.method, rawPath);
         if (!m && p !== '/api/events' && p !== '/api/converter/events' && p !== '/api/media') return sendJson(res, 404, { error: 'Not found' });
         if (!user && !(m && m.route.opts.public)) return sendJson(res, 401, { error: 'Sign in first.' });
-        if (req.method !== 'GET' && req.method !== 'HEAD' && req.headers['x-requested-with'] !== 'sentry-manager') {
-          return sendJson(res, 403, { error: 'Missing X-Requested-With header.' });
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          if (req.headers['x-requested-with'] !== 'sentry-manager') return sendJson(res, 403, { error: 'Missing X-Requested-With header.' });
+          const origin = req.headers.origin;
+          if (origin && origin !== 'null') {
+            let originHost = null;
+            try {
+              originHost = new URL(origin).host;
+            } catch {
+              // fall through: refused
+            }
+            if (originHost !== reqHost) return sendJson(res, 403, { error: 'Cross-site request refused.' });
+          }
         }
         if (p === '/api/events') {
           res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
@@ -445,9 +673,9 @@ async function main() {
           return undefined;
         }
         if (p === '/api/media') {
-          const abs = studioReadable(url.searchParams.get('path') || '');
-          if (!abs || hiddenPath(abs)) return sendJson(res, 403, { error: 'Outside the vehicle shares.' });
-          return sendMedia(req, res, abs);
+          const real = await studioReadable.resolve(url.searchParams.get('path') || '');
+          if (!real || hiddenPath(real)) return sendJson(res, 403, { error: 'Outside the vehicle shares.' });
+          return sendMedia(req, res, real, studioReadable.fdInside);
         }
         const body = req.method === 'GET' ? undefined : await readJson(req, p.startsWith('/api/converter/') ? 256 * 1024 : 1024 * 1024);
         const out = await m.route.handler(req, res, { params: m.params, query: Object.fromEntries(url.searchParams), body, user });
@@ -478,29 +706,71 @@ async function main() {
       return notFound(res);
     } catch (err) {
       const status = err.status || 500;
-      if (status >= 500) log.error(`${req.method} ${p}: ${err.stack || err.message}`);
-      if (!res.headersSent) sendJson(res, status, { error: err.message || 'Error' });
+      if (status >= 500) log.error(`${req.method} ${rawPath}: ${err.stack || err.message}`);
+      if (!res.headersSent) sendJson(res, status, { error: status >= 500 && !err.status ? 'Internal error' : err.message || 'Error', ...(err.expose && err.code ? { code: err.code } : {}) });
       else res.end();
       return undefined;
     }
-  });
+  };
   function notFound(res) {
     sendJson(res, 404, { error: 'Not found' });
   }
 
-  server.listen(PORT, HOST, () => log.info(`Sentry Manager on http://${HOST}:${PORT} (${buildInfo.sha ? buildInfo.sha.slice(0, 7) : 'dev'})`));
+  // ---- listen: HTTPS, with plain HTTP on the same port answering only with a redirect
+  let httpsServer = null;
+  const servers = [];
+  if (!tlsSource) {
+    const server = http.createServer(handler);
+    servers.push(server);
+    server.listen(PORT, HOST, () => log.warn(`Sentry Manager on http://${HOST}:${PORT} WITHOUT HTTPS (TLS_MODE=off): only use this behind a reverse proxy that does HTTPS.`));
+  } else {
+    const material = await tlsSource.load();
+    httpsServer = https.createServer({ key: material.key, cert: material.cert, minVersion: 'TLSv1.2' }, handler);
+    const redirect = http.createServer((req, res) => {
+      if (String(req.url).split('?')[0] === '/healthz') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        return res.end('ok');
+      }
+      const target = cleanHost(req) || `localhost:${PORT}`;
+      let pathAndQuery = '/';
+      try {
+        const u = new URL(req.url, 'http://localhost');
+        pathAndQuery = u.pathname + u.search;
+      } catch {
+        // keep "/"
+      }
+      res.writeHead(308, { Location: `https://${target}${pathAndQuery}`, 'Cache-Control': 'no-store' });
+      return res.end();
+    });
+    const front = net.createServer((socket) => {
+      socket.setTimeout(15000, () => socket.destroy());
+      socket.on('error', () => socket.destroy());
+      socket.once('data', (chunk) => {
+        socket.setTimeout(0);
+        socket.pause();
+        socket.unshift(chunk);
+        // a TLS connection starts with a handshake record (0x16)
+        (chunk[0] === 0x16 ? httpsServer : redirect).emit('connection', socket);
+        process.nextTick(() => socket.resume());
+      });
+    });
+    servers.push(front, httpsServer, redirect);
+    front.listen(PORT, HOST, () => log.info(`Sentry Manager on https://${HOST}:${PORT} (${buildInfo.sha ? buildInfo.sha.slice(0, 7) : 'dev'})`));
+  }
   vehicles.startAll();
 
   // Converter starts in the background; the Encoder tab shows "starting" until ready.
-  host.start().then((runtime) => {
-    bridge = createConverterBridge({ runtime, isAllowedPath: (p) => Boolean(allowed(p)), log: logger.scope('converter') });
+  host.start().then(async (runtime) => {
+    bridge = createConverterBridge({ runtime, resolvePath: (p, opts) => allowed.resolve(p, opts), log: logger.scope('converter') });
     const { createClipThumbnails } = require(path.join(SRC, 'main/clipThumbnails'));
     clipThumbs = createClipThumbnails({ directory: path.join(DATA, 'clip-thumbnails'), ffmpegPath: FFMPEG, ffprobePath: FFPROBE, spawn });
     runtime.service.subscribe((event) => {
       if (event?.type !== 'snapshot' || !event.snapshot) return;
-      converterSnapshot = event.snapshot;
+      converterJobs.set(event.snapshot.id, event.snapshot);
       mirrorConverterJob(event.snapshot);
     });
+    // jobs from before a restart (a paused one still owns its clips)
+    for (const s of await runtime.service.list().catch(() => [])) if (!converterJobs.has(s.id)) converterJobs.set(s.id, s);
   }).catch((err) => log.error(`Converter unavailable: ${err.code || err.message}`));
 
   // Clip results of a converter job (its counters only hold files and bytes).
@@ -518,7 +788,7 @@ async function main() {
   function mirrorConverterJob(s) {
     const externalId = `converter:${s.id}`;
     const src = s.config?.sourceRoot || '';
-    const v = vehicles.vehicleForPath(src);
+    const v = vehicleForReal(src)?.vehicle || vehicles.vehicleForPath(src);
     const c = converterCounts(s);
     const saved = Number(s.counters?.savedBytes) || 0;
     const detail = [`${c.converted} converted`, `${c.skipped} skipped`, `${c.failed} failed`].join(', ') + (saved > 0 ? ` · ${formatBytes(saved)} saved` : '');
@@ -546,6 +816,17 @@ async function main() {
   setInterval(() => {
     for (const v of vehicles.list()) if (vehicles.share(v.id)?.isHealthy()) inventory.scan(v.id).then(() => announce('inventory')).catch(() => {});
   }, Number(process.env.SCAN_INTERVAL_MINUTES || 15) * 60 * 1000).unref();
+  // renew the HTTPS certificate before it expires (checked daily)
+  if (tlsSource) {
+    setInterval(async () => {
+      try {
+        const m = await tlsSource.load();
+        httpsServer?.setSecureContext({ key: m.key, cert: m.cert });
+      } catch (err) {
+        log.warn(`HTTPS certificate check failed: ${err.message}`);
+      }
+    }, 24 * 3600 * 1000).unref();
+  }
 
   let stopping = false;
   const shutdown = async (signal) => {
@@ -553,7 +834,7 @@ async function main() {
     stopping = true;
     log.info(`${signal}: shutting down`);
     for (const res of clients) res.end();
-    server.close();
+    for (const s of servers) s.close();
     await host.stop().catch(() => {});
     await vehicles.stopAll();
     db.close();
@@ -561,6 +842,15 @@ async function main() {
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+  if (SUPERVISED) {
+    process.on('disconnect', () => shutdown('supervisor gone'));
+    // the supervisor renewed the certificate
+    process.on('message', (m) => {
+      if (m?.type === 'shutdown') return shutdown('supervisor asked');
+      if (m?.type !== 'tls-updated' || !tlsSource || !httpsServer) return;
+      tlsSource.load().then((x) => httpsServer.setSecureContext({ key: x.key, cert: x.cert }), (err) => log.warn(`Reloading the certificate failed: ${err.message}`));
+    });
+  }
 }
 
 main().catch((err) => {

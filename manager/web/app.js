@@ -29,7 +29,7 @@
   }
   const humanize = (s) => String(s || '').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
 
-  async function api(path, opts = {}) {
+  async function api(path, opts = {}, retried = false) {
     const init = { credentials: 'same-origin', headers: { 'X-Requested-With': 'sentry-manager' } };
     if (opts.method) init.method = opts.method;
     if (opts.body !== undefined) {
@@ -38,13 +38,47 @@
       init.body = JSON.stringify(opts.body);
     }
     const res = await fetch(path, init);
-    if (res.status === 401) {
+    if (res.status === 401 && !path.startsWith('/api/auth/')) {
       location.href = `/login?next=${encodeURIComponent(location.pathname + location.hash)}`;
       throw new Error('Signed out');
     }
     const data = await res.json().catch(() => ({}));
+    if (res.status === 403 && data.code === 'CONFIRM_PASSWORD' && !retried) {
+      // changes that could hand someone the shares or the server need the password again
+      await confirmPassword();
+      return api(path, opts, true);
+    }
     if (!res.ok) throw new Error(data.error || res.statusText);
     return data;
+  }
+
+  /** Ask for the password and confirm it with the server; throws if cancelled. */
+  async function confirmPassword() {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const password = await passwordDialog(attempt ? 'That password was not right. Try again.' : 'This change affects where footage comes from or what code runs, so Sentry Manager asks for your password again.');
+      if (password === null) throw new Error('Not changed: the password was not confirmed.');
+      try {
+        await api('/api/auth/confirm', { body: { password } }, true);
+        return;
+      } catch (err) {
+        if (/Too many/.test(err.message)) throw err;
+      }
+    }
+    throw new Error('Not changed: the password was not confirmed.');
+  }
+
+  function passwordDialog(message) {
+    return new Promise((resolve) => {
+      const dlg = $('dialog');
+      $('dialog-form').innerHTML = `<h2>Confirm with your password</h2><p>${esc(message)}</p>
+        <label class="field" style="margin-top:14px">Password<input class="input" type="password" name="confirm-password" autocomplete="current-password"></label>
+        <div class="form-actions"><button class="btn" value="cancel">Cancel</button><button class="btn solid" value="ok">Confirm</button></div>`;
+      const input = $('dialog-form').querySelector('[name=confirm-password]');
+      dlg.onclose = () => resolve(dlg.returnValue === 'ok' && input.value ? input.value : null);
+      dlg.returnValue = '';
+      dlg.showModal();
+      input.focus();
+    });
   }
 
   function toast(msg, bad = false) {
@@ -77,6 +111,11 @@
   const current = () => state.vehicles.find((v) => v.id === state.vehicleId) || state.vehicles[0] || null;
 
   // ---------- shell ----------
+  // thumbnails that fail to load show their category instead (no inline handlers: CSP)
+  document.addEventListener('error', (e) => {
+    const img = e.target;
+    if (img instanceof HTMLImageElement && img.dataset.fallback !== undefined) img.replaceWith(Object.assign(document.createElement('span'), { textContent: img.dataset.fallback }));
+  }, true);
   const app = $('app');
   if (store.get('collapsed', false)) app.classList.add('collapsed');
   $('collapse').addEventListener('click', () => {
@@ -263,7 +302,7 @@
     const f = state.footage;
     const chip = r.category === 'Saved' ? 'green' : r.category === 'Sentry' ? 'amber' : '';
     const thumb = (r.thumbRel || r.frontRel)
-      ? `<img loading="lazy" alt="" src="/api/vehicles/${encodeURIComponent(v.id)}/recordings/${encodeURIComponent(r.id)}/thumbnail" onerror="this.replaceWith(Object.assign(document.createElement('span'),{textContent:'${esc(r.category)}'}))">`
+      ? `<img loading="lazy" alt="" data-fallback="${esc(r.category)}" src="/api/vehicles/${encodeURIComponent(v.id)}/recordings/${encodeURIComponent(r.id)}/thumbnail">`
       : esc(r.category);
     const range = r.start && r.end && r.end !== r.start ? ` – ${esc(r.end.slice(11))}` : '';
     return `<article class="rec${f.selected.has(r.id) ? ' selected' : ''}" data-id="${esc(r.id)}">
@@ -505,19 +544,20 @@
 
   pages.settings = async (sub) => {
     const editing = sub?.startsWith('vehicle/') ? sub.slice(8) : sub === 'vehicle-new' ? 'new' : null;
-    const [settings, upd, sys] = await Promise.all([api('/api/settings'), api('/api/updater'), api('/api/system').catch(() => null)]);
+    const [settings, upd, sys, sec] = await Promise.all([api('/api/settings'), api('/api/updater'), api('/api/system').catch(() => null), api('/api/security').catch(() => null)]);
+    state.system = sys || state.system;
     let html = head('Your archive workspace', 'Settings');
     html += `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h2>Vehicles</h2><a class="btn" href="#/settings/vehicle-new">${icon('plus')} Add vehicle</a></div>
       ${state.vehicles.length ? `<table class="table" style="margin-top:14px"><thead><tr><th>Name</th><th>Footage</th><th>Status</th><th></th></tr></thead><tbody>
       ${state.vehicles.map((v) => `<tr><td><b>${esc(v.name)}</b><br><span class="muted small">${esc(v.timezone)}</span></td>
-        <td class="small mono">${esc(v.source.type === 'smb' ? v.source.share : v.source.path)}</td>
+        <td class="small"><span class="mono">${esc(v.source.type === 'smb' ? v.source.share : v.source.path)}</span>${v.security ? `<br><span class="muted">${esc(v.security)}</span>` : ''}</td>
         <td class="small">${v.share?.healthy ? (v.share.writable === false ? 'Read-only' : 'Connected') : esc(v.share?.lastError || 'Unavailable')}</td>
         <td class="actions"><a class="btn sm" href="#/settings/vehicle/${esc(v.id)}">Edit</a></td></tr>`).join('')}</tbody></table>` : '<p style="margin-top:12px">No vehicles yet.</p>'}
       ${editing ? vehicleForm(editing === 'new' ? null : state.vehicles.find((v) => v.id === editing)) : ''}</div>`;
 
     html += `<div class="card"><h2>Updates</h2><p>Sentry Manager can update itself from GitHub. Pick the branch to follow.</p>
       <form id="upd" class="form" style="margin-top:18px">
-        <label class="field">Repository<input class="input" name="repo" value="${esc(upd.settings.repo)}" placeholder="owner/name"></label>
+        <label class="field">Repository<input class="input" name="repo" value="${esc(upd.settings.repo)}" placeholder="owner/name"${upd.settings.repoLocked ? ' readonly title="Fixed by the container (UPDATE_REPO). Updates can only come from this repository."' : ''}></label>
         <label class="field">Branch<select class="input" name="branch" id="upd-branch"><option>${esc(upd.settings.branch)}</option></select></label>
         <label class="field">GitHub token (private repositories)<input class="input" name="token" type="password" placeholder="${upd.settings.tokenSet ? 'saved — leave empty to keep' : 'optional'}" autocomplete="off"></label>
         <label class="field">Check every<select class="input" name="intervalHours">${[1, 3, 6, 12, 24].map((h) => `<option value="${h}"${upd.settings.intervalHours === h ? ' selected' : ''}>${h} hour${h > 1 ? 's' : ''}</option>`).join('')}</select></label>
@@ -537,6 +577,8 @@
         <label class="field">New password<input class="input" type="password" name="next" autocomplete="new-password" minlength="8" required></label>
         <div class="full form-actions" style="margin-top:0"><button class="btn solid" type="submit">Change password</button></div></form></div>`;
 
+    if (sec) html += securityCard(sec);
+
     if (sys) {
       const caps = sys.converter.capabilities || {};
       html += `<div class="card"><h2>System</h2><dl class="kv" style="margin-top:16px">
@@ -550,10 +592,71 @@
     }
     page.innerHTML = html;
     wireSettings(upd, editing);
+    if (sec) wireSecurity(sec);
   };
 
+  function securityCard(sec) {
+    const tls = sec.tls || {};
+    const ca = tls.ca;
+    const host = (sec.currentHost || '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
+    const covered = !host || (tls.hostnames || []).map((h) => h.toLowerCase()).includes(host.toLowerCase());
+    let body = `<dl class="kv" style="margin-top:16px">
+      <dt>This connection</dt><dd>${sec.https ? 'HTTPS (encrypted)' : '<b class="bad-text">not encrypted</b>: others on the network could read your password and the footage. Use https:// or a reverse proxy that does HTTPS.'}</dd>
+      <dt>Server process</dt><dd>${sec.runningAsRoot ? 'runs as root (not supervised; fine for development, not for the Docker image)' : 'runs as an unprivileged user; only the supervisor can mount shares'}</dd>`;
+    if (sec.tlsMode === 'off') {
+      body += '<dt>HTTPS</dt><dd>turned off (TLS_MODE=off): only use this behind a reverse proxy that does HTTPS.</dd></dl>';
+    } else if (tls.mode === 'own') {
+      body += `<dt>Certificate</dt><dd>your own (TLS_CERT_FILE) · ${esc((tls.certificate?.names || []).join(', '))} · valid until ${esc(tls.certificate?.validTo || '?')}</dd>
+        <dt>Fingerprint</dt><dd class="mono small">${esc(tls.certificate?.fingerprint || '?')}</dd></dl>`;
+    } else if (tls.error) {
+      body += `<dt>Certificate</dt><dd>${esc(tls.error)}</dd></dl>`;
+    } else {
+      body += `<dt>Certificate authority</dt><dd>Sentry Manager's own · valid until ${esc(ca?.validTo || '?')}</dd>
+        <dt>CA fingerprint (SHA-256)</dt><dd class="mono small" style="word-break:break-all">${esc(ca?.fingerprint || '?')}</dd>
+        <dt>Certificate covers</dt><dd>${esc((tls.hostnames || []).join(', '))} · renews by itself before ${esc(tls.certificate?.validTo || '?')}</dd></dl>
+        ${covered ? '' : `<div class="note amber">You opened this page as <b>${esc(host)}</b>, which the certificate does not cover yet, so browsers warn even when they trust the CA. <button class="btn sm" type="button" id="sec-add-host" data-host="${esc(host)}">Add ${esc(host)}</button></div>`}
+        <p style="margin-top:14px">To stop browser warnings, and so nobody can pose as this server, install the certificate authority on each phone and computer you use: download it, then compare the fingerprint above with the one in the container log (<code>docker logs sentry-manager</code>) before trusting it. It can only vouch for local names and private IP addresses.</p>
+        <details class="more" style="margin-top:10px"><summary>How to install it</summary>
+          <ul class="small" style="margin:10px 0 0 18px;display:grid;gap:6px">
+            <li><b>iPhone / iPad:</b> open the download in Safari, then Settings &gt; General &gt; VPN &amp; Device Management to install it, and Settings &gt; General &gt; About &gt; Certificate Trust Settings to turn on full trust.</li>
+            <li><b>Android:</b> Settings &gt; Security &gt; Encryption &amp; credentials &gt; Install a certificate &gt; CA certificate.</li>
+            <li><b>Windows:</b> open the file &gt; Install Certificate &gt; Local Machine &gt; Trusted Root Certification Authorities.</li>
+            <li><b>macOS:</b> open it in Keychain Access (System), then set Trust to Always Trust.</li>
+            <li><b>Firefox:</b> Settings &gt; Privacy &amp; Security &gt; Certificates &gt; View Certificates &gt; Authorities &gt; Import.</li>
+          </ul></details>
+        <form id="sec-hosts" class="form" style="margin-top:16px">
+          <label class="field full">Extra names and addresses for the certificate<input class="input" name="hostnames" value="${esc((tls.editable || []).join(', '))}" placeholder="192.168.1.20, nas.local"></label>
+          <p class="muted small full">The IP address or name you type in the browser to reach this server. Names from TLS_HOSTNAMES: ${esc((tls.fromEnv || []).join(', ') || 'none')}.</p>
+          <div class="full form-actions" style="margin-top:0"><a class="btn" href="/api/security/ca.crt" download>Download certificate authority</a><button class="btn solid" type="submit">Save names</button></div>
+        </form>`;
+    }
+    return `<div class="card"><h2>Security</h2>${body}</div>`;
+  }
+
+  function wireSecurity(sec) {
+    const save = async (names) => {
+      try {
+        const out = await api('/api/security/hostnames', { method: 'PUT', body: { hostnames: names } });
+        toast(out.caReplaced ? 'Saved. The certificate authority was replaced: install the new one on your devices.' : 'Saved. The certificate now covers those names.');
+        render();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+    const form = $('sec-hosts');
+    if (form) {
+      form.onsubmit = (e) => {
+        e.preventDefault();
+        save(String(new FormData(form).get('hostnames') || '').split(/[\s,]+/).filter(Boolean));
+      };
+    }
+    const add = $('sec-add-host');
+    if (add) add.onclick = () => save([...(sec.tls?.editable || []), add.dataset.host]);
+  }
+
   function vehicleForm(v) {
-    const s = v?.source || { type: 'smb', version: '3.0' };
+    const versions = state.system?.smbVersions || { '3.1.1': 'SMB 3.1.1 (recommended)', '3.02': 'SMB 3.02', '3.0': 'SMB 3.0', 3: 'SMB 3.0 or newer' };
+    const s = v?.source || { type: 'smb', version: state.system?.smbDefaultVersion || '3.1.1', encrypt: true };
     return `<form id="veh" class="form" style="margin-top:22px;padding-top:22px;border-top:1px solid var(--border)">
       <h3 class="full">${v ? `Edit ${esc(v.name)}` : 'Add a vehicle'}</h3>
       <label class="field">Name<input class="input" name="name" required value="${esc(v?.name || '')}" placeholder="Daily Driver"></label>
@@ -564,8 +667,10 @@
         <label class="field">User name<input class="input" name="username" value="${esc(s.username || '')}" autocomplete="off"></label>
         <label class="field">Password<input class="input" name="password" type="password" placeholder="${s.passwordSet ? 'saved — leave empty to keep' : ''}" autocomplete="new-password"></label>
         <label class="field">Domain (optional)<input class="input" name="domain" value="${esc(s.domain || '')}"></label>
-        <label class="field">SMB version<select class="input" name="version">${['3.1.1', '3.0', '2.1', '2.0', 'default'].map((x) => `<option${(s.version || '3.0') === x ? ' selected' : ''}>${x}</option>`).join('')}</select></label>
-        <label class="field full">Extra mount options (optional)<input class="input" name="options" value="${esc(s.options || '')}" placeholder="seal"></label>
+        <label class="field">SMB version<select class="input" name="version">${Object.entries(versions).map(([x, label]) => `<option value="${esc(x)}"${String(s.version || '3.1.1') === x ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
+        <label class="field">Port (optional)<input class="input" name="port" inputmode="numeric" value="${esc(s.port || '')}" placeholder="445"></label>
+        <label class="check full"><input type="checkbox" name="encrypt"${s.encrypt === false ? '' : ' checked'}> Encrypt the connection (recommended). Without it the connection is still signed, so nobody can change the footage, but others on the network could watch it.</label>
+        <p class="muted small full">Only SMB 3 is allowed and every connection is signed, so a man in the middle cannot read or change footage, or pose as your NAS. Files on the share can never run as programs inside the container. Use a dedicated NAS account with access to this share only.</p>
       </div>
       <div class="full" data-src="path"${s.type === 'path' ? '' : ' hidden'}>
         <label class="field">Folder<input class="input" name="path" value="${esc(s.path || '')}" placeholder="/footage/weekend-car"></label>
@@ -591,7 +696,16 @@
         const fd = new FormData(veh);
         const body = { name: fd.get('name'), timezone: fd.get('timezone'), source: type === 'path'
           ? { type: 'path', path: fd.get('path') }
-          : { type: 'smb', share: fd.get('share'), username: fd.get('username'), password: fd.get('password') || undefined, domain: fd.get('domain'), version: fd.get('version'), options: fd.get('options') } };
+          : { type: 'smb', share: fd.get('share'), username: fd.get('username'), password: fd.get('password') || undefined, domain: fd.get('domain'), version: fd.get('version'), encrypt: fd.get('encrypt') === 'on', port: fd.get('port') || null } };
+        // only send the source when it changed, so a rename needs no password
+        if (editing !== 'new') {
+          const was = state.vehicles.find((x) => x.id === editing)?.source || {};
+          const same = type === was.type && (type === 'path'
+            ? body.source.path === was.path
+            : ['share', 'username', 'domain', 'version'].every((k) => String(body.source[k] ?? '') === String(was[k] ?? ''))
+              && body.source.encrypt === (was.encrypt !== false) && String(body.source.port ?? '') === String(was.port ?? '') && !body.source.password);
+          if (same) delete body.source;
+        }
         try {
           const saved = editing === 'new' ? await api('/api/vehicles', { body }) : await api(`/api/vehicles/${encodeURIComponent(editing)}`, { method: 'PUT', body });
           state.vehicleId = saved.id;

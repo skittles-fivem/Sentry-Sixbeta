@@ -22,21 +22,28 @@ FROM ubuntu:24.04
 # VA drivers   AMD (mesa radeonsi) everywhere; Intel iHD + oneVPL on amd64
 # fonts        for burned-in timestamps / dashboards in exports
 # tini         reaps ffmpeg children and forwards signals
+# openssl      the local HTTPS certificate authority
+# util-linux   setpriv: the app runs unprivileged (supervisor.js)
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
     apt-get install -y --no-install-recommends ffmpeg cifs-utils mesa-va-drivers vainfo tini ca-certificates tzdata \
-      fontconfig fonts-liberation fonts-dejavu-core; \
+      fontconfig fonts-liberation fonts-dejavu-core openssl util-linux; \
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
       apt-get install -y --no-install-recommends intel-media-va-driver-non-free libvpl2 libmfx-gen1.2; \
     fi; \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*; \
+    # no setuid/setgid programs: nothing inside can become root again (the
+    # root supervisor runs mount.cifs as root anyway)
+    find / -xdev -perm /6000 -type f -exec chmod a-s {} +
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=native /build/noreplace-rename /usr/local/bin/noreplace-rename
 
 ENV NODE_ENV=production \
     PORT=9000 \
+    PUID=1000 \
+    PGID=1000 \
     DATA_PATH=/data \
     FOOTAGE_ROOT=/footage \
     UV_THREADPOOL_SIZE=16 \
@@ -56,6 +63,7 @@ RUN printf '{"sha":"%s","branch":"%s","builtAt":"%s"}\n' "$GIT_SHA" "$GIT_BRANCH
 
 VOLUME ["/data"]
 EXPOSE 9000
+# /healthz answers on plain HTTP too (everything else there redirects to HTTPS)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||9000)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
 

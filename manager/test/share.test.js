@@ -5,7 +5,8 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
-const { ShareManager, findMount, buildMountOptions, credentialsFile, explainMountError } = require('../server/share');
+const { ShareManager, findMount, explainMountError } = require('../server/share');
+const { createLocalMounter } = require('../server/mounter');
 const os = require('os');
 const { Logger } = require('../server/log');
 
@@ -27,23 +28,12 @@ test('findMount reads /proc/self/mountinfo', () => {
   assert.equal(findMount(MOUNTINFO, '/nope'), null);
 });
 
-test('mount options keep the password off the command line and let users override', () => {
-  const smb = { username: 'tesla', password: 'p,a=s s', domain: '', version: '3.0', options: '', uid: 1000, gid: 1000 };
-  const opts = buildMountOptions(smb, '/run/sentry-manager/smb-credentials');
-  assert.equal(opts, 'credentials=/run/sentry-manager/smb-credentials,vers=3.0,uid=1000,gid=1000,file_mode=0664,dir_mode=0775');
-  assert.ok(!opts.includes('p,a=s s'));
-  assert.equal(credentialsFile(smb), 'username=tesla\npassword=p,a=s s\n');
-
-  const guest = buildMountOptions({ ...smb, username: '', version: 'default', options: 'vers=2.1, file_mode=0777,seal' }, '/x');
-  assert.equal(guest, 'guest,uid=1000,gid=1000,dir_mode=0775,vers=2.1,file_mode=0777,seal');
-  assert.equal(credentialsFile({ username: 'a\nb', password: 'c', domain: 'HOME' }), 'username=ab\npassword=c\ndomain=HOME\n');
-});
-
 test('mount errors come with actionable hints', () => {
-  assert.match(explainMountError('mount error(13): Permission denied'), /SMB_PASSWORD/);
+  assert.match(explainMountError('mount error(13): Permission denied'), /user name or password/);
   assert.match(explainMountError('mount error(1): Operation not permitted'), /SYS_ADMIN/);
   assert.match(explainMountError('Unable to apply new capability set.'), /SYS_ADMIN/, 'no cap_add at all');
-  assert.match(explainMountError('mount error(112): Host is down'), /SMB_VERSION/);
+  assert.match(explainMountError('mount error(112): Host is down'), /SMB 3/);
+  assert.match(explainMountError('mount error(95): Operation not supported'), /encryption/);
   assert.match(explainMountError('mount error(2): No such file or directory'), /\/\/server\/share/);
   assert.match(explainMountError('mount: unknown filesystem type \'cifs\''), /modprobe cifs/);
   assert.equal(explainMountError('something new'), null);
@@ -52,10 +42,12 @@ test('mount errors come with actionable hints', () => {
 function makeShare({ root, mountinfo, smbShare = '', runCmd, credDir }) {
   const config = {
     footagePath: root,
-    smb: { share: smbShare, username: 'tesla', password: 'secret!', domain: '', version: '3.0', options: '', uid: 1000, gid: 1000 }
+    smb: { share: smbShare, username: 'tesla', password: 'secret!', domain: '', version: '3.1.1', encrypt: true }
   };
+  // the same mounter the root supervisor uses, with mount/umount faked
+  const mounter = createLocalMounter({ footageRoot: path.dirname(root), credDir, uid: 1000, gid: 1000, runCmd });
   return new ShareManager({
-    config, log: new Logger({ silent: true }).scope('share'), runCmd, mountinfoPath: mountinfo, credDir, id: 'car1'
+    config, log: new Logger({ silent: true }).scope('share'), mounter: smbShare ? mounter : null, mountinfoPath: mountinfo, id: path.basename(root)
   });
 }
 
@@ -68,7 +60,10 @@ test('SMB mode mounts the share, writes a 0600 credentials file and passes the w
   const runCmd = async (cmd, args) => {
     calls.push([cmd, ...args]);
     if (cmd === 'mount') {
-      const credFile = args[args.indexOf('-o') + 1].match(/credentials=([^,]+)/)[1];
+      const opts = args[args.indexOf('-o') + 1].split(',');
+      for (const o of ['vers=3.1.1', 'sec=ntlmssp', 'seal', 'nosuid', 'nodev', 'noexec', 'uid=1000', 'gid=1000', 'forceuid', 'forcegid']) assert.ok(opts.includes(o), `mount option ${o}`);
+      assert.ok(!opts.includes('guest') && !opts.some((o) => /^(exec|suid|dev)$/.test(o)));
+      const credFile = opts.find((o) => o.startsWith('credentials=')).slice('credentials='.length);
       const st = fs.statSync(credFile);
       assert.equal(st.mode & 0o777, 0o600);
       assert.equal(fs.readFileSync(credFile, 'utf8'), 'username=tesla\npassword=secret!\n');
@@ -95,7 +90,7 @@ test('SMB mode mounts the share, writes a 0600 credentials file and passes the w
 
     await share.stop();
     assert.equal(calls[calls.length - 1][0], 'umount');
-    assert.equal(fs.existsSync(path.join(dir, 'run', 'car1-smb-credentials')), false, 'credentials removed on stop');
+    assert.equal(fs.existsSync(path.join(dir, 'run', 'footage.cred')), false, 'credentials removed on stop');
   } finally {
     rmrf(dir);
   }
@@ -116,7 +111,7 @@ test('SMB mount failure reports the error, a hint, and backs off', async () => {
     const st = await share.ensure();
     assert.equal(st.healthy, false);
     assert.match(st.lastError, /Permission denied/);
-    assert.match(st.hint, /SMB_USERNAME/);
+    assert.match(st.hint, /user name or password/);
     await share.ensure();
     assert.equal(mounts, 1, 'does not hammer the server while backing off');
     await share.reconnect();

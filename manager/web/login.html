@@ -28,41 +28,12 @@
       <label class="field">User name<input class="input" name="username" autocomplete="username" required value="admin"></label>
       <label class="field">Password<input class="input" name="password" type="password" autocomplete="current-password" required minlength="1"></label>
       <label class="field" id="confirm-row" hidden>Confirm password<input class="input" name="confirm" type="password" autocomplete="new-password"></label>
+      <label class="field" id="code-row" hidden>Setup code<input class="input" name="code" autocomplete="one-time-code" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX"><span class="muted small">Printed in the container log: <code>docker logs sentry-manager</code></span></label>
+      <p class="note amber small" id="insecure" hidden>This page is not using HTTPS, so your password could be seen by others on the network. Open it with https:// instead.</p>
       <p class="err" id="err" role="alert"></p>
       <button class="btn solid" type="submit" id="submit">Sign in</button>
     </form>
   </main>
-  <script>
-    (async () => {
-      const $ = (id) => document.getElementById(id);
-      const next = new URLSearchParams(location.search).get('next') || '/';
-      const safeNext = next.startsWith('/') && !next.startsWith('//') ? next : '/';
-      const me = await fetch('/api/auth/me').then((r) => r.json()).catch(() => ({}));
-      if (me.user) return location.replace(safeNext);
-      const setup = me.needsSetup;
-      if (setup) {
-        $('title').textContent = 'Create your account';
-        $('lead').textContent = 'This is the first start. Choose the user name and password that protect this Sentry Manager.';
-        $('confirm-row').hidden = false;
-        $('submit').textContent = 'Create account';
-        document.querySelector('[name=password]').autocomplete = 'new-password';
-        document.querySelector('[name=password]').minLength = 8;
-      }
-      $('form').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const f = new FormData(e.target);
-        if (setup && f.get('password') !== f.get('confirm')) { $('err').textContent = 'The passwords do not match.'; return; }
-        $('submit').disabled = true;
-        const res = await fetch(setup ? '/api/auth/setup' : '/api/auth/login', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-manager' },
-          body: JSON.stringify({ username: f.get('username'), password: f.get('password') })
-        }).catch(() => null);
-        $('submit').disabled = false;
-        if (res && res.ok) return location.replace(safeNext);
-        const data = res ? await res.json().catch(() => ({})) : {};
-        $('err').textContent = data.error || 'Could not reach Sentry Manager.';
-      });
-    })();
-  </script>
+  <script src="/web/login.js"></script>
 </body>
 </html>

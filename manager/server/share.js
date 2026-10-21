@@ -1,15 +1,15 @@
 'use strict';
 
-// Keeps the footage share available. With SMB_SHARE set, the container
-// mounts the share itself (mount.cifs, needs CAP_SYS_ADMIN), watches it, and
-// remounts if the NAS drops. Without it, FOOTAGE_PATH is whatever the user
-// mounted (bind mount or Docker CIFS volume) and is only health-checked.
+// Keeps a vehicle's footage share available. For an SMB vehicle the
+// container mounts the share itself (through a mounter: the root supervisor
+// does the actual mount.cifs, see mounter.js and mountSpec.js), watches it,
+// and remounts if the NAS drops. A folder vehicle is whatever the user
+// mounted into the container and is only health-checked.
 
 const { EventEmitter } = require('events');
-const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
-const { run, tail } = require('./proc');
+const { tail } = require('./proc');
 
 const CHECK_INTERVAL_MS = 30 * 1000;
 const WRITE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
@@ -45,31 +45,6 @@ function findMount(mountinfo, mountPoint) {
   return found;
 }
 
-function optionKey(opt) {
-  return opt.split('=')[0].trim().toLowerCase();
-}
-
-/** mount.cifs -o string. Secrets go in a credentials file, not on the command line. */
-function buildMountOptions(smb, credFile) {
-  const user = smb.options ? smb.options.split(',').map((o) => o.trim()).filter(Boolean) : [];
-  const userKeys = new Set(user.map(optionKey));
-  const defaults = [];
-  if (smb.username) defaults.push(`credentials=${credFile}`);
-  else defaults.push('guest');
-  if (smb.version && smb.version.toLowerCase() !== 'default') defaults.push(`vers=${smb.version}`);
-  // serverino (the default) keeps inode numbers stable, which the converter's
-  // identity checks rely on.
-  defaults.push(`uid=${smb.uid}`, `gid=${smb.gid}`, 'file_mode=0664', 'dir_mode=0775');
-  return [...defaults.filter((o) => !userKeys.has(optionKey(o))), ...user].join(',');
-}
-
-function credentialsFile(smb) {
-  const clean = (v) => String(v || '').replace(/[\r\n]/g, '');
-  let text = `username=${clean(smb.username)}\npassword=${clean(smb.password)}\n`;
-  if (smb.domain) text += `domain=${clean(smb.domain)}\n`;
-  return text;
-}
-
 /** Map mount.cifs errors to something a person can act on. */
 function explainMountError(output) {
   const s = String(output || '');
@@ -81,12 +56,12 @@ function explainMountError(output) {
     return 'The container is not allowed to mount. Add cap_add: [SYS_ADMIN, DAC_READ_SEARCH] (see docker-compose.yml).';
   }
   if (code === 13 || /Permission denied/i.test(s)) {
-    return 'Permission denied: the server rejected the login (check SMB_USERNAME / SMB_PASSWORD / SMB_DOMAIN), or on AppArmor hosts (Ubuntu) the container needs security_opt: apparmor:unconfined.';
+    return 'Permission denied: the server rejected the user name or password (check them and the Domain field), or on AppArmor hosts (Ubuntu) the container needs security_opt: apparmor:unconfined.';
   }
-  if (code === 2) return 'The share was not found on the server. SMB_SHARE must look like //server/share (optionally //server/share/folder).';
-  if (code === 112) return 'Server unreachable or it refused this SMB version. Check the address, then try SMB_VERSION=3.0, 2.1 or 2.0.';
-  if (code === 95) return 'The server does not support this SMB version. Try SMB_VERSION=3.0, 2.1 or 2.0.';
-  if (code === 22) return 'A mount option was rejected. Check SMB_VERSION and SMB_OPTIONS.';
+  if (code === 2) return 'The share was not found on the server. It must look like //server/share (optionally //server/share/folder).';
+  if (code === 112) return 'Server unreachable, or it does not speak SMB 3. Check the address; on the NAS, set the minimum SMB version to SMB 3 (SMB 1/2 are not allowed here).';
+  if (code === 95 || code === 5) return 'The server refused an encrypted SMB 3 session. On the NAS turn on SMB 3 encryption (Synology: Control Panel > File Services > SMB > Advanced; Samba: server smb encrypt = desired), or pick SMB 3.0 if it does not offer 3.1.1. Turning encryption off for this vehicle keeps signing, but lets others on the network see the footage.';
+  if (code === 22) return 'The server rejected a mount option. If the NAS does not support SMB 3.1.1, choose SMB 3.0 for this vehicle.';
   if (code === 113 || code === 111 || code === 110 || /timed out|No route|refused/i.test(s)) {
     return 'Could not reach the SMB server. Check the IP/hostname and that port 445 is open from the Docker host.';
   }
@@ -98,16 +73,17 @@ function explainMountError(output) {
 }
 
 class ShareManager extends EventEmitter {
-  constructor({ config, log, runCmd = run, mountinfoPath = '/proc/self/mountinfo', credDir = '/run/sentry-manager', id = 'default' }) {
+  constructor({ config, log, mounter = null, mountinfoPath = '/proc/self/mountinfo', id = 'default' }) {
     super();
     this.config = config;
+    this.id = id;
     this.root = config.footagePath;
-    this.smb = config.smb;
+    this.smb = config.smb || { share: '' };
     this.log = log;
-    this.runCmd = runCmd;
+    this.mounter = mounter;
     this.mountinfoPath = mountinfoPath;
-    this.credFile = path.join(credDir, `${String(id).replace(/[^a-z0-9_-]/gi, '_')}-smb-credentials`);
     this.mode = this.smb.share ? 'smb' : 'local';
+    if (this.mode === 'smb' && !mounter) throw new Error('An SMB vehicle needs a mounter.');
     this.mountedByUs = false;
     this.failures = 0;
     this.nextMountAt = 0;
@@ -198,20 +174,13 @@ class ShareManager extends EventEmitter {
 
   async mount() {
     const smb = this.smb;
+    this.log.info(`Mounting ${smb.share} at ${this.root} (SMB ${smb.version}, ${smb.encrypt === false ? 'signed' : 'encrypted'}, user ${smb.username})`);
+    let res;
     try {
-      await fsp.mkdir(this.root, { recursive: true });
-      if (smb.username) {
-        await fsp.mkdir(path.dirname(this.credFile), { recursive: true, mode: 0o700 });
-        await fsp.writeFile(this.credFile, credentialsFile(smb), { mode: 0o600 });
-        await fsp.chmod(this.credFile, 0o600);
-      }
+      res = await this.mounter.mount(this.id, smb);
     } catch (err) {
-      this.fail(`Could not prepare the mount: ${err.message}`, null);
-      return false;
+      res = { code: -1, output: err.message };
     }
-    const opts = buildMountOptions(smb, this.credFile);
-    this.log.info(`Mounting ${smb.share} at ${this.root} (vers=${smb.version || 'default'}${smb.username ? `, user ${smb.username}` : ', guest'})`);
-    const res = await this.runCmd('mount', ['-t', 'cifs', smb.share, this.root, '-o', opts], { timeoutMs: 60000 });
     if (res.code === 0) {
       this.mountedByUs = true;
       this.backoffMs = CHECK_INTERVAL_MS;
@@ -222,8 +191,8 @@ class ShareManager extends EventEmitter {
       this.log.info(`Mounted ${smb.share}`);
       return true;
     }
-    const output = `${res.stderr}\n${res.stdout}`.split('\n').filter((l) => !/^Refer to the mount\.cifs/.test(l)).join('\n');
-    const message = res.error?.code === 'ENOENT'
+    const output = String(res.output || '');
+    const message = res.notFound
       ? 'mount command not found (cifs-utils is missing from the image).'
       : res.timedOut ? 'mount timed out (server not answering on port 445?)' : tail(output, 3) || `mount exited with ${res.code}`;
     this.fail(`Mount failed: ${message}`, explainMountError(output));
@@ -236,8 +205,8 @@ class ShareManager extends EventEmitter {
     if (this.mode !== 'smb') return;
     const mount = await this.currentMount();
     if (!mount) return;
-    const res = await this.runCmd('umount', lazy ? ['-l', this.root] : [this.root], { timeoutMs: 30000 });
-    if (res.code !== 0) this.log.warn(`umount failed: ${tail(res.stderr, 2)}`);
+    const res = await this.mounter.unmount(this.id, { lazy });
+    if (res.code !== 0) this.log.warn(`umount failed: ${res.output || res.code}`);
     this.mountedByUs = false;
   }
 
@@ -364,12 +333,8 @@ class ShareManager extends EventEmitter {
   async stop() {
     clearInterval(this.timer);
     if (this.mountedByUs) await this.unmount();
-    try {
-      if (fs.existsSync(this.credFile)) await fsp.rm(this.credFile, { force: true });
-    } catch {
-      // ignore
-    }
+    if (this.mode === 'smb') await this.mounter.forget(this.id).catch(() => {});
   }
 }
 
-module.exports = { ShareManager, findMount, buildMountOptions, credentialsFile, explainMountError, withTimeout };
+module.exports = { ShareManager, findMount, explainMountError, withTimeout };

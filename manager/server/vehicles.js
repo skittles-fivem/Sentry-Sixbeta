@@ -3,11 +3,21 @@
 // Vehicles: each has its own footage source (an SMB share the container
 // mounts at /footage/<id>, or a folder already mounted into the container)
 // and its own ShareManager keeping it healthy.
+//
+// A folder vehicle must live under one of the folder roots (/footage unless
+// FOLDER_ROOTS says otherwise) and can never be, contain or sit inside the
+// manager's own data, the app, or system folders: otherwise anyone signed in
+// could point a "vehicle" at / or /data and read every secret through the
+// viewer.
 
 const { EventEmitter } = require('events');
 const fs = require('fs');
 const path = require('path');
 const { ShareManager } = require('./share');
+const { normalizeSmb } = require('./mountSpec');
+const { isInside } = require('./safePath');
+
+const SYSTEM_DIRS = ['/proc', '/sys', '/dev', '/etc', '/root', '/run', '/boot'];
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
@@ -24,45 +34,72 @@ function validTimezone(tz) {
   }
 }
 
+const badRequest = (message) => Object.assign(new Error(message), { status: 400 });
+
 /** Normalize and validate a vehicle definition coming from the UI or env. */
 function normalizeVehicle(input, existing = null) {
   const name = String(input.name ?? existing?.name ?? '').trim().slice(0, 60);
-  if (!name) throw Object.assign(new Error('Give the vehicle a name.'), { status: 400 });
+  if (!name) throw badRequest('Give the vehicle a name.');
   const timezone = String(input.timezone ?? existing?.timezone ?? process.env.TZ ?? 'UTC').trim() || 'UTC';
-  if (!validTimezone(timezone)) throw Object.assign(new Error(`Unknown time zone "${timezone}".`), { status: 400 });
+  if (!validTimezone(timezone)) throw badRequest(`Unknown time zone "${timezone}".`);
   const src = input.source ?? existing?.source ?? {};
   let source;
   if (src.type === 'path') {
     const p = String(src.path || '').trim();
-    if (!path.isAbsolute(p)) throw Object.assign(new Error('The folder must be an absolute path inside the container, e.g. /footage/car.'), { status: 400 });
+    if (!path.isAbsolute(p) || p.includes('\0')) throw badRequest('The folder must be an absolute path inside the container, e.g. /footage/car.');
     source = { type: 'path', path: path.resolve(p) };
   } else {
-    const share = String(src.share || '').trim().replace(/\\/g, '/');
-    if (!/^\/\/[^/]+\/[^/]+/.test(share)) throw Object.assign(new Error('The SMB share must look like //server/share.'), { status: 400 });
-    const prevPassword = existing?.source?.type === 'smb' ? existing.source.password : '';
-    source = {
-      type: 'smb',
-      share,
-      username: String(src.username || '').trim(),
-      // the UI sends no password to keep the stored one
-      password: src.password === undefined || src.password === null ? prevPassword : String(src.password),
-      domain: String(src.domain || '').trim(),
-      version: String(src.version || '3.0').trim() || '3.0',
-      options: String(src.options || '').trim()
-    };
+    // the UI sends no password to keep the stored one
+    source = normalizeSmb(src, existing?.source?.type === 'smb' ? existing.source : null);
   }
   return { name, timezone, source };
 }
 
 class VehicleManager extends EventEmitter {
-  constructor({ db, footageRoot = '/footage', logger, credDir, mountinfoPath, runCmd }) {
+  /**
+   * folderRoots: where folder vehicles may live. protectedDirs: folders no
+   * vehicle may be, contain or sit inside (the data dir, the app, ...).
+   */
+  constructor({ db, footageRoot = '/footage', folderRoots = null, protectedDirs = [], logger, mounter = null, mountinfoPath }) {
     super();
     this.db = db;
-    this.footageRoot = footageRoot;
+    this.footageRoot = path.resolve(footageRoot);
+    this.folderRoots = (folderRoots || [this.footageRoot]).map((r) => path.resolve(r));
+    this.protectedDirs = [...protectedDirs, ...SYSTEM_DIRS].filter(Boolean).map((d) => path.resolve(d));
     this.logger = logger;
     this.log = logger.scope('vehicles');
-    this.shareOptions = { credDir, mountinfoPath, runCmd };
+    this.mounter = mounter;
+    this.shareOptions = { mountinfoPath };
     this.shares = new Map();
+  }
+
+  /** Throws unless a folder vehicle at `p` is allowed (see the header). */
+  checkFolder(p, ignoreId = null) {
+    const abs = path.resolve(p);
+    const real = (() => {
+      try {
+        return fs.realpathSync(abs);
+      } catch {
+        return abs; // checked again (really) every time it is used, see roots()
+      }
+    })();
+    const inRoot = this.folderRoots.some((r) => isInside(abs, r) && isInside(real, realOr(r)));
+    if (!inRoot) throw badRequest(`Folder vehicles must be inside ${this.folderRoots.join(' or ')} (mount the folder there with a Docker volume).`);
+    for (const d of this.protectedDirs) {
+      for (const x of [abs, real]) {
+        if (isInside(x, d) || isInside(d, x)) throw badRequest(`A vehicle cannot use ${p}: it overlaps ${d}.`);
+      }
+    }
+    this.checkOverlap(abs, ignoreId);
+  }
+
+  /** No two vehicles may share, or nest inside each other's, folders. */
+  checkOverlap(root, ignoreId) {
+    for (const v of this.list()) {
+      if (v.id === ignoreId) continue;
+      const other = this.rootOf(v);
+      if (isInside(root, other) || isInside(other, root)) throw badRequest(`That folder overlaps the footage of ${v.name} (${other}).`);
+    }
   }
 
   list() {
@@ -81,22 +118,39 @@ class VehicleManager extends EventEmitter {
   /** Create a vehicle from SMB_SHARE / FOOTAGE_PATH on first start. */
   bootstrapFromEnv(env = process.env) {
     if (this.list().length) return;
-    if (env.SMB_SHARE) {
-      this.add({ name: env.VEHICLE_NAME || 'My car', timezone: env.TZ || 'UTC', source: {
-        type: 'smb', share: env.SMB_SHARE, username: env.SMB_USERNAME || '', password: env.SMB_PASSWORD || '',
-        domain: env.SMB_DOMAIN || '', version: env.SMB_VERSION || '3.0', options: env.SMB_OPTIONS || ''
-      } });
-    } else if (env.FOOTAGE_PATH && fs.existsSync(env.FOOTAGE_PATH)) {
-      this.add({ name: env.VEHICLE_NAME || 'My car', timezone: env.TZ || 'UTC', source: { type: 'path', path: env.FOOTAGE_PATH } });
+    try {
+      if (env.SMB_SHARE) {
+        if (env.SMB_OPTIONS) this.log.warn('SMB_OPTIONS is no longer used: mount options are fixed for security (see README).');
+        this.add({ name: env.VEHICLE_NAME || 'My car', timezone: env.TZ || 'UTC', source: {
+          type: 'smb', share: env.SMB_SHARE, username: env.SMB_USERNAME || '', password: env.SMB_PASSWORD || '',
+          domain: env.SMB_DOMAIN || '', version: env.SMB_VERSION || undefined, encrypt: env.SMB_ENCRYPT !== 'false',
+          port: env.SMB_PORT || undefined
+        } });
+      } else if (env.FOOTAGE_PATH && fs.existsSync(env.FOOTAGE_PATH)) {
+        this.add({ name: env.VEHICLE_NAME || 'My car', timezone: env.TZ || 'UTC', source: { type: 'path', path: env.FOOTAGE_PATH } });
+      }
+    } catch (err) {
+      this.log.error(`Could not create the vehicle from the environment: ${err.message}`);
     }
   }
 
   add(input) {
     const vehicle = normalizeVehicle(input);
+    if (vehicle.source.type === 'path') this.checkFolder(vehicle.source.path);
     const taken = new Set(this.list().map((v) => v.id));
+    const free = (id) => {
+      if (taken.has(id)) return false;
+      if (vehicle.source.type !== 'smb') return true;
+      try {
+        this.checkOverlap(path.join(this.footageRoot, id), null);
+        return true;
+      } catch {
+        return false;
+      }
+    };
     let id = slug(input.id || vehicle.name);
     if (!ID_RE.test(id)) id = 'vehicle';
-    for (let n = 2; taken.has(id); n++) id = `${slug(vehicle.name).slice(0, 36)}-${n}`;
+    for (let n = 2; !free(id); n++) id = `${slug(vehicle.name).slice(0, 36)}-${n}`;
     const full = { id, ...vehicle, createdAt: Date.now() };
     this.db.set('vehicles', [...this.list(), full]);
     this.startShare(full);
@@ -108,6 +162,8 @@ class VehicleManager extends EventEmitter {
     const existing = this.get(id);
     if (!existing) throw Object.assign(new Error('No such vehicle.'), { status: 404 });
     const next = { ...existing, ...normalizeVehicle(input, existing) };
+    if (next.source.type === 'path') this.checkFolder(next.source.path, id);
+    else this.checkOverlap(path.join(this.footageRoot, id), id);
     this.db.set('vehicles', this.list().map((v) => (v.id === id ? next : v)));
     const sourceChanged = JSON.stringify(next.source) !== JSON.stringify(existing.source);
     if (sourceChanged) {
@@ -128,13 +184,12 @@ class VehicleManager extends EventEmitter {
 
   startShare(vehicle) {
     const root = this.rootOf(vehicle);
-    const smb = vehicle.source.type === 'smb'
-      ? { ...vehicle.source, uid: Number(process.env.PUID || 0), gid: Number(process.env.PGID || 0) }
-      : { share: '' };
+    const smb = vehicle.source.type === 'smb' ? { ...vehicle.source } : { share: '' };
     const share = new ShareManager({
       config: { footagePath: root, smb },
       log: this.logger.scope(`share:${vehicle.id}`),
       id: vehicle.id,
+      mounter: this.mounter,
       ...Object.fromEntries(Object.entries(this.shareOptions).filter(([, v]) => v !== undefined))
     });
     share.on('status', () => this.emit('status', vehicle.id));
@@ -192,14 +247,22 @@ class VehicleManager extends EventEmitter {
     const source = { ...vehicle.source };
     if (source.type === 'smb') {
       source.passwordSet = Boolean(source.password);
+      source.encrypt = source.encrypt !== false;
       delete source.password;
+      delete source.options;
     }
     return { id: vehicle.id, name: vehicle.name, timezone: vehicle.timezone, source, root: this.rootOf(vehicle), studioRoot: this.studioRoot(vehicle), share: share ? share.status() : null };
   }
 
-  /** Every folder the manager may read from or write to. */
+  /**
+   * Every vehicle folder the manager may read from or write to, with where
+   * each must really be (after symlinks) to count: see safePath.createRealGuard.
+   */
   roots() {
-    return this.list().map((v) => this.rootOf(v));
+    return this.list().map((v) => ({
+      path: this.rootOf(v),
+      within: v.source.type === 'path' ? this.folderRoots : [this.footageRoot]
+    }));
   }
 
   vehicleForPath(p) {
@@ -209,6 +272,14 @@ class VehicleManager extends EventEmitter {
       if (abs === root || abs.startsWith(root + path.sep)) return v;
     }
     return null;
+  }
+}
+
+function realOr(p) {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
   }
 }
 
