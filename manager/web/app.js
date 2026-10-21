@@ -408,8 +408,11 @@
       frames[kind] = wrap;
     }
     for (const [k, el] of Object.entries(frames)) {
-      if (k === kind) el.hidden = false;
-      else hideFrame(el);
+      if (k !== kind) hideFrame(el);
+      else if (el.hidden) {
+        el.hidden = false;
+        el.querySelector('iframe')?.contentWindow?.postMessage({ type: 'shown' }, location.origin);
+      }
     }
     fitFrames();
   }

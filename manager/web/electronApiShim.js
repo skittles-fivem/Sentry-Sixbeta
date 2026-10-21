@@ -309,15 +309,24 @@
     if (select && !select.value) select.value = 'quick';
   });
 
-  // Viewer tab: the page pauses it when you switch to another tab, through
-  // Studio's own play / pause button so its state stays right.
+  // Viewer tab: paused while you are on another tab, through Studio's own
+  // play / pause button so its state stays right. Playback that starts while
+  // away (autoplay after loading, the next clip) is stopped as well.
   if (embed === 'viewer') {
-    window.addEventListener('message', (e) => {
-      if (e.origin !== location.origin || e.source !== window.parent || e.data?.type !== 'pause') return;
+    let away = false;
+    const pause = () => {
       const btn = document.getElementById('playBtn');
-      const playing = [...document.querySelectorAll('video')].some((v) => !v.paused && !v.ended);
+      const playing = [...document.querySelectorAll('#videoMain, .tile-video')].some((v) => !v.paused && !v.ended);
       if (playing && btn && !btn.disabled) btn.click();
+    };
+    window.addEventListener('message', (e) => {
+      if (e.origin !== location.origin || e.source !== window.parent) return;
+      if (e.data?.type === 'pause') {
+        away = true;
+        pause();
+      } else if (e.data?.type === 'shown') away = false;
     });
+    document.addEventListener('play', () => { if (away) setTimeout(pause, 0); }, true);
   }
 
   // Encoder tab: open the Converter panel as soon as the Studio UI is built.

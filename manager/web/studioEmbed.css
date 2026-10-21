@@ -52,6 +52,10 @@ label:has(> #converterAutoLogin) { display: none !important; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 @media (pointer: coarse) {
   input:not([type=range]):not([type=checkbox]):not([type=radio]), select, textarea { font-size: max(16px, 1em) !important; }
-  /* the dashboard and map panels move with a finger (studioTouch.js) */
-  #dashboardVis, #dashboardVisCompact, #mapVis .vis-header, .sidebar-resize-handle { touch-action: none; }
+  /* the dashboard and map panels move with a finger (studioTouch.js); no
+     long-press menu or text selection on them */
+  #dashboardVis, #dashboardVisCompact, #mapVis, .sidebar-resize-handle {
+    touch-action: pinch-zoom; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
+  }
+  #mapVis { touch-action: none; }
 }

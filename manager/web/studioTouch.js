@@ -1,12 +1,13 @@
 // Touch for Studio's mouse-only drags on phones and tablets: moving the
 // dashboard and map panels, and resizing the clip list. A one-finger drag that
 // starts on one of them is replayed as mousedown / mousemove / mouseup, which
-// is all those handlers listen for. Taps, scrolling, sliders and the map
-// itself are left to the browser.
+// is all those handlers listen for (on the map panel, as on the desktop, a
+// one-finger drag moves the panel; two fingers zoom the map). Taps, scrolling
+// and sliders are left to the browser.
 (() => {
   if (!('ontouchstart' in window)) return;
-  const HANDLES = '#dashboardVis, #dashboardVisCompact, #mapVis .vis-header, .sidebar-resize-handle';
-  const SKIP = 'button, input, select, textarea, a, .leaflet-container';
+  const HANDLES = '#dashboardVis, #dashboardVisCompact, #mapVis, .sidebar-resize-handle';
+  const SKIP = 'button, input, select, textarea, a';
   let drag = null;
 
   const fire = (type, point, target) => target.dispatchEvent(new MouseEvent(type, {
@@ -15,6 +16,7 @@
   }));
 
   document.addEventListener('touchstart', (e) => {
+    if (drag?.moving) fire('mouseup', drag.start, drag.target); // a second finger ends the drag
     drag = null;
     if (e.touches.length !== 1 || !e.target.closest?.(HANDLES) || e.target.closest(SKIP)) return;
     const t = e.touches[0];
