@@ -407,8 +407,17 @@
       $('frames').append(wrap);
       frames[kind] = wrap;
     }
-    for (const [k, el] of Object.entries(frames)) el.hidden = k !== kind;
+    for (const [k, el] of Object.entries(frames)) {
+      if (k === kind) el.hidden = false;
+      else hideFrame(el);
+    }
     fitFrames();
+  }
+  // A Studio tab that is put away stops playing, so six videos don't keep
+  // decoding in the background (battery on phones and tablets).
+  function hideFrame(el) {
+    if (!el.hidden) el.querySelector('iframe')?.contentWindow?.postMessage({ type: 'pause' }, location.origin);
+    el.hidden = true;
   }
 
   // Studio's viewer needs about 900px; on narrower screens (phones) it is
@@ -837,7 +846,7 @@
     // give Studio the room it needs on smaller windows; the sidebar comes back after
     if (embedded && innerWidth < 1200 && !app.classList.contains('collapsed')) app.classList.add('collapsed', 'auto-collapsed');
     if (!embedded && app.classList.contains('auto-collapsed')) app.classList.remove('collapsed', 'auto-collapsed');
-    if (!embedded) for (const el of Object.values(frames)) el.hidden = true;
+    if (!embedded) for (const el of Object.values(frames)) hideFrame(el);
     try {
       await pages[state.route](rest.join('/'));
       labelTableCells(page);

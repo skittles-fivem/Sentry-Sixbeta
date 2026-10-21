@@ -306,6 +306,7 @@ body.converter-mode #driveList {
     background: transparent;
     font-family: var(--font-sans);
     font-size: 11px;
+    -webkit-user-select: text;
     user-select: text;
 }
 
@@ -636,6 +637,7 @@ body.converter-mode #driveList {
     line-height: 1.5;
     text-overflow: ellipsis;
     white-space: nowrap;
+    -webkit-user-select: text;
     user-select: text;
 }
 

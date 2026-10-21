@@ -315,6 +315,7 @@ canvas,
 
 .multi-cam-grid.grid-resizing,
 .multi-cam-grid.grid-resizing * {
+    -webkit-user-select: none;
     user-select: none;
 }
 
@@ -1435,6 +1436,7 @@ canvas,
     background: var(--surface-raised);
     color: var(--text-color);
     font-size: 12px;
+    -webkit-user-select: none;
     user-select: none;
 }
 
@@ -2888,6 +2890,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     right: 0;
     bottom: 0;
     background: rgba(0, 0, 0, 0.85);
+    -webkit-backdrop-filter: blur(8px);
     backdrop-filter: blur(8px);
     display: flex;
     flex-direction: column;
@@ -3462,6 +3465,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     padding: 14px 16px;
     cursor: pointer;
     transition: background 0.15s;
+    -webkit-user-select: none;
     user-select: none;
 }
 
@@ -4329,6 +4333,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     border: 2px solid var(--accent-color);
     border-radius: 6px;
     cursor: move;
+    -webkit-user-select: none;
     user-select: none;
     min-width: 80px;
     min-height: 45px;
@@ -4699,6 +4704,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     font-size: 13px;
     font-family: var(--font-mono);
     cursor: text;
+    -webkit-user-select: all;
     user-select: all;
 }
 
@@ -4748,6 +4754,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 .shared-clips-modal {
     max-width: 520px;
     border-radius: 20px;
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     background: var(--modal-bg);
 }
@@ -5008,6 +5015,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     --update-accent-soft: var(--accent-hover);
     max-width: 440px;
     border-radius: 24px;
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     background: var(--modal-bg);
 }
@@ -5326,6 +5334,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     --tc-accent-soft: var(--accent-hover);
     max-width: 480px;
     border-radius: 24px;
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     background: var(--modal-bg);
 }
@@ -5644,6 +5653,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     --changelog-accent-soft: var(--accent-hover);
     max-width: 560px;
     border-radius: 24px;
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     background: var(--modal-bg);
 }
@@ -5715,6 +5725,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     --guide-accent-soft: var(--accent-hover);
     max-width: 600px;
     border-radius: 24px;
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     background: var(--modal-bg);
 }
@@ -6165,6 +6176,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 
 .support-chat-panel.dragging {
     transition: none;
+    -webkit-user-select: none;
     user-select: none;
 }
 
@@ -6931,6 +6943,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
 .dev-modal {
     max-width: 500px;
     border-radius: 24px;
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     border: 1px solid rgba(255, 255, 255, 0.12);
     box-shadow:
@@ -7464,6 +7477,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     padding: 14px 16px;
     cursor: pointer;
     transition: background 0.15s;
+    -webkit-user-select: none;
     user-select: none;
 }
 
@@ -7678,6 +7692,7 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     z-index: 2147483647;
     border: 1px solid rgba(255, 255, 255, 0.1);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    -webkit-backdrop-filter: blur(8px);
     backdrop-filter: blur(8px);
 }
 

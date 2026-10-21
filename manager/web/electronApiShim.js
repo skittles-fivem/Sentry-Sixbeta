@@ -309,6 +309,17 @@
     if (select && !select.value) select.value = 'quick';
   });
 
+  // Viewer tab: the page pauses it when you switch to another tab, through
+  // Studio's own play / pause button so its state stays right.
+  if (embed === 'viewer') {
+    window.addEventListener('message', (e) => {
+      if (e.origin !== location.origin || e.source !== window.parent || e.data?.type !== 'pause') return;
+      const btn = document.getElementById('playBtn');
+      const playing = [...document.querySelectorAll('video')].some((v) => !v.paused && !v.ended);
+      if (playing && btn && !btn.disabled) btn.click();
+    });
+  }
+
   // Encoder tab: open the Converter panel as soon as the Studio UI is built.
   if (embed === 'encoder') {
     // "Review conversion" in Footage hands over that vehicle's folder as the source.

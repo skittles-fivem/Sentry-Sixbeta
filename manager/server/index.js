@@ -97,7 +97,7 @@ function readBuildInfo() {
 
 function studioHtml(html) {
   // Runs before any Studio script: marks web mode and installs window.electronAPI.
-  const inject = '<script src="/web/webFlag.js"></script>\n<script src="/web/electronApiShim.js"></script>\n<link rel="stylesheet" href="/web/studioEmbed.css">';
+  const inject = '<meta name="color-scheme" content="dark">\n<script src="/web/webFlag.js"></script>\n<script src="/web/electronApiShim.js"></script>\n<script src="/web/studioTouch.js"></script>\n<link rel="stylesheet" href="/web/studioEmbed.css">';
   return html.replace(/<head([^>]*)>/i, (m) => `${m}\n${inject}`);
 }
 

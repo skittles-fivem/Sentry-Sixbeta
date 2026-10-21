@@ -28,6 +28,7 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body { background: var(--bg); color: var(--text); font: 14px/1.5 var(--font); -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums; }
 button, input, select, textarea { font: inherit; color: inherit; }
 a { color: var(--accent); }
@@ -42,9 +43,9 @@ p { margin: 0; }
 .i { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
 /* layout */
-.app { display: grid; grid-template-columns: 224px minmax(0, 1fr); min-height: 100vh; gap: 0; }
+.app { display: grid; grid-template-columns: 224px minmax(0, 1fr); min-height: 100vh; min-height: 100dvh; gap: 0; }
 .app.collapsed { grid-template-columns: 76px minmax(0, 1fr); }
-.side { position: sticky; top: 0; height: 100vh; padding: 16px 0 16px 16px; }
+.side { position: sticky; top: 0; height: 100vh; height: 100dvh; padding: 16px 0 16px 16px; }
 .side-card {
   height: 100%; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border);
   border-radius: 22px; padding: 22px 12px 14px;
@@ -76,7 +77,7 @@ p { margin: 0; }
 .main { padding: 22px 32px 64px 48px; min-width: 0; }
 .topbar { display: flex; justify-content: space-between; align-items: center; color: var(--text-2); margin-bottom: 40px; font-size: 14px; }
 .crumb { color: var(--text-2); }
-.check { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+.check { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; -webkit-user-select: none; user-select: none; }
 .check input { width: 17px; height: 17px; accent-color: var(--accent); margin: 0; }
 .page-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 26px; }
 .head-actions { display: flex; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
@@ -150,7 +151,7 @@ textarea.input { padding: 10px 14px; min-height: 80px; }
 .selpanel .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .selpanel b.count { font-size: 15px; margin-right: 6px; }
 details.more { margin-top: 14px; }
-details.more summary { cursor: pointer; color: var(--text-2); font-size: 15px; }
+details.more summary { cursor: pointer; color: var(--text-2); font-size: 15px; padding: 6px 0; }
 details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .selrow { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
 .recs { display: flex; flex-direction: column; gap: 12px; }
@@ -175,7 +176,7 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 /* tables */
 .table { width: 100%; border-collapse: collapse; }
 .table th { text-align: left; font-size: 12px; font-weight: 600; color: var(--muted); padding: 10px 12px; border-bottom: 1px solid var(--border); }
-.table td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.table td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
 .table tr:last-child td { border-bottom: 0; }
 .table .actions { text-align: right; white-space: nowrap; }
 .table .actions .btn + .btn { margin-left: 8px; }
@@ -199,21 +200,21 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .kv dd { margin: 0; word-break: break-word; }
 
 /* embedded Studio */
-.frame-wrap { position: relative; margin: -22px -32px -64px -48px; height: 100vh; }
+.frame-wrap { position: relative; margin: -22px -32px -64px -48px; height: 100vh; height: 100dvh; }
 .frame-wrap { overflow: hidden; }
 .frame-wrap iframe { border: 0; width: 100%; height: 100%; display: block; background: #07090c; }
 .frame-bar { position: absolute; top: 10px; right: 16px; z-index: 2; display: flex; gap: 8px; }
 
 /* dialog + toast */
 dialog { border: 1px solid var(--border-strong); border-radius: 16px; background: var(--panel); color: var(--text); padding: 24px; width: min(480px, calc(100vw - 32px)); }
-dialog::backdrop { background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(3px); }
+dialog::backdrop { background: rgba(0, 0, 0, 0.65); -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
 dialog h2 { margin-bottom: 10px; }
 dialog p { color: var(--text-2); margin-bottom: 8px; }
 .toasts { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 10px; z-index: 1000; }
 .toast { background: var(--panel-3); border: 1px solid var(--border-strong); border-left: 3px solid var(--accent); padding: 12px 16px; border-radius: 12px; max-width: 380px; box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5); }
 .toast.bad { border-left-color: var(--danger); }
 
-html.reduce-effects *, html.reduce-effects *::before { transition: none !important; animation: none !important; backdrop-filter: none !important; box-shadow: none !important; }
+html.reduce-effects *, html.reduce-effects *::before { transition: none !important; animation: none !important; -webkit-backdrop-filter: none !important; backdrop-filter: none !important; box-shadow: none !important; }
 
 @media (max-width: 1100px) {
   .grid2 { grid-template-columns: minmax(0, 1fr); }
@@ -239,7 +240,7 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .card { padding: 20px; }
   .card.row { flex-direction: column; align-items: flex-start; }
   .big { font-size: 26px; }
-  .frame-wrap { margin: -16px -16px -64px; height: calc(100vh - 80px); }
+  .frame-wrap { margin: -16px -16px -64px; height: calc(100vh - 80px); height: calc(100dvh - 80px); }
   .kv { grid-template-columns: minmax(0, 1fr); }
   .table, .table tbody, .table tr, .table td { display: block; }
   .table thead { display: none; }
@@ -257,3 +258,7 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .set-tabs button { padding: 11px 4px; font-size: 12px; }
 }
 .bad-text { color: var(--danger); }
+/* touch screens: iPhones zoom into fields with text under 16px, so keep it at 16px */
+@media (pointer: coarse) {
+  input, select, textarea { font-size: max(16px, 1em); }
+}

@@ -152,6 +152,24 @@ one you want to that name:
 **Settings → System** lists the GPUs the container can see, what VA-API
 reports for each, and hints when a device is missing.
 
+## Phones and tablets
+
+Works in Safari on iPhone 14 and newer (iOS 16 or later) and on iPads from
+2022 on (iPad 10th gen, Air 5, Pro M2, mini 6 and newer), and in Chrome or
+Samsung Internet 22+ on Galaxy S22 and newer phones, Folds and Tabs, in
+portrait and landscape. Every page was checked at those devices' screen sizes
+in Safari's engine (WebKit) and in Chromium.
+
+- On phones the Viewer is Studio's desktop layout shrunk to fit; turn the
+  phone sideways for a bigger picture. The dashboard and map panels move with
+  a finger, and the timeline is a normal slider.
+- H.264 (the car's own recordings) and H.265 play on all of them. AV1 plays in
+  Safari only on iPhone 15 Pro and newer and on iPads with an M3, M4 or A17
+  Pro chip; Galaxy phones play it in software. If you watch on older iPhones
+  or iPads, convert to H.265.
+- Install the certificate authority on each phone and tablet once
+  (Settings → Security), so the page opens without a warning.
+
 ## Recycle Bin and policies
 
 **Move to trash** moves a recording's files into

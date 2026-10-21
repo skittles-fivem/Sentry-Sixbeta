@@ -18,7 +18,7 @@ label:has(> #converterAutoLogin) { display: none !important; }
 
 .sm-picker {
   position: fixed; inset: 0; z-index: 100000; display: grid; place-items: center;
-  background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(3px);
+  background: rgba(0, 0, 0, 0.6); -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
   font: 14px/1.4 Inter, system-ui, sans-serif; color: #e6e9ef;
 }
 .sm-picker-box {
@@ -46,4 +46,12 @@ label:has(> #converterAutoLogin) { display: none !important; }
     display: grid !important;
     grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)) !important;
   }
+}
+/* touch screens: iPhones zoom into fields with text under 16px, so keep it at 16px;
+   no text inflation in landscape */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+@media (pointer: coarse) {
+  input:not([type=range]):not([type=checkbox]):not([type=radio]), select, textarea { font-size: max(16px, 1em) !important; }
+  /* the dashboard and map panels move with a finger (studioTouch.js) */
+  #dashboardVis, #dashboardVisCompact, #mapVis .vis-header, .sidebar-resize-handle { touch-action: none; }
 }
