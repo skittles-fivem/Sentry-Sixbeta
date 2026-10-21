@@ -59,7 +59,7 @@ COPY manager/web ./manager/web
 ARG GIT_SHA=""
 ARG GIT_BRANCH=""
 ARG BUILD_DATE=""
-RUN printf '{"sha":"%s","branch":"%s","builtAt":"%s"}\n' "$GIT_SHA" "$GIT_BRANCH" "$BUILD_DATE" > /app/BUILD_INFO.json
+RUN printf '{"sha":"%s","branch":"%s","builtAt":"%s"}\n' "$GIT_SHA" "$GIT_BRANCH" "${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" > /app/BUILD_INFO.json
 
 VOLUME ["/data"]
 EXPOSE 9000

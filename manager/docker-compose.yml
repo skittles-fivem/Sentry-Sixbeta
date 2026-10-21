@@ -11,6 +11,11 @@ services:
     build:
       context: ..
       dockerfile: manager/Dockerfile
+      args:
+        # Shown in Settings, and the branch updates follow unless you pick another.
+        # Optional: SENTRY_COMMIT=$(git rev-parse HEAD) docker compose up -d --build
+        GIT_BRANCH: ${SENTRY_BRANCH:-claude/sentry-manager-docker-ui-q31i6f}
+        GIT_SHA: ${SENTRY_COMMIT:-}
     image: sentry-manager:latest
     container_name: sentry-manager
     restart: unless-stopped

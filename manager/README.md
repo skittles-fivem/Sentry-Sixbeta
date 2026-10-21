@@ -26,9 +26,12 @@ archive. It runs in Docker and serves a web UI on port **9000**.
 ```bash
 git clone -b claude/sentry-manager-docker-ui-q31i6f https://github.com/skittles-fivem/Sentry-Sixbeta
 cd Sentry-Sixbeta/manager
-docker compose up -d --build
+SENTRY_COMMIT=$(git rev-parse HEAD) docker compose up -d --build
 docker logs sentry-manager
 ```
+
+(`SENTRY_COMMIT` tells the image which commit it was built from, so Settings
+shows the exact version and the updater knows when it is already current.)
 
 The log shows two things you need once:
 
