@@ -576,8 +576,11 @@
     const editing = sub?.startsWith('vehicle/') ? sub.slice(8) : sub === 'vehicle-new' ? 'new' : null;
     const [settings, upd, sys, sec] = await Promise.all([api('/api/settings'), api('/api/updater'), api('/api/system').catch(() => null), api('/api/security').catch(() => null)]);
     state.system = sys || state.system;
+    const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], sec && ['security', 'Security'], sys && ['system', 'System']].filter(Boolean);
+    const show = editing || !sections.some(([k]) => k === sub) ? 'vehicles' : sub;
     let html = head('Your archive workspace', 'Settings');
-    html += `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h2>Vehicles</h2><a class="btn" href="#/settings/vehicle-new">${icon('plus')} Add vehicle</a></div>
+    html += `<nav class="set-tabs" aria-label="Settings sections">${sections.map(([k, label]) => `<button type="button" data-tab="${k}">${label}</button>`).join('')}</nav>`;
+    html += `<div class="card" data-section="vehicles"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h2>Vehicles</h2><a class="btn" href="#/settings/vehicle-new">${icon('plus')} Add vehicle</a></div>
       ${state.vehicles.length ? `<table class="table" style="margin-top:14px"><thead><tr><th>Name</th><th>Footage</th><th>Status</th><th></th></tr></thead><tbody>
       ${state.vehicles.map((v) => `<tr><td><b>${esc(v.name)}</b><br><span class="muted small">${esc(v.timezone)}</span></td>
         <td class="small"><span class="mono">${esc(v.source.type === 'smb' ? v.source.share : v.source.path)}</span>${v.security ? `<br><span class="muted">${esc(v.security)}</span>` : ''}</td>
@@ -585,7 +588,7 @@
         <td class="actions"><a class="btn sm" href="#/settings/vehicle/${esc(v.id)}">Edit</a></td></tr>`).join('')}</tbody></table>` : '<p style="margin-top:12px">No vehicles yet.</p>'}
       ${editing ? vehicleForm(editing === 'new' ? null : state.vehicles.find((v) => v.id === editing)) : ''}</div>`;
 
-    html += `<div class="card"><h2>Updates</h2><p>Sentry Six Manager can update itself from GitHub. Pick the branch to follow.</p>
+    html += `<div class="card" data-section="updates"><h2>Updates</h2><p>Sentry Six Manager can update itself from GitHub. Pick the branch to follow.</p>
       <form id="upd" class="form" style="margin-top:18px">
         <label class="field">Repository<input class="input" name="repo" value="${esc(upd.settings.repo)}" placeholder="owner/name"${upd.settings.repoLocked ? ' readonly' : ''}>${upd.settings.repoLocked ? '<span class="muted small">Locked: updates only come from this repository (set by UPDATE_REPO in the container).</span>' : ''}</label>
         <label class="field">Branch<select class="input" name="branch" id="upd-branch"><option>${esc(upd.settings.branch)}</option></select></label>
@@ -602,7 +605,7 @@
       <div class="form-actions"><button class="btn" id="upd-branches" type="button">Load branches</button><button class="btn" id="upd-check" type="button">Check now</button>
         <button class="btn" id="upd-save" type="button">Save</button><button class="btn solid" id="upd-install" type="button"${upd.installing ? ' disabled' : ''}>${upd.installing ? `Installing (${esc(upd.progress || '')})…` : 'Install latest and restart'}</button></div></div>`;
 
-    html += `<div class="card"><h2>Account</h2><form id="pw" class="form" style="margin-top:16px">
+    html += `<div class="card" data-section="account"><h2>Account</h2><form id="pw" class="form" style="margin-top:16px">
         <label class="field">Current password<input class="input" type="password" name="current" autocomplete="current-password" required></label>
         <label class="field">New password<input class="input" type="password" name="next" autocomplete="new-password" minlength="8" required></label>
         <div class="full form-actions" style="margin-top:0"><button class="btn solid" type="submit">Change password</button></div></form></div>`;
@@ -611,7 +614,7 @@
 
     if (sys) {
       const caps = sys.converter.capabilities || {};
-      html += `<div class="card"><h2>System</h2><dl class="kv" style="margin-top:16px">
+      html += `<div class="card" data-section="system"><h2>System</h2><dl class="kv" style="margin-top:16px">
         <dt>Converter</dt><dd>${sys.converter.ready ? `ready · replace originals ${esc(caps.replacement)} · cleanup ${esc(caps.ownershipCleanup)}` : `not ready (${esc(sys.converter.error || 'starting')})`}</dd>
         <dt>Safe rename helper</dt><dd>${sys.nativeHelper ? 'installed' : 'missing (link + unlink fallback)'}</dd>
         <dt>GPUs</dt><dd>${sys.gpu.gpus.length || sys.gpu.nvidia.length ? [...sys.gpu.nvidia.map((g) => `NVIDIA ${esc(g.name)} (driver ${esc(g.driver)})`), ...sys.gpu.gpus.filter((g) => g.vendor !== 'nvidia').map((g) => `${esc(g.name || g.vendorName)} · ${esc(g.node)}${g.passedThrough ? (g.encodes ? ` · encodes ${Object.entries(g.encodes).filter(([, x]) => x).map(([k]) => k.toUpperCase()).join(', ') || 'nothing'}` : '') : ' · not passed into the container'}`)].join('<br>') : 'none visible (the CPU encoders are used)'}</dd>
@@ -621,9 +624,31 @@
         <dt>Version</dt><dd class="mono">${esc(sys.version.sha ? sys.version.sha.slice(0, 12) : 'dev')}</dd></dl></div>`;
     }
     page.innerHTML = html;
+    wireSettingsTabs(show, editing ? location.hash : '#/settings');
     wireSettings(upd, editing);
     if (sec) wireSecurity(sec);
   };
+
+  // Phones show one Settings section at a time, picked from the tabs (wider
+  // screens hide the tabs and show every section). Switching keeps what was
+  // typed and only rewrites the address, so a reload opens the same section.
+  function wireSettingsTabs(show, vehiclesHash) {
+    const pick = (key) => {
+      page.querySelectorAll('[data-tab]').forEach((b) => {
+        b.classList.toggle('on', b.dataset.tab === key);
+        if (b.dataset.tab === key) b.setAttribute('aria-current', 'true');
+        else b.removeAttribute('aria-current');
+      });
+      page.querySelectorAll('[data-section]').forEach((c) => c.classList.toggle('on', c.dataset.section === key));
+    };
+    page.querySelectorAll('[data-tab]').forEach((b) => {
+      b.onclick = () => {
+        pick(b.dataset.tab);
+        history.replaceState(null, '', b.dataset.tab === 'vehicles' ? vehiclesHash : `#/settings/${b.dataset.tab}`);
+      };
+    });
+    pick(show);
+  }
 
   function securityCard(sec) {
     const tls = sec.tls || {};
@@ -660,7 +685,7 @@
           <div class="full form-actions" style="margin-top:0"><a class="btn" href="/api/security/ca.crt" download>Download certificate authority</a><button class="btn solid" type="submit">Save names</button></div>
         </form>`;
     }
-    return `<div class="card"><h2>Security</h2>${body}</div>`;
+    return `<div class="card" data-section="security"><h2>Security</h2>${body}</div>`;
   }
 
   function wireSecurity(sec) {
