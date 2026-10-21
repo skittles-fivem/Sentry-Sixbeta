@@ -128,27 +128,27 @@ test('HTTPS, the setup code, cookies and password confirmation', { skip: !hasOpe
     assert.equal((await httpsCall(s.port, ca, 'GET', '/api/vehicles', { cookie: cookie.replace('__Host-', '') })).status, 401);
 
     // right after signing in, sensitive changes go through
-    assert.equal((await httpsCall(s.port, ca, 'PUT', '/api/updater/settings', { body: { branch: 'main' }, cookie })).status, 200);
+    assert.equal((await httpsCall(s.port, ca, 'PUT', '/api/security/hostnames', { body: { hostnames: ['nas.local'] }, cookie })).status, 200);
     await s.stop();
 
     // after a restart the session lives on, but the confirmation does not
     s = await startServer(dir, {});
-    const again = await httpsCall(s.port, ca, 'PUT', '/api/updater/settings', { body: { branch: 'beta' }, cookie });
+    const again = await httpsCall(s.port, ca, 'PUT', '/api/security/hostnames', { body: { hostnames: ['nas.lan'] }, cookie });
     assert.equal(again.status, 403);
     assert.equal(again.data.code, 'CONFIRM_PASSWORD');
-    for (const [p, body] of [['/api/vehicles', { name: 'X', source: { type: 'path', path: path.join(dir, 'footage') } }], ['/api/bin/empty', { confirm: true }], ['/api/updater/install', {}]]) {
+    for (const [p, body] of [['/api/vehicles', { name: 'X', source: { type: 'path', path: path.join(dir, 'footage') } }], ['/api/bin/empty', { confirm: true }]]) {
       assert.equal((await httpsCall(s.port, ca, 'POST', p, { body, cookie })).data.code, 'CONFIRM_PASSWORD', p);
     }
     assert.equal((await httpsCall(s.port, ca, 'PUT', '/api/vehicles/daily-driver', { body: { source: { type: 'path', path: '/' } }, cookie })).data.code, 'CONFIRM_PASSWORD');
     assert.equal((await httpsCall(s.port, ca, 'PUT', '/api/vehicles/daily-driver', { body: { name: 'Renamed' }, cookie })).status, 200, 'a rename needs no password');
     assert.equal((await httpsCall(s.port, ca, 'POST', '/api/auth/confirm', { body: { password: 'wrong password' }, cookie })).status, 401);
     assert.equal((await httpsCall(s.port, ca, 'POST', '/api/auth/confirm', { body: { password: 'correct horse' }, cookie })).status, 200);
-    assert.equal((await httpsCall(s.port, ca, 'PUT', '/api/updater/settings', { body: { branch: 'beta' }, cookie })).status, 200);
+    assert.equal((await httpsCall(s.port, ca, 'PUT', '/api/security/hostnames', { body: { hostnames: ['nas.lan'] }, cookie })).status, 200);
     // an audit trail of who did what (and never a password)
     await new Promise((r) => setTimeout(r, 200));
     assert.match(s.output(), /\[audit\] Password confirmation failed: admin from /);
     assert.match(s.output(), /\[audit\] Password confirmed for sensitive changes: admin from /);
-    assert.match(s.output(), /\[audit\] Update settings changed \(branch=beta\): admin from /);
+    assert.match(s.output(), /\[audit\] HTTPS certificate names set to \[[^\]]*nas\.lan[^\]]*\]: admin from /);
     assert.doesNotMatch(s.output(), /correct horse|wrong password/);
 
     // the CA download and the Security status
@@ -430,7 +430,7 @@ test('the supervisor runs the app unprivileged and keeps mounts and the CA to it
   sup.stderr.on('data', (c) => { out += c; });
   try {
     for (let i = 0; i < 200 && !/Sentry Six Manager on https/.test(out); i++) await new Promise((r) => setTimeout(r, 100));
-    assert.match(out, /starting built-in version as 1000:1000/, out);
+    assert.match(out, /starting the app as 1000:1000/, out);
     // the app: uid 1000, no capabilities, no_new_privs
     const kids = fs.readdirSync('/proc').filter((p) => /^\d+$/.test(p)).filter((p) => {
       try {

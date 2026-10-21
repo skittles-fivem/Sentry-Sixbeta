@@ -24,14 +24,11 @@ archive. It runs in Docker and serves a web UI on port **9000**.
 ## Quick start
 
 ```bash
-git clone -b sentry-six-manager https://github.com/skittles-fivem/Sentry-Sixbeta
-cd Sentry-Sixbeta/manager
-SENTRY_COMMIT=$(git rev-parse HEAD) docker compose up -d --build
+mkdir sentry-six-manager && cd sentry-six-manager
+curl -fsSLO https://raw.githubusercontent.com/skittles-fivem/Sentry-Sixbeta/sentry-six-manager/manager/docker-compose.yml
+docker compose up -d
 docker logs sentry-six-manager
 ```
-
-(`SENTRY_COMMIT` tells the image which commit it was built from, so Settings
-shows the exact version and the updater knows when it is already current.)
 
 The log shows two things you need once:
 
@@ -138,8 +135,11 @@ uses the fastest one that works. In the compose file, uncomment:
 | Intel iGPU / Arc | `hevc_qsv`, `av1_qsv`, VA-API | `devices: - /dev/dri:/dev/dri` |
 | none | `libx265`, `libsvtav1` | nothing |
 
-AMD's Windows encoder (AMF) does not exist on Linux, so AMD cards and APUs
-encode through VA-API. AV1 encoding needs RDNA3 or newer.
+ffmpeg is [jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg),
+which the Jellyfin team keeps on the current FFmpeg release and ships with
+its own VA-API drivers. AMD's AMF encoder needs AMD's proprietary driver,
+which containers don't have, so AMD cards and APUs encode through VA-API.
+AV1 encoding needs RDNA3 or newer.
 
 VA-API uses `/dev/dri/renderD128`. On a host with several GPUs, map the
 one you want to that name:
@@ -168,19 +168,26 @@ A policy picks a run time and a number of days to keep for each category
 the vehicle's time zone, are moved to the Recycle Bin. The policy page
 previews what the next run would move.
 
-## Updates from GitHub
+## Updates
 
-**Settings → Updates** checks a repository and branch on GitHub (pick from
-the list) and installs that commit. For a private repository, add a token
-with read access. With **automatic updates** on, it checks every 1–24 hours
-and installs when nothing is converting.
+Updates come as a new image:
 
-An update is downloaded to `/data/app/releases/<commit>`. It is checked
-(required files, syntax), and the app restarts into it. If the new version
-crashes within 60 seconds, the container goes back to the previous version,
-or the one built into the image. Updates replace the app's code. ffmpeg,
-drivers and the native rename helper come with the image, so rebuild the image
-(`docker compose up -d --build`) to update those.
+```bash
+docker compose pull && docker compose up -d
+```
+
+Settings, footage and the Recycle Bin are kept; they live in `./data` and on
+your shares. **Settings → Updates** shows the version you run and checks the
+registry twice a day for a newer image. It only tells you; it never installs
+anything (`UPDATE_CHECK=off` turns the check off). For automatic updates, use
+a tool such as [Watchtower](https://containrrr.dev/watchtower/).
+
+Images are built from this repository by GitHub Actions
+(`.github/workflows/manager-image.yml`) for amd64 and arm64, and rebuilt
+every week so Debian, Node and ffmpeg security fixes arrive without a code
+change. `latest` follows the `sentry-six-manager` branch. Running the workflow
+for another branch (Actions → Manager image → Run workflow) publishes an image
+tagged with that branch's name; set `SENTRY_TAG=<branch>` in `.env` to follow it.
 
 ## Settings
 
@@ -197,14 +204,14 @@ drivers and the native rename helper come with the image, so rebuild the image
 | `TLS_MODE` | `auto` | `off` = plain HTTP, only behind a reverse proxy that does HTTPS |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-Proto` / `-Host` from that reverse proxy |
 | `TRUSTED_HOSTS` | | If set, refuse requests for any other host name |
-| `UPDATE_REPO` / `UPDATE_BRANCH` | this repo / the built branch | Update source |
-| `UPDATE_ALLOW_REPO_CHANGE` | `false` | Allow changing the update repository in the UI |
+| `SENTRY_TAG` | `latest` | Which image to follow (read by `docker-compose.yml`) |
+| `UPDATE_CHECK` | `on` | `off` = don't ask the registry for newer images |
 | `EXTRA_ROOTS` | | More container folders the converter may write to (`:`-separated) |
 | `SCAN_INTERVAL_MINUTES` | `15` | Re-scan every vehicle |
 | `PORT`, `DATA_PATH`, `LOG_LEVEL` | `9000`, `/data`, `info` | |
 
 `/data` holds the account, settings, job history, thumbnails, converter
-staging, installed updates and the HTTPS certificate authority. Keep it on
+staging and the HTTPS certificate authority. Keep it on
 local disk, not on a share.
 
 ## Security
@@ -245,27 +252,23 @@ inline scripts.
 password again, even in a signed-in session:
 
 - adding a vehicle, or changing where its footage comes from;
-- update settings, and installing an update;
 - the HTTPS certificate names;
 - deleting from the Recycle Bin for good.
 
-The update repository is fixed (`UPDATE_REPO`), so nobody can point updates
-at their own code. Only the branch can be picked in the UI.
-
 **No root for the web app.** Only a small supervisor runs as root. It is
 image code and never loads anything from `/data`. It mounts shares (from
-validated fields only) and keeps the CA. The web app, ffmpeg and installed
-updates run as `PUID:PGID` with no capabilities and `no_new_privs`. The image
+validated fields only) and keeps the CA. The web app and ffmpeg run as
+`PUID:PGID` with no capabilities and `no_new_privs`. The image
 has no setuid programs, and the compose file drops every capability except
-the few the supervisor needs. A bug in the web app, a malicious video on a
-share, or a bad update therefore cannot become root, and cannot read the SMB
+the few the supervisor needs. A bug in the web app or a malicious video on
+a share therefore cannot become root, and cannot read the SMB
 passwords or the CA key.
 
 **An audit trail.** Every security-relevant action is logged with who did it
 and from which address, never with a password: account setup, sign-ins
 (including failed ones), password confirmations, vehicles added, changed or
-removed (including where their footage comes from), update settings and
-installs, certificate names, and permanent deletions. Look for `[audit]` in
+removed (including where their footage comes from), certificate names, and
+permanent deletions. Look for `[audit]` in
 `docker logs sentry-six-manager`.
 
 **Files on a share are not trusted.** Symlinks are never followed out of a
@@ -293,4 +296,4 @@ DATA_PATH=./data FOOTAGE_PATH=/path/to/TeslaCam SENTRY_NOREPLACE_RENAME=build/no
 
 The converter's own tests are the repository's Jest suites
 (`tests/main/converter`). `manager/test/server.test.js` starts the server and
-tests it over HTTP, including an update install and a rollback.
+tests it over HTTP, including the update check against a fake registry.

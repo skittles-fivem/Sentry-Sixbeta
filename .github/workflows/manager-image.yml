@@ -1,0 +1,144 @@
+name: Manager image
+
+# Builds the Sentry Six Manager Docker image and publishes it to GitHub's
+# registry, ghcr.io/<owner>/sentry-six-manager, for amd64 and arm64.
+#   - A push to sentry-six-manager publishes `latest` and `sha-<commit>`
+#     (pin a `sha-` tag with SENTRY_TAG to stay on, or go back to, a version).
+#   - Running it by hand for another branch (Actions > Manager image > Run
+#     workflow) publishes an image tagged with that branch's name.
+#   - Every Monday it rebuilds `latest` so Debian, Node and ffmpeg security
+#     fixes arrive without a code change. GitHub runs schedules only from the
+#     default branch, so this file has to be there too for the weekly rebuild.
+# Nothing is published unless the manager tests pass and the amd64 image
+# starts, answers, has the encoders and runs the app unprivileged.
+# New packages are private: make it public once under the owner's
+# Packages > sentry-six-manager > Package settings so anyone can pull it.
+
+on:
+  push:
+    branches: [sentry-six-manager]
+    paths: ['manager/**', 'src/**', 'assets/**', 'version.json', '.dockerignore', '.github/workflows/manager-image.yml']
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: manager-image-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # the weekly run starts on the default branch and rebuilds latest
+          ref: ${{ github.event_name == 'schedule' && 'sentry-six-manager' || github.ref }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Manager tests
+        working-directory: manager
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+          mkdir -p build && gcc -O2 -Wall -o build/noreplace-rename native/noreplace-rename.c
+          npm test
+
+      - name: Image name and tag
+        id: names
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          branch="$GITHUB_REF_NAME"
+          [ "$EVENT" = schedule ] && branch=sentry-six-manager
+          if [ "$branch" = sentry-six-manager ]; then tag=latest; else tag="${branch//[^A-Za-z0-9_.-]/-}"; tag="${tag#[.-]}"; fi
+          sha="$(git rev-parse HEAD)"
+          {
+            echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/sentry-six-manager"
+            echo "tag=${tag:0:120}"
+            echo "branch=$branch"
+            echo "sha=$sha"
+            echo "short=${sha:0:7}"
+            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build for checking (amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: manager/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: sentry-six-manager:check
+          build-args: |
+            GIT_SHA=${{ steps.names.outputs.sha }}
+            GIT_BRANCH=${{ steps.names.outputs.branch }}
+            BUILD_DATE=${{ steps.names.outputs.created }}
+            IMAGE=${{ steps.names.outputs.image }}
+            IMAGE_TAG=${{ steps.names.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check the image
+        run: |
+          docker run -d --name check -p 127.0.0.1:9000:9000 --cap-drop ALL \
+            --cap-add SYS_ADMIN --cap-add DAC_READ_SEARCH --cap-add DAC_OVERRIDE --cap-add SETUID \
+            --cap-add SETGID --cap-add SETPCAP --cap-add CHOWN --cap-add KILL \
+            --security-opt no-new-privileges:true -e UI_PASSWORD=check-the-image sentry-six-manager:check
+          for i in $(seq 1 60); do curl -fs http://127.0.0.1:9000/healthz >/dev/null && break; sleep 2; done
+          docker logs check 2>&1 | tail -20
+          curl -fsk -o /dev/null https://127.0.0.1:9000/login
+          docker exec check ffmpeg -hide_banner -version | head -1
+          docker exec check ffmpeg -hide_banner -encoders > encoders.txt
+          for e in libx265 libsvtav1 hevc_nvenc av1_nvenc hevc_vaapi av1_vaapi hevc_qsv av1_qsv; do
+            grep -q " $e " encoders.txt || { echo "::error::ffmpeg has no $e encoder"; exit 1; }
+          done
+          # the web app: uid 1000, no capabilities, no_new_privs
+          docker exec check sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline 2>/dev/null | grep -q "server/index.js" && grep -E "^(Uid|CapEff|NoNewPrivs):" $p/status; done' | tee app.txt
+          grep -Eq '^Uid:\s+1000\s' app.txt && grep -Eq '^CapEff:\s+0+$' app.txt && grep -Eq '^NoNewPrivs:\s+1$' app.txt
+          docker rm -f check
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish (amd64, arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: manager/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.names.outputs.image }}:${{ steps.names.outputs.tag }}
+            ${{ steps.names.outputs.image }}:sha-${{ steps.names.outputs.short }}
+          labels: |
+            org.opencontainers.image.title=Sentry Six Manager
+            org.opencontainers.image.description=Sentry Studio's viewer and converter as a self-hosted web app, with footage management for a TeslaCam archive
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.names.outputs.sha }}
+            org.opencontainers.image.created=${{ steps.names.outputs.created }}
+          build-args: |
+            GIT_SHA=${{ steps.names.outputs.sha }}
+            GIT_BRANCH=${{ steps.names.outputs.branch }}
+            BUILD_DATE=${{ steps.names.outputs.created }}
+            IMAGE=${{ steps.names.outputs.image }}
+            IMAGE_TAG=${{ steps.names.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

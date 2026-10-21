@@ -2,12 +2,9 @@
 
 // Container entrypoint, and the only part of Sentry Six Manager that runs as root.
 //
-// It runs the installed version of the app (the update in /data/app/current.json
-// if there is one, else the copy built into the image) as an unprivileged user
-// (PUID/PGID, default 1000): no capabilities, no_new_privs, no way back to root.
-// Exit code 75 from the app means "an update was installed, restart into it";
-// if an update crashes within a minute of starting, the supervisor goes back
-// to the previous version.
+// It runs the app built into the image as an unprivileged user (PUID/PGID,
+// default 1000): no capabilities, no_new_privs, no way back to root. Updates
+// come as a new image (docker compose pull), never as code written to /data.
 //
 // What stays root, and why:
 //   - mounting SMB shares (mount.cifs needs CAP_SYS_ADMIN). The app asks over
@@ -16,14 +13,13 @@
 //     mount is nosuid,nodev,noexec.
 //   - the HTTPS certificate authority. Its key stays in /data/tls (root only);
 //     the app gets the server certificate and key, read-only.
-// This file only loads modules from its own folder in the image, never code
-// from /data, so an update (or anyone who can write /data) cannot change what
-// runs as root.
+// Nothing is ever loaded from /data, so whoever can write /data cannot change
+// what runs, as root or as the app.
 //
 // Root never writes into a folder the app can write. /data itself is
 // root:PGID with the sticky bit (like /tmp): the app creates and owns its
 // files there, but cannot rename or replace root's folders (/data/tls with the
-// CA key, /data/.supervisor with the record of broken updates).
+// CA key, /data/.supervisor with root's own notes).
 
 const fs = require('fs');
 const path = require('path');
@@ -32,14 +28,11 @@ const { createLocalMounter, serveMountRequests } = require('./mounter');
 const { TlsManager, exportForApp, parseHostnames } = require('./tls');
 
 const DATA = path.resolve(process.env.DATA_PATH || '/data');
-const APP_DIR = path.join(DATA, 'app');
 const IMAGE_ROOT = path.resolve(__dirname, '..', '..');
 const FOOTAGE_ROOT = path.resolve(process.env.FOOTAGE_ROOT || '/footage');
 const ROOT_RUN = path.resolve(process.env.RUN_DIR || '/run/sentry-six-manager'); // root only: SMB credentials
-const ROOT_STATE = path.join(DATA, '.supervisor'); // root only: releases that failed to start
+const ROOT_STATE = path.join(DATA, '.supervisor'); // root only: who owns /data
 const APP_TLS = path.resolve(process.env.SENTRY_APP_TLS_DIR || '/run/sentry-app/tls'); // root-owned, readable by the app group
-const RESTART_CODE = 75;
-const EARLY_CRASH_MS = 60 * 1000;
 const TLS_MODE = (process.env.TLS_MODE || 'auto').toLowerCase();
 
 const isRoot = process.getuid?.() === 0;
@@ -109,61 +102,6 @@ function ensureRootDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   fs.chownSync(dir, 0, 0);
   fs.chmodSync(dir, 0o700);
-}
-
-const SHA_RE = /^[a-f0-9]{40}$/;
-
-/** The installed update the app asked for: only sha / previous / branch, validated. */
-function readPointer() {
-  try {
-    const p = JSON.parse(readNoFollow(path.join(APP_DIR, 'current.json')));
-    if (!SHA_RE.test(p?.sha)) return null;
-    return {
-      sha: p.sha,
-      previous: SHA_RE.test(p.previous) ? p.previous : null,
-      branch: typeof p.branch === 'string' ? p.branch.replace(/[^A-Za-z0-9._/-]/g, '').slice(0, 100) : ''
-    };
-  } catch {
-    return null;
-  }
-}
-
-function badReleases() {
-  try {
-    const list = JSON.parse(readNoFollow(path.join(ROOT_STATE, 'bad-releases.json')));
-    return Array.isArray(list) ? list.filter((x) => SHA_RE.test(x)) : [];
-  } catch {
-    return [];
-  }
-}
-
-function markBad(sha) {
-  const list = [...new Set([...badReleases(), sha])].slice(-50);
-  try {
-    if (separate || isRoot) safeWrite(ROOT_STATE, 'bad-releases.json', JSON.stringify(list));
-  } catch (err) {
-    warn(`could not record the broken update: ${err.message}`);
-  }
-  inMemoryBad.add(sha);
-}
-const inMemoryBad = new Set();
-
-function releaseRoot(sha) {
-  if (!sha || badReleases().includes(sha) || inMemoryBad.has(sha)) return null;
-  const root = path.join(APP_DIR, 'releases', sha);
-  return fs.existsSync(path.join(root, 'manager/server/index.js')) ? root : null;
-}
-
-/** Which version to run: the update, else its previous version, else the image's own. */
-function resolveRoot() {
-  const p = readPointer();
-  if (p) {
-    const root = releaseRoot(p.sha);
-    if (root) return { root, pointer: p, sha: p.sha };
-    const prev = releaseRoot(p.previous);
-    if (prev) return { root: prev, pointer: p, sha: p.previous };
-  }
-  return { root: IMAGE_ROOT, pointer: null, sha: null };
 }
 
 /** lchown a tree to the app user, never following symlinks or crossing into other mounts. */
@@ -284,11 +222,9 @@ function canDropBoundingSet() {
 }
 
 function launch() {
-  const { root, pointer, sha } = resolveRoot();
-  const started = Date.now();
-  log(`starting ${sha ? `update ${sha.slice(0, 7)}${pointer.branch ? ` (${pointer.branch})` : ''}` : 'built-in version'}${separate ? ` as ${PUID}:${PGID}` : ''}`);
-  const nodeArgs = ['--disable-warning=ExperimentalWarning', path.join(root, 'manager/server/index.js')];
-  const env = { ...process.env, APP_ROOT: root };
+  log(`starting the app${separate ? ` as ${PUID}:${PGID}` : ''}`);
+  const nodeArgs = ['--disable-warning=ExperimentalWarning', path.join(IMAGE_ROOT, 'manager/server/index.js')];
+  const env = { ...process.env, APP_ROOT: IMAGE_ROOT };
   delete env.UI_PASSWORD_FILE;
   let cmd = process.execPath;
   let args = nodeArgs;
@@ -338,13 +274,6 @@ function launch() {
   child.on('exit', (code, signal) => {
     child = null;
     if (stopping) process.exit(code ?? 0);
-    if (code === RESTART_CODE) return launch();
-    if (sha && Date.now() - started < EARLY_CRASH_MS) {
-      // remembered in root's own folder; /data/app is the app's and is never written by root
-      warn(`update ${sha.slice(0, 7)} exited (${code ?? signal}) right after starting; going back`);
-      markBad(sha);
-      return launch();
-    }
     warn(`server exited (${code ?? signal}); restarting in 5 s`);
     setTimeout(launch, 5000);
   });

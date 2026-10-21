@@ -2,14 +2,14 @@
 
 // Sentry Six Manager server: the Sentry Studio viewer and converter as a web app,
 // plus file management (vehicles, footage, Recycle Bin, policies, jobs,
-// notifications, settings, sign-in, GitHub updates).
+// notifications, settings, sign-in, update notices).
 //
 // Security, in short (README "Security" has the details):
 //   - HTTPS on the same port; plain HTTP only redirects to it.
 //   - Sign-in required; the first account needs the setup code from the log;
 //     cookies are HttpOnly, SameSite=Strict, Secure + __Host- over HTTPS.
 //   - Changes that could hand someone the shares or the server need the
-//     password again (vehicle sources, updates, certificates, deleting forever).
+//     password again (vehicle sources, certificates, deleting forever).
 //   - State-changing requests need X-Requested-With and a matching Origin.
 //   - Every file path is resolved through safePath's real-path guard.
 //   - When supervised (the Docker image), this process runs as an
@@ -34,7 +34,7 @@ const { Inventory } = require('./inventory');
 const { RecycleBin, formatBytes } = require('./recycleBin');
 const { Policies } = require('./policies');
 const { Jobs, Notifications } = require('./activity');
-const { Updater } = require('./updater');
+const { ImageUpdates } = require('./imageUpdates');
 const { Thumbnails } = require('./thumbnails');
 const { detectGpus } = require('./gpu');
 const { createConverterHost } = require('./converterHost');
@@ -192,7 +192,6 @@ async function main() {
     }
     return false;
   };
-  const converterIdle = () => ![...converterJobs.values()].some((s) => CONVERTER_ACTIVE.has(s.state));
   const bin = new RecycleBin({ db, vehicles, inventory, jobs, log: logger.scope('bin'), isBusy });
   const policies = new Policies({ db, vehicles, inventory, bin, log: logger.scope('policies') });
 
@@ -206,9 +205,12 @@ async function main() {
   let bridge = null;
   let clipThumbs = null;
 
-  const updater = new Updater({
-    db, log: logger.scope('updater'), dataDir: DATA, appRoot: APP_ROOT, buildInfo, isIdle: converterIdle
+  const updates = new ImageUpdates({
+    db, log: logger.scope('updates'), buildInfo, notes, enabled: !/^(off|false|0|no)$/i.test(process.env.UPDATE_CHECK || '')
   });
+  updates.announce();
+  // left over from the old in-app updater: updates now come with the image
+  fs.promises.rm(path.join(DATA, 'app'), { recursive: true, force: true }).catch(() => {});
 
   // ---- HTTPS
   const tlsSource = TLS_MODE === 'off' ? null : SUPERVISED && process.env.SENTRY_TLS_DIR
@@ -332,7 +334,7 @@ async function main() {
   });
 
   r.add('GET', '/api/system', async (req) => ({
-    version: { ...buildInfo, ...updater.current() },
+    version: buildInfo,
     converter: host.runtime ? { ready: true, capabilities: host.runtime.capabilities } : { ready: false, error: host.lastError?.code || null },
     nativeHelper: host.helperAvailable,
     gpu: await detectGpus(),
@@ -525,31 +527,14 @@ async function main() {
     return { ok: true };
   });
 
-  r.add('GET', '/api/settings', () => ({ appearance: db.get('appearance', { reduceEffects: false }), updater: updater.publicSettings() }));
+  r.add('GET', '/api/settings', () => ({ appearance: db.get('appearance', { reduceEffects: false }) }));
   r.add('PUT', '/api/settings/appearance', (req, res, { body }) => {
     const next = { reduceEffects: Boolean(body?.reduceEffects) };
     db.set('appearance', next);
     return next;
   });
-  r.add('GET', '/api/updater', () => updater.status());
-  r.add('PUT', '/api/updater/settings', (req, res, { body, user }) => {
-    requireConfirmed(req);
-    const before = updater.publicSettings();
-    const after = updater.setSettings(body || {});
-    const changed = ['repo', 'branch', 'enabled', 'autoInstall', 'intervalHours'].filter((k) => before[k] !== after[k]).map((k) => `${k}=${after[k]}`);
-    if (body?.token) changed.push('token replaced');
-    if (changed.length) audit.info(`Update settings changed (${changed.join(', ')}): ${by(req, user)}`);
-    return after;
-  });
-  r.add('GET', '/api/updater/branches', async () => ({ branches: await updater.branches() }));
-  r.add('POST', '/api/updater/check', async () => updater.check());
-  r.add('POST', '/api/updater/install', async (req, res, { user }) => {
-    requireConfirmed(req);
-    audit.info(`Update install started: ${by(req, user)}`);
-    const out = await updater.install();
-    jobs.finish(jobs.start({ type: 'update', title: `Update to ${out.sha.slice(0, 7)}` }), { detail: 'Installed; restarting' });
-    return out;
-  });
+  r.add('GET', '/api/updates', () => updates.status());
+  r.add('POST', '/api/updates/check', () => updates.check());
 
   // Converter (Encoder tab) — the Studio converter UI talks to these.
   r.add('POST', '/api/converter/invoke/:name', async (req, res, { params, body }) => {
@@ -846,7 +831,7 @@ async function main() {
   // housekeeping
   setInterval(() => {
     policies.tick().then(() => announce('bin')).catch(() => {});
-    updater.tick().catch(() => {});
+    updates.tick().catch(() => {});
     db.pruneSessions();
   }, 60 * 1000).unref();
   setInterval(() => {

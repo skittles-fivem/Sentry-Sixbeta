@@ -8,7 +8,6 @@ const assert = require('node:assert/strict');
 const crypto = require('crypto');
 const fs = require('fs');
 const fsp = require('fs/promises');
-const http = require('http');
 const net = require('net');
 const os = require('os');
 const path = require('path');
@@ -298,66 +297,15 @@ test('Studio is served with the web shim; converter bridge enforces Quick and al
   }
 });
 
-test('GitHub update installs a branch and the supervisor rolls back a broken one', { timeout: 180000 }, async () => {
+test('the supervisor only runs the app from the image, never code left in /data', { timeout: 120000 }, async () => {
   const dir = await tmp();
   await makeFootage(path.join(dir, 'footage'));
-  // A fake GitHub serving this repository as the branch head.
-  const tarball = path.join(dir, 'repo.tar.gz');
-  execFileSync('git', ['-C', REPO, 'archive', '--format=tar.gz', '--prefix=owner-repo-abc/', '-o', tarball, 'HEAD']);
-  // put the working-tree manager in (tests run before a commit too)
+  // what the old in-app updater left behind, or what anyone who can write /data could plant
   const fakeSha = 'a'.repeat(40);
-  const gh = http.createServer((req, res) => {
-    if (req.url.startsWith('/repos/o/r/commits/')) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ sha: fakeSha, commit: { message: 'Test release\n\nbody', committer: { date: '2026-01-01T00:00:00Z' }, author: { name: 't' } } }));
-    }
-    if (req.url === `/repos/o/r/tarball/${fakeSha}`) {
-      res.writeHead(200, { 'Content-Type': 'application/gzip' });
-      return fs.createReadStream(tarball).pipe(res);
-    }
-    if (req.url.startsWith('/repos/o/r/branches')) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify([{ name: 'main', commit: { sha: fakeSha } }, { name: 'beta', commit: { sha: fakeSha } }]));
-    }
-    res.writeHead(404);
-    res.end('{}');
-  });
-  await new Promise((r) => gh.listen(0, '127.0.0.1', r));
-  const api = `http://127.0.0.1:${gh.address().port}`;
-  const locked = await startServer(dir, { UPDATE_API_BASE: api });
-  try {
-    await locked.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
-    const refused = await locked.call('PUT', '/api/updater/settings', { repo: 'o/r' });
-    assert.equal(refused.status, 403, 'the update repository is fixed unless the environment allows changing it');
-    assert.equal((await locked.call('GET', '/api/updater')).data.settings.repoLocked, true);
-    assert.equal((await locked.call('PUT', '/api/updater/settings', { branch: '<svg/onload=x>' })).status, 400);
-  } finally {
-    await locked.stop();
-  }
-  const s = await startServer(dir, { UPDATE_API_BASE: api, UPDATE_ALLOW_REPO_CHANGE: 'true' });
-  try {
-    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
-    assert.equal((await s.call('PUT', '/api/updater/settings', { repo: 'not a repo' })).status, 400);
-    assert.equal((await s.call('PUT', '/api/updater/settings', { repo: 'o/r', branch: 'beta' })).status, 200);
-    assert.deepEqual((await s.call('GET', '/api/updater/branches')).data.branches.map((b) => b.name), ['main', 'beta']);
-    const st = await s.call('POST', '/api/updater/check', {});
-    assert.equal(st.data.updateAvailable, true);
-    assert.equal(st.data.latest.message, 'Test release');
-    const inst = await s.call('POST', '/api/updater/install', {});
-    assert.equal(inst.data.restarting, true);
-    const code = await waitFor(() => (s.child.exitCode !== null ? s.child.exitCode : null), 20000);
-    assert.equal(code, 75, 'asks the supervisor to restart');
-    const pointer = JSON.parse(fs.readFileSync(path.join(dir, 'data/app/current.json'), 'utf8'));
-    assert.equal(pointer.sha, fakeSha);
-    assert.equal(pointer.branch, 'beta');
-    assert.ok(fs.existsSync(path.join(dir, 'data/app/releases', fakeSha, 'manager/server/index.js')));
-  } finally {
-    await s.stop();
-    gh.close();
-  }
-
-  // Break the installed release: the supervisor must fall back to the built-in version.
-  await fsp.writeFile(path.join(dir, 'data/app/releases', fakeSha, 'manager/server/index.js'), 'process.exit(3);\n');
+  const planted = path.join(dir, 'data/app/releases', fakeSha, 'manager/server');
+  await fsp.mkdir(planted, { recursive: true });
+  await fsp.writeFile(path.join(planted, 'index.js'), "console.log('PLANTED CODE RAN'); setInterval(() => {}, 1000);\n");
+  await fsp.writeFile(path.join(dir, 'data/app/current.json'), JSON.stringify({ sha: fakeSha, previous: null, branch: 'x' }));
   const port = await freePort();
   const sup = spawn(process.execPath, [SUPERVISOR], {
     env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: path.join(dir, 'data'), FOOTAGE_PATH: path.join(dir, 'footage'), RUN_DIR: path.join(dir, 'run'), SENTRY_NOREPLACE_RENAME: HELPER, LOG_LEVEL: 'warn', TLS_MODE: 'off', PUID: '0', PGID: '0' },
@@ -374,14 +322,30 @@ test('GitHub update installs a branch and the supervisor rolls back a broken one
         return false;
       }
     }, 60000);
-    assert.match(out, /going back/);
-    assert.match(out.split('going back')[1], /starting built-in version/, 'falls back to the built-in version');
-    // root records the broken release in its own folder and never writes the app's /data/app
-    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'data/.supervisor/bad-releases.json'), 'utf8')), [fakeSha]);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'data/app/current.json'), 'utf8')).sha, fakeSha, 'the app\'s pointer is left alone');
+    assert.match(out, /starting the app/);
+    assert.doesNotMatch(out, /PLANTED CODE RAN/);
+    // the app clears the old updater's folder
+    await waitFor(() => !fs.existsSync(path.join(dir, 'data/app')), 10000);
   } finally {
     sup.kill('SIGTERM');
     await new Promise((r) => sup.once('exit', r));
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Settings > Updates: a build without an image to check says so and checks nothing', async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const s = await startServer(dir);
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    const st = (await s.call('GET', '/api/updates')).data;
+    assert.equal(st.enabled, false);
+    assert.equal(st.updateAvailable, false);
+    assert.equal((await s.call('POST', '/api/updates/check', {})).data.enabled, false);
+    for (const p of ['/api/updater', '/api/updater/branches']) assert.equal((await s.call('GET', p)).status, 404, `${p} is gone`);
+  } finally {
+    await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });

@@ -1,22 +1,18 @@
 # Sentry Six Manager: web UI on https://<docker-host>:9000
 #
-#   cd manager
-#   docker compose up -d --build
+#   docker compose up -d
 #   docker logs sentry-six-manager     # the setup code and the HTTPS fingerprint
+#
+# Update:  docker compose pull && docker compose up -d
 #
 # Create the account with the setup code from the log, then add vehicles (one
 # SMB share each) under Settings. Optional defaults go in .env (.env.example).
 services:
   sentry-six-manager:
-    build:
-      context: ..
-      dockerfile: manager/Dockerfile
-      args:
-        # Shown in Settings, and the branch updates follow unless you pick another.
-        # Optional: SENTRY_COMMIT=$(git rev-parse HEAD) docker compose up -d --build
-        GIT_BRANCH: ${SENTRY_BRANCH:-sentry-six-manager}
-        GIT_SHA: ${SENTRY_COMMIT:-}
-    image: sentry-six-manager:latest
+    # SENTRY_TAG picks what you follow: latest, or a branch's own image.
+    # To use your own build instead, from the repository root:
+    #   docker build -f manager/Dockerfile -t ghcr.io/skittles-fivem/sentry-six-manager:latest .
+    image: ghcr.io/skittles-fivem/sentry-six-manager:${SENTRY_TAG:-latest}
     container_name: sentry-six-manager
     restart: unless-stopped
     ports:
@@ -28,8 +24,8 @@ services:
       # Accounts, settings, job journals, thumbnails, converter staging and
       # the default output folder. Keep it on local disk, not on a share.
       - ./data:/data
-    # Only the small root supervisor keeps these; the web app, ffmpeg and
-    # updates run as PUID:PGID with no capabilities at all.
+    # Only the small root supervisor keeps these; the web app and ffmpeg run
+    # as PUID:PGID with no capabilities at all.
     #   SYS_ADMIN, DAC_READ_SEARCH, DAC_OVERRIDE  mount.cifs (SMB shares)
     #   SETUID, SETGID, SETPCAP                   start the app unprivileged
     #   CHOWN, KILL                               own /data, stop the app

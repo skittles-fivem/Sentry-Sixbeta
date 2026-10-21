@@ -575,7 +575,7 @@
   pages.settings = async (sub) => {
     const seq = renderSeq;
     const editing = sub?.startsWith('vehicle/') ? sub.slice(8) : sub === 'vehicle-new' ? 'new' : null;
-    const [settings, upd, sys, sec] = await Promise.all([api('/api/settings'), api('/api/updater'), api('/api/system').catch(() => null), api('/api/security').catch(() => null)]);
+    const [settings, upd, sys, sec] = await Promise.all([api('/api/settings'), api('/api/updates'), api('/api/system').catch(() => null), api('/api/security').catch(() => null)]);
     if (seq !== renderSeq) return; // the user moved on while this loaded
     state.system = sys || state.system;
     const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], sec && ['security', 'Security'], sys && ['system', 'System']].filter(Boolean);
@@ -590,22 +590,7 @@
         <td class="actions"><a class="btn sm" href="#/settings/vehicle/${esc(v.id)}">Edit</a></td></tr>`).join('')}</tbody></table>` : '<p style="margin-top:12px">No vehicles yet.</p>'}
       ${editing ? vehicleForm(editing === 'new' ? null : state.vehicles.find((v) => v.id === editing)) : ''}</div>`;
 
-    html += `<div class="card" data-section="updates"><h2>Updates</h2><p>Sentry Six Manager can update itself from GitHub. Pick the branch to follow.</p>
-      <form id="upd" class="form" style="margin-top:18px">
-        <label class="field">Repository<input class="input" name="repo" value="${esc(upd.settings.repo)}" placeholder="owner/name"${upd.settings.repoLocked ? ' readonly' : ''}>${upd.settings.repoLocked ? '<span class="muted small">Locked: updates only come from this repository (set by UPDATE_REPO in the container).</span>' : ''}</label>
-        <label class="field">Branch<select class="input" name="branch" id="upd-branch"><option>${esc(upd.settings.branch)}</option></select></label>
-        <label class="field">GitHub token (private repositories)<input class="input" name="token" type="password" placeholder="${upd.settings.tokenSet ? 'saved — leave empty to keep' : 'optional'}" autocomplete="off"></label>
-        <label class="field">Check every<select class="input" name="intervalHours">${[1, 3, 6, 12, 24].map((h) => `<option value="${h}"${upd.settings.intervalHours === h ? ' selected' : ''}>${h} hour${h > 1 ? 's' : ''}</option>`).join('')}</select></label>
-        <label class="check full"><input type="checkbox" name="enabled"${upd.settings.enabled ? ' checked' : ''}> Check for updates automatically</label>
-        <label class="check full"><input type="checkbox" name="autoInstall"${upd.settings.autoInstall ? ' checked' : ''}> Install them automatically when nothing is converting</label>
-      </form>
-      <dl class="kv" style="margin-top:18px">
-        <dt>Running</dt><dd class="mono">${esc(upd.current.sha ? upd.current.sha.slice(0, 7) : 'built-in image')} ${upd.current.branch ? `(${esc(upd.current.branch)})` : ''} · ${esc(upd.current.source)}</dd>
-        <dt>Latest on branch</dt><dd class="mono">${upd.latest ? `${esc(upd.latest.sha.slice(0, 7))} · ${esc(upd.latest.message)} · ${when(Date.parse(upd.latest.date))}` : upd.error ? esc(upd.error) : 'not checked yet'}</dd>
-      </dl>
-      ${upd.updateAvailable ? '<div class="note green">An update is available.</div>' : ''}
-      <div class="form-actions"><button class="btn" id="upd-branches" type="button">Load branches</button><button class="btn" id="upd-check" type="button">Check now</button>
-        <button class="btn" id="upd-save" type="button">Save</button><button class="btn solid" id="upd-install" type="button"${upd.installing ? ' disabled' : ''}>${upd.installing ? `Installing (${esc(upd.progress || '')})…` : 'Install latest and restart'}</button></div></div>`;
+    html += updatesCard(upd);
 
     html += `<div class="card" data-section="account"><h2>Account</h2><form id="pw" class="form" style="margin-top:16px">
         <label class="field">Current password<input class="input" type="password" name="current" autocomplete="current-password" required></label>
@@ -622,12 +607,11 @@
         <dt>GPUs</dt><dd>${sys.gpu.gpus.length || sys.gpu.nvidia.length ? [...sys.gpu.nvidia.map((g) => `NVIDIA ${esc(g.name)} (driver ${esc(g.driver)})`), ...sys.gpu.gpus.filter((g) => g.vendor !== 'nvidia').map((g) => `${esc(g.name || g.vendorName)} · ${esc(g.node)}${g.passedThrough ? (g.encodes ? ` · encodes ${Object.entries(g.encodes).filter(([, x]) => x).map(([k]) => k.toUpperCase()).join(', ') || 'nothing'}` : '') : ' · not passed into the container'}`)].join('<br>') : 'none visible (the CPU encoders are used)'}</dd>
         ${sys.gpu.hints.length ? `<dt>GPU hints</dt><dd>${sys.gpu.hints.map(esc).join('<br>')}</dd>` : ''}
         <dt>Data volume free</dt><dd>${bytes(sys.dataFree)}</dd>
-        <dt>Server time zone</dt><dd>${esc(sys.timezone)}</dd>
-        <dt>Version</dt><dd class="mono">${esc(sys.version.sha ? sys.version.sha.slice(0, 12) : 'dev')}</dd></dl></div>`;
+        <dt>Server time zone</dt><dd>${esc(sys.timezone)}</dd></dl></div>`;
     }
     page.innerHTML = html;
     wireSettingsTabs(show, editing ? `#/settings/${sub}` : '#/settings', seq);
-    wireSettings(upd, editing);
+    wireSettings(editing);
     if (sec) wireSecurity(sec);
   };
 
@@ -652,6 +636,25 @@
       };
     });
     pick(show);
+  }
+
+  function updatesCard(u) {
+    const cur = u.current || {};
+    const running = `${cur.sha ? `${esc(cur.sha.slice(0, 7))}${u.tag ? ` (${esc(u.tag)})` : ''}` : 'built from source'}${cur.builtAt ? ` · built ${esc(String(cur.builtAt).slice(0, 10))}` : ''}`;
+    const how = '<code>docker compose pull &amp;&amp; docker compose up -d</code>';
+    if (!u.enabled) {
+      return `<div class="card" data-section="updates"><h2>Updates</h2>
+        <p>${u.image ? `Checking for updates is turned off (UPDATE_CHECK=off). To update, run ${how} where you set up Sentry Six Manager.` : 'This copy was built from source. To update it, build the image again from the new code.'}</p>
+        <dl class="kv" style="margin-top:16px"><dt>Running</dt><dd class="mono">${running}</dd></dl></div>`;
+    }
+    const l = u.latest;
+    const latest = l ? `${l.revision ? `${esc(l.revision.slice(0, 7))} · ` : ''}published ${esc(String(l.created || '').slice(0, 10) || '?')}` : u.error ? esc(u.error) : 'not checked yet';
+    return `<div class="card" data-section="updates"><h2>Updates</h2>
+      <p>Updates come as a new image. To install one, run ${how} where you set up Sentry Six Manager. Settings, footage and the Recycle Bin stay as they are.</p>
+      <dl class="kv" style="margin-top:16px"><dt>Running</dt><dd class="mono">${running}</dd>
+        <dt>Newest</dt><dd${l ? ' class="mono"' : ''}>${latest}${u.checkedAt ? ` <span class="muted">(checked ${when(u.checkedAt)})</span>` : ''}</dd></dl>
+      ${u.updateAvailable ? '<div class="note green">An update is available.</div>' : ''}
+      <div class="form-actions"><button class="btn" id="upd-check" type="button">Check now</button></div></div>`;
   }
 
   function securityCard(sec) {
@@ -739,7 +742,7 @@
     </form>`;
   }
 
-  function wireSettings(upd, editing) {
+  function wireSettings(editing) {
     const veh = $('veh');
     if (veh) {
       let type = veh.querySelector('#src-type .on')?.dataset.type || 'smb';
@@ -785,40 +788,19 @@
         };
       }
     }
-    const updForm = $('upd');
-    const updBody = () => {
-      const fd = new FormData(updForm);
-      return { repo: fd.get('repo'), branch: fd.get('branch'), token: fd.get('token') || undefined, intervalHours: Number(fd.get('intervalHours')), enabled: fd.get('enabled') === 'on', autoInstall: fd.get('autoInstall') === 'on' };
-    };
-    $('upd-branches').onclick = async () => {
-      try {
-        await api('/api/updater/settings', { method: 'PUT', body: updBody() });
-        const { branches } = await api('/api/updater/branches');
-        const sel = $('upd-branch');
-        const cur = sel.value;
-        sel.innerHTML = branches.map((b) => `<option${b.name === cur ? ' selected' : ''}>${esc(b.name)}</option>`).join('');
-        toast(`${branches.length} branch${branches.length === 1 ? '' : 'es'} loaded.`);
-      } catch (err) {
-        toast(err.message, true);
-      }
-    };
-    $('upd-save').onclick = () => api('/api/updater/settings', { method: 'PUT', body: updBody() }).then(() => toast('Update settings saved.'), (err) => toast(err.message, true));
-    $('upd-check').onclick = async () => {
-      await api('/api/updater/settings', { method: 'PUT', body: updBody() }).catch(() => {});
-      await api('/api/updater/check', { body: {} }).catch((err) => toast(err.message, true));
-      render();
-    };
-    $('upd-install').onclick = async () => {
-      if (!(await confirmDialog({ title: 'Install the latest version?', body: `<p>Sentry Six Manager downloads <b>${esc(updBody().branch)}</b>, checks it and restarts. Conversions in progress resume after the restart. If the new version does not start, the previous one comes back.</p>`, ok: 'Install and restart' }))) return;
-      try {
-        await api('/api/updater/settings', { method: 'PUT', body: updBody() });
-        await api('/api/updater/install', { body: {} });
-        toast('Installed. Restarting…');
-        setTimeout(() => location.reload(), 8000);
-      } catch (err) {
-        toast(err.message, true);
-      }
-    };
+    const check = $('upd-check');
+    if (check) {
+      check.onclick = async () => {
+        check.disabled = true;
+        try {
+          const out = await api('/api/updates/check', { body: {} });
+          toast(out.error || (out.updateAvailable ? 'An update is available.' : 'This is the latest version.'), Boolean(out.error));
+        } catch (err) {
+          toast(err.message, true);
+        }
+        render();
+      };
+    }
     $('pw').onsubmit = async (e) => {
       e.preventDefault();
       const fd = new FormData(e.target);
@@ -830,7 +812,6 @@
         toast(err.message, true);
       }
     };
-    void upd;
   }
 
   // Phones show each table row as a stacked block; the cells carry their column name.
