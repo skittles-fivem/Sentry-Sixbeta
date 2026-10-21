@@ -160,6 +160,7 @@ class Updater {
     if (!/^[a-f0-9]{40}$/.test(sha)) throw Object.assign(new Error('Unexpected commit id from GitHub.'), { status: 502 });
     this.state.installing = true;
     this.state.progress = 'downloading';
+    this.log.info(`Downloading ${repo}@${branch} ${sha.slice(0, 7)} from GitHub`);
     const releases = path.join(this.appDir, 'releases');
     const target = path.join(releases, sha);
     const tmpDir = `${target}.partial`;
@@ -171,9 +172,11 @@ class Updater {
       const res = await this.gh(`/repos/${repo}/tarball/${sha}`, { raw: true });
       await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(tarball));
       this.state.progress = 'unpacking';
+      this.log.info(`Downloaded ${(fs.statSync(tarball).size / 1048576).toFixed(1)} MiB; unpacking into ${path.relative(this.dataDir, tmpDir)}`);
       const x = await run('tar', ['-xzf', tarball, '--strip-components=1', '-C', tmpDir, '--no-same-owner', '--exclude=ffmpeg_bin'], { timeoutMs: 10 * 60 * 1000 });
       if (x.code !== 0) throw new Error(`Could not unpack the update: ${tail(x.stderr, 2)}`);
       this.state.progress = 'checking';
+      this.log.info('Checking the new version (required files, syntax)');
       for (const must of ['manager/server/index.js', 'manager/server/supervisor.js', 'src/main/converter/runtime.js', 'src/renderer/index.html']) {
         if (!fs.existsSync(path.join(tmpDir, must))) throw new Error(`This branch has no ${must}; it is not a Sentry Manager version.`);
       }
@@ -194,6 +197,7 @@ class Updater {
       this.state.installing = false;
       this.state.progress = null;
       this.state.error = err.message;
+      this.log.warn(`Update not installed: ${err.message}`);
       await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
       throw Object.assign(err, { status: err.status || 500 });
     } finally {

@@ -266,6 +266,10 @@ async function main() {
     policy: policies.get(v.id)
   });
   const clientKey = (req) => req.socket.remoteAddress || '?';
+  // who did what, for the log: security-relevant actions only, never secrets
+  const audit = logger.scope('audit');
+  const by = (req, user) => `${user || 'someone'} from ${clientKey(req)}`;
+  const describeSource = (src) => (src?.type === 'path' ? `folder ${src.path}` : `SMB ${src?.share} as ${src?.username} (SMB ${src?.version}, ${src?.encrypt === false ? 'signed only' : 'encrypted'})`);
 
   r.add('GET', '/api/auth/me', (req) => ({ user: auth.user(req), needsSetup: auth.needsSetup(), secure: isSecure(req) }), { public: true });
   r.add('POST', '/api/auth/login', async (req, res, { body }) => {
@@ -274,10 +278,12 @@ async function main() {
     if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
     if (!auth.check(body?.username, body?.password)) {
       keys.forEach((k) => auth.noteFailure(k));
+      audit.warn(`Sign-in failed for "${String(body?.username || '').slice(0, 64)}" from ${clientKey(req)}`);
       throw new HttpError(401, 'Wrong user name or password.');
     }
     keys.forEach((k) => auth.noteSuccess(k));
     auth.login(req, res, body.username);
+    audit.info(`Signed in: ${by(req, body.username)}`);
     return { ok: true };
   }, { public: true });
   r.add('POST', '/api/auth/setup', async (req, res, { body }) => {
@@ -287,14 +293,19 @@ async function main() {
     try {
       auth.setup(String(body?.username || ''), String(body?.password || ''), body?.code);
     } catch (err) {
-      if (err.status === 403) auth.noteFailure(key);
+      if (err.status === 403) {
+        auth.noteFailure(key);
+        audit.warn(`Account setup with a wrong setup code from ${clientKey(req)}`);
+      }
       throw err;
     }
     auth.login(req, res, body.username);
+    audit.info(`Account "${body.username}" created with the setup code: ${by(req, body.username)}`);
     return { ok: true };
   }, { public: true });
-  r.add('POST', '/api/auth/logout', (req, res) => {
+  r.add('POST', '/api/auth/logout', (req, res, { user }) => {
     auth.logout(req, res);
+    audit.info(`Signed out: ${by(req, user)}`);
     return { ok: true };
   });
   r.add('POST', '/api/auth/confirm', (req, res, { body, user }) => {
@@ -303,9 +314,11 @@ async function main() {
     if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
     if (!auth.confirm(req, user, body?.password)) {
       auth.noteFailure(key);
+      audit.warn(`Password confirmation failed: ${by(req, user)}`);
       throw new HttpError(401, 'That password is not right.');
     }
     auth.noteSuccess(key);
+    audit.info(`Password confirmed for sensitive changes: ${by(req, user)}`);
     return { ok: true };
   });
   r.add('POST', '/api/auth/password', (req, res, { body, user }) => {
@@ -314,6 +327,7 @@ async function main() {
     db.deleteSessionsFor(user);
     auth.forgetConfirmations();
     auth.login(req, res, user);
+    audit.info(`Password changed (all other sessions signed out): ${by(req, user)}`);
     return { ok: true };
   });
 
@@ -345,12 +359,13 @@ async function main() {
       currentHost: cleanHost(req), confirmed: auth.recentlyConfirmed(req)
     };
   });
-  r.add('PUT', '/api/security/hostnames', async (req, res, { body }) => {
+  r.add('PUT', '/api/security/hostnames', async (req, res, { body, user }) => {
     requireConfirmed(req);
     if (!tlsSource) throw new HttpError(409, 'HTTPS is turned off (TLS_MODE=off).');
     const list = parseHostnames(Array.isArray(body?.hostnames) ? body.hostnames.join(',') : String(body?.hostnames || ''));
     const out = await tlsSource.setHostnames(list);
     if (httpsServer) httpsServer.setSecureContext({ key: out.key, cert: out.cert });
+    audit.info(`HTTPS certificate names set to [${list.join(', ')}]${out.caReplaced ? ' (new certificate authority)' : ''}: ${by(req, user)}`);
     return { ok: true, caReplaced: Boolean(out.caReplaced), tls: tlsSource.status() };
   });
   r.add('GET', '/api/security/ca.crt', (req, res) => {
@@ -362,18 +377,30 @@ async function main() {
   });
 
   r.add('GET', '/api/vehicles', () => ({ vehicles: vehicles.list().map(vehicleSummary) }));
-  r.add('POST', '/api/vehicles', (req, res, { body }) => {
+  r.add('POST', '/api/vehicles', (req, res, { body, user }) => {
     requireConfirmed(req);
-    return vehicleSummary(vehicles.add(body || {}));
+    const v = vehicles.add(body || {});
+    audit.info(`Vehicle "${v.name}" (${v.id}) added, ${describeSource(v.source)}: ${by(req, user)}`);
+    return vehicleSummary(v);
   });
-  r.add('PUT', '/api/vehicles/:id', async (req, res, { params, body }) => {
-    vehicleOr404(params.id);
+  r.add('PUT', '/api/vehicles/:id', async (req, res, { params, body, user }) => {
+    const before = vehicleOr404(params.id);
     if (body?.source !== undefined) requireConfirmed(req);
-    return vehicleSummary(await vehicles.update(params.id, body || {}));
+    const v = await vehicles.update(params.id, body || {});
+    if (JSON.stringify(before.source) !== JSON.stringify(v.source)) {
+      const what = before.source.type === v.source.type && before.source.share === v.source.share && before.source.path === v.source.path
+        ? describeSource(v.source) : `${describeSource(before.source)} -> ${describeSource(v.source)}`;
+      audit.info(`Vehicle "${v.name}" (${v.id}) footage source changed: ${what}${before.source.password !== v.source.password ? ', new password' : ''}: ${by(req, user)}`);
+    } else if (before.name !== v.name || before.timezone !== v.timezone) {
+      audit.info(`Vehicle ${v.id} renamed or time zone changed: ${by(req, user)}`);
+    }
+    return vehicleSummary(v);
   });
-  r.add('DELETE', '/api/vehicles/:id', async (req, res, { params }) => {
+  r.add('DELETE', '/api/vehicles/:id', async (req, res, { params, user }) => {
     requireConfirmed(req);
+    const v = vehicleOr404(params.id);
     await vehicles.remove(params.id);
+    audit.info(`Vehicle "${v.name}" (${v.id}) removed (its footage is untouched): ${by(req, user)}`);
     return { ok: true };
   });
   r.add('POST', '/api/vehicles/:id/reconnect', async (req, res, { params }) => {
@@ -455,18 +482,21 @@ async function main() {
     announce('inventory');
     return out;
   });
-  r.add('POST', '/api/bin/:item/delete', async (req, res, { params, body }) => {
+  r.add('POST', '/api/bin/:item/delete', async (req, res, { params, body, user }) => {
     if (body?.confirm !== true) throw new HttpError(400, 'Confirm permanent deletion.');
     requireConfirmed(req);
+    const item = db.binItem(params.item);
     const out = await bin.deleteForever(params.item);
+    audit.info(`Deleted forever from the Recycle Bin: ${item?.label || params.item} (${formatBytes(out.bytes)}): ${by(req, user)}`);
     announce('bin');
     return out;
   });
-  r.add('POST', '/api/bin/empty', async (req, res, { body }) => {
+  r.add('POST', '/api/bin/empty', async (req, res, { body, user }) => {
     if (body?.confirm !== true) throw new HttpError(400, 'Confirm emptying the Recycle Bin.');
     requireConfirmed(req);
     if (body?.vehicle) vehicleOr404(body.vehicle);
     const out = await bin.empty(body?.vehicle || null);
+    audit.info(`Recycle Bin emptied${body?.vehicle ? ` for ${body.vehicle}` : ''}: ${out.deleted} item(s), ${formatBytes(out.bytes)}: ${by(req, user)}`);
     announce('bin');
     return out;
   });
@@ -502,14 +532,20 @@ async function main() {
     return next;
   });
   r.add('GET', '/api/updater', () => updater.status());
-  r.add('PUT', '/api/updater/settings', (req, res, { body }) => {
+  r.add('PUT', '/api/updater/settings', (req, res, { body, user }) => {
     requireConfirmed(req);
-    return updater.setSettings(body || {});
+    const before = updater.publicSettings();
+    const after = updater.setSettings(body || {});
+    const changed = ['repo', 'branch', 'enabled', 'autoInstall', 'intervalHours'].filter((k) => before[k] !== after[k]).map((k) => `${k}=${after[k]}`);
+    if (body?.token) changed.push('token replaced');
+    if (changed.length) audit.info(`Update settings changed (${changed.join(', ')}): ${by(req, user)}`);
+    return after;
   });
   r.add('GET', '/api/updater/branches', async () => ({ branches: await updater.branches() }));
   r.add('POST', '/api/updater/check', async () => updater.check());
-  r.add('POST', '/api/updater/install', async (req) => {
+  r.add('POST', '/api/updater/install', async (req, res, { user }) => {
     requireConfirmed(req);
+    audit.info(`Update install started: ${by(req, user)}`);
     const out = await updater.install();
     jobs.finish(jobs.start({ type: 'update', title: `Update to ${out.sha.slice(0, 7)}` }), { detail: 'Installed; restarting' });
     return out;
@@ -838,6 +874,7 @@ async function main() {
     await host.stop().catch(() => {});
     await vehicles.stopAll();
     db.close();
+    log.info('Stopped cleanly');
     process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));

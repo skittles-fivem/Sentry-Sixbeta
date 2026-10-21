@@ -261,6 +261,13 @@ the few the supervisor needs. A bug in the web app, a malicious video on a
 share, or a bad update therefore cannot become root, and cannot read the SMB
 passwords or the CA key.
 
+**An audit trail.** Every security-relevant action is logged with who did it
+and from which address, never with a password: account setup, sign-ins
+(including failed ones), password confirmations, vehicles added, changed or
+removed (including where their footage comes from), update settings and
+installs, certificate names, and permanent deletions. Look for `[audit]` in
+`docker logs sentry-manager`.
+
 **Files on a share are not trusted.** Symlinks are never followed out of a
 share, folder vehicles cannot point at `/`, `/data`, the app or system
 folders, and nothing on a share can execute.

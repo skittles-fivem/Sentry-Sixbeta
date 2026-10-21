@@ -120,6 +120,9 @@ test('HTTPS, the setup code, cookies and password confirmation', { skip: !hasOpe
     assert.match(setCookie, /^__Host-sm_session=/);
     for (const flag of ['HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/']) assert.ok(setCookie.includes(flag), flag);
     const cookie = setCookie.split(';')[0];
+    await new Promise((r) => setTimeout(r, 200));
+    assert.match(s.output(), /\[audit\] Account setup with a wrong setup code from /);
+    assert.match(s.output(), /\[audit\] Account "admin" created with the setup code: admin from /);
     assert.equal((await httpsCall(s.port, ca, 'POST', '/api/auth/setup', { body: { username: 'x', password: 'whatever123', code } })).status, 409);
     // a plain cookie of the same name (planted over HTTP) is not accepted over HTTPS
     assert.equal((await httpsCall(s.port, ca, 'GET', '/api/vehicles', { cookie: cookie.replace('__Host-', '') })).status, 401);
@@ -141,6 +144,12 @@ test('HTTPS, the setup code, cookies and password confirmation', { skip: !hasOpe
     assert.equal((await httpsCall(s.port, ca, 'POST', '/api/auth/confirm', { body: { password: 'wrong password' }, cookie })).status, 401);
     assert.equal((await httpsCall(s.port, ca, 'POST', '/api/auth/confirm', { body: { password: 'correct horse' }, cookie })).status, 200);
     assert.equal((await httpsCall(s.port, ca, 'PUT', '/api/updater/settings', { body: { branch: 'beta' }, cookie })).status, 200);
+    // an audit trail of who did what (and never a password)
+    await new Promise((r) => setTimeout(r, 200));
+    assert.match(s.output(), /\[audit\] Password confirmation failed: admin from /);
+    assert.match(s.output(), /\[audit\] Password confirmed for sensitive changes: admin from /);
+    assert.match(s.output(), /\[audit\] Update settings changed \(branch=beta\): admin from /);
+    assert.doesNotMatch(s.output(), /correct horse|wrong password/);
 
     // the CA download and the Security status
     const sec = await httpsCall(s.port, ca, 'GET', '/api/security', { cookie });

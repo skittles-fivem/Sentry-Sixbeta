@@ -39,6 +39,13 @@ const PRIVATE_V6 = [
 ];
 const DNS_RE = /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
 
+/** One spelling per name: lower-case host names, canonical IPs (0:0:0:0:0:0:0:1 is ::1). */
+function canonicalName(n) {
+  const h = String(n).trim().replace(/^\[|\]$/g, '');
+  if (net.isIP(h)) return new net.SocketAddress({ address: h, family: net.isIPv6(h) ? 'ipv6' : 'ipv4' }).address;
+  return h.toLowerCase();
+}
+
 /** Split and validate a list of host names / IP addresses. */
 function parseHostnames(value) {
   const out = [];
@@ -116,7 +123,7 @@ class TlsManager {
   /** Every name the server certificate covers. */
   hostnames() {
     const names = ['localhost', '127.0.0.1', '::1', ...this.extraHostnames, ...this.storedHostnames()];
-    return [...new Set(names.map((n) => n.toLowerCase()))];
+    return [...new Set(names.map(canonicalName))];
   }
 
   /** Make sure CA and server certificate exist and fit; returns { key, cert }. */
@@ -130,7 +137,7 @@ class TlsManager {
     const leaf = certInfo(await fsp.readFile(this.files.crt, 'utf8').catch(() => ''));
     const want = this.hostnames();
     const stale = !leaf || leaf.expiresAt - Date.now() < RENEW_BEFORE_MS
-      || want.some((n) => !leaf.names.map((x) => x.toLowerCase()).includes(n))
+      || want.some((n) => !leaf.names.map(canonicalName).includes(n))
       || !this.signedByCa();
     if (stale) await this.issueLeaf(want);
     const caPem = await fsp.readFile(this.files.caCrt, 'utf8');
@@ -322,4 +329,4 @@ function supervisorTlsSource({ dir, channel = process, timeoutMs = 120000 }) {
   };
 }
 
-module.exports = { TlsManager, parseHostnames, ipPermitted, dnsPermitted, certInfo, fingerprint, localTlsSource, exportForApp, supervisorTlsSource };
+module.exports = { TlsManager, canonicalName, parseHostnames, ipPermitted, dnsPermitted, certInfo, fingerprint, localTlsSource, exportForApp, supervisorTlsSource };
