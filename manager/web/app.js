@@ -573,8 +573,10 @@
   };
 
   pages.settings = async (sub) => {
+    const seq = renderSeq;
     const editing = sub?.startsWith('vehicle/') ? sub.slice(8) : sub === 'vehicle-new' ? 'new' : null;
     const [settings, upd, sys, sec] = await Promise.all([api('/api/settings'), api('/api/updater'), api('/api/system').catch(() => null), api('/api/security').catch(() => null)]);
+    if (seq !== renderSeq) return; // the user moved on while this loaded
     state.system = sys || state.system;
     const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], sec && ['security', 'Security'], sys && ['system', 'System']].filter(Boolean);
     const show = editing || !sections.some(([k]) => k === sub) ? 'vehicles' : sub;
@@ -624,7 +626,7 @@
         <dt>Version</dt><dd class="mono">${esc(sys.version.sha ? sys.version.sha.slice(0, 12) : 'dev')}</dd></dl></div>`;
     }
     page.innerHTML = html;
-    wireSettingsTabs(show, editing ? location.hash : '#/settings');
+    wireSettingsTabs(show, editing ? `#/settings/${sub}` : '#/settings', seq);
     wireSettings(upd, editing);
     if (sec) wireSecurity(sec);
   };
@@ -632,7 +634,8 @@
   // Phones show one Settings section at a time, picked from the tabs (wider
   // screens hide the tabs and show every section). Switching keeps what was
   // typed and only rewrites the address, so a reload opens the same section.
-  function wireSettingsTabs(show, vehiclesHash) {
+  // Taps on a page that is being replaced are ignored.
+  function wireSettingsTabs(show, vehiclesHash, seq) {
     const pick = (key) => {
       page.querySelectorAll('[data-tab]').forEach((b) => {
         b.classList.toggle('on', b.dataset.tab === key);
@@ -643,6 +646,7 @@
     };
     page.querySelectorAll('[data-tab]').forEach((b) => {
       b.onclick = () => {
+        if (seq !== renderSeq) return;
         pick(b.dataset.tab);
         history.replaceState(null, '', b.dataset.tab === 'vehicles' ? vehiclesHash : `#/settings/${b.dataset.tab}`);
       };

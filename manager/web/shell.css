@@ -248,9 +248,12 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .table td { padding: 3px 0; border: 0; overflow-wrap: anywhere; }
   .table td[data-label]:not(:first-child)::before { content: attr(data-label); display: block; font-size: 11.5px; color: var(--muted); }
   .table .actions { text-align: left; white-space: normal; padding-top: 8px; }
-  .set-tabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(max-content, 1fr); margin-bottom: 16px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--panel); overflow-x: auto; scrollbar-width: none; }
-  .set-tabs button { border: 0; background: none; padding: 11px 6px; color: var(--text-2); font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+  .set-tabs { display: flex; flex-wrap: wrap; margin-bottom: 16px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--panel); overflow: hidden; }
+  .set-tabs button { flex: 1 0 auto; border: 0; background: none; padding: 11px 6px; color: var(--text-2); font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; }
   .set-tabs button.on { background: var(--accent-bg); color: var(--accent); }
   .card[data-section]:not(.on) { display: none; }
+}
+@media (max-width: 359px) {
+  .set-tabs button { padding: 11px 4px; font-size: 12px; }
 }
 .bad-text { color: var(--danger); }
