@@ -25,12 +25,13 @@ const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 // trailing "/", "." or ".lock", and only plain characters
 const BRANCH_RE = /^(?![-/])(?!.*\.\.)(?!.*\/\/)(?!.*@\{)[A-Za-z0-9._\/-]{1,200}(?<![/.])(?<!\.lock)$/;
 
-function defaults(env = process.env) {
+function defaults(env = process.env, buildInfo = {}) {
   return {
     enabled: false,
     autoInstall: true,
     repo: env.UPDATE_REPO || 'skittles-fivem/Sentry-Sixbeta',
-    branch: env.UPDATE_BRANCH || env.BUILD_BRANCH || 'main',
+    // follow the branch this image was built from unless told otherwise
+    branch: env.UPDATE_BRANCH || buildInfo.branch || env.BUILD_BRANCH || 'main',
     token: '',
     intervalHours: 6
   };
@@ -46,7 +47,7 @@ class Updater {
   }
 
   settings() {
-    const s = { ...defaults(), ...(this.db.get('updater') || {}) };
+    const s = { ...defaults(process.env, this.buildInfo), ...(this.db.get('updater') || {}) };
     if (!this.allowRepoChange) s.repo = defaults().repo;
     return s;
   }

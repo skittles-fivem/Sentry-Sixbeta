@@ -557,7 +557,7 @@
 
     html += `<div class="card"><h2>Updates</h2><p>Sentry Manager can update itself from GitHub. Pick the branch to follow.</p>
       <form id="upd" class="form" style="margin-top:18px">
-        <label class="field">Repository<input class="input" name="repo" value="${esc(upd.settings.repo)}" placeholder="owner/name"${upd.settings.repoLocked ? ' readonly title="Fixed by the container (UPDATE_REPO). Updates can only come from this repository."' : ''}></label>
+        <label class="field">Repository<input class="input" name="repo" value="${esc(upd.settings.repo)}" placeholder="owner/name"${upd.settings.repoLocked ? ' readonly' : ''}>${upd.settings.repoLocked ? '<span class="muted small">Locked: updates only come from this repository (set by UPDATE_REPO in the container).</span>' : ''}</label>
         <label class="field">Branch<select class="input" name="branch" id="upd-branch"><option>${esc(upd.settings.branch)}</option></select></label>
         <label class="field">GitHub token (private repositories)<input class="input" name="token" type="password" placeholder="${upd.settings.tokenSet ? 'saved — leave empty to keep' : 'optional'}" autocomplete="off"></label>
         <label class="field">Check every<select class="input" name="intervalHours">${[1, 3, 6, 12, 24].map((h) => `<option value="${h}"${upd.settings.intervalHours === h ? ' selected' : ''}>${h} hour${h > 1 ? 's' : ''}</option>`).join('')}</select></label>
