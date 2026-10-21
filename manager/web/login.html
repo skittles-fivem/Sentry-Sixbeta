@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>Sign in · Sentry Manager</title>
+  <title>Sign in · Sentry Six Manager</title>
   <link rel="icon" type="image/png" href="/web/icon.png">
   <link rel="stylesheet" href="/web/shell.css">
   <style>
@@ -20,15 +20,15 @@
   <main class="login">
     <div class="brand">
       <svg class="i" viewBox="0 0 24 24" aria-hidden="true" style="width:30px;height:30px;color:var(--accent);stroke-width:2"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>
-      <div class="brand-name"><b>Sentry</b><span>Manager</span></div>
+      <div class="brand-name"><b>Sentry Six</b><span>Manager</span></div>
     </div>
     <h2 id="title">Sign in</h2>
-    <p class="muted small" id="lead" style="margin:6px 0 20px">Use the account for this Sentry Manager.</p>
+    <p class="muted small" id="lead" style="margin:6px 0 20px">Use the account for this Sentry Six Manager.</p>
     <form id="form">
       <label class="field">User name<input class="input" name="username" autocomplete="username" required value="admin"></label>
       <label class="field">Password<input class="input" name="password" type="password" autocomplete="current-password" required minlength="1"></label>
       <label class="field" id="confirm-row" hidden>Confirm password<input class="input" name="confirm" type="password" autocomplete="new-password"></label>
-      <label class="field" id="code-row" hidden>Setup code<input class="input" name="code" autocomplete="one-time-code" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX"><span class="muted small">Printed in the container log: <code>docker logs sentry-manager</code></span></label>
+      <label class="field" id="code-row" hidden>Setup code<input class="input" name="code" autocomplete="one-time-code" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX"><span class="muted small">Printed in the container log: <code>docker logs sentry-six-manager</code></span></label>
       <p class="note amber small" id="insecure" hidden>This page is not using HTTPS, so your password could be seen by others on the network. Open it with https:// instead.</p>
       <p class="err" id="err" role="alert"></p>
       <button class="btn solid" type="submit" id="submit">Sign in</button>

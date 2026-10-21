@@ -43,7 +43,7 @@ function httpsCall(port, ca, method, p, { body, cookie, headers = {} } = {}) {
     const data = body === undefined ? null : JSON.stringify(body);
     const req = https.request({
       host: '127.0.0.1', port, path: p, method, ca, servername: 'localhost',
-      headers: { 'X-Requested-With': 'sentry-manager', ...(data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}), ...(cookie ? { Cookie: cookie } : {}), ...headers }
+      headers: { 'X-Requested-With': 'sentry-six-manager', ...(data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}), ...(cookie ? { Cookie: cookie } : {}), ...headers }
     }, (res) => {
       let text = '';
       res.on('data', (c) => { text += c; });
@@ -184,7 +184,7 @@ test('symlinks on a share never lead outside it', { timeout: 60000 }, async () =
   const base = `http://127.0.0.1:${s.port}`;
   let cookie = '';
   const call = async (method, p, body) => {
-    const res = await fetch(base + p, { method, headers: { 'X-Requested-With': 'sentry-manager', 'Content-Type': 'application/json', Cookie: cookie }, body: body === undefined ? undefined : JSON.stringify(body) });
+    const res = await fetch(base + p, { method, headers: { 'X-Requested-With': 'sentry-six-manager', 'Content-Type': 'application/json', Cookie: cookie }, body: body === undefined ? undefined : JSON.stringify(body) });
     if (res.headers.get('set-cookie')) cookie = res.headers.get('set-cookie').split(';')[0];
     const text = await res.text();
     try {
@@ -235,7 +235,7 @@ test('SMB settings can never add mount options or weaken security', () => {
   const ok = { share: '//192.168.1.50/TeslaCam', username: 'tesla', password: 'p,a=s s%x', domain: 'HOME' };
   const smb = normalizeSmb(ok);
   assert.deepEqual([smb.version, smb.encrypt, smb.port], ['3.1.1', true, null]);
-  const { args } = mountArgs(smb, { target: '/footage/car', credFile: '/run/sentry-manager/car.cred', uid: 1000, gid: 1000 });
+  const { args } = mountArgs(smb, { target: '/footage/car', credFile: '/run/sentry-six-manager/car.cred', uid: 1000, gid: 1000 });
   assert.deepEqual(args.slice(0, 4), ['-t', 'cifs', '//192.168.1.50/TeslaCam', '/footage/car']);
   const opts = args[5].split(',');
   for (const o of ['vers=3.1.1', 'sec=ntlmssp', 'seal', 'nosuid', 'nodev', 'noexec', 'forceuid', 'forcegid', 'serverino']) assert.ok(opts.includes(o), o);
@@ -429,7 +429,7 @@ test('the supervisor runs the app unprivileged and keeps mounts and the CA to it
   sup.stdout.on('data', (c) => { out += c; });
   sup.stderr.on('data', (c) => { out += c; });
   try {
-    for (let i = 0; i < 200 && !/Sentry Manager on https/.test(out); i++) await new Promise((r) => setTimeout(r, 100));
+    for (let i = 0; i < 200 && !/Sentry Six Manager on https/.test(out); i++) await new Promise((r) => setTimeout(r, 100));
     assert.match(out, /starting built-in version as 1000:1000/, out);
     // the app: uid 1000, no capabilities, no_new_privs
     const kids = fs.readdirSync('/proc').filter((p) => /^\d+$/.test(p)).filter((p) => {

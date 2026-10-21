@@ -1,6 +1,6 @@
 // window.electronAPI for the Sentry Studio renderer running as a web page
-// inside Sentry Manager. Same method names and return shapes as
-// src/preload.js; calls go to the Sentry Manager server over HTTP, and
+// inside Sentry Six Manager. Same method names and return shapes as
+// src/preload.js; calls go to the Sentry Six Manager server over HTTP, and
 // converter progress arrives over Server-Sent Events.
 //
 // URL parameters (set by the manager shell):
@@ -16,7 +16,7 @@
   document.documentElement.dataset.embed = embed;
 
   const clientId = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)).slice(0, 64);
-  const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-manager', 'X-Client-Id': clientId };
+  const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-six-manager', 'X-Client-Id': clientId };
 
   async function post(url, body) {
     const res = await fetch(url, { method: 'POST', headers, body: body === undefined ? '' : JSON.stringify(body), credentials: 'same-origin' });
@@ -267,6 +267,9 @@
     getSetting: async (key) => {
       // The Encoder tab never loads footage into the viewer behind it.
       if (key === 'defaultFolder') return embed === 'encoder' ? null : startFolder;
+      // The Encoder tab has no visible map: use OpenStreetMap there so Studio
+      // does not probe Google Maps and show its fallback notice over the form.
+      if (key === 'mapTileProvider' && embed === 'encoder') return 'osm';
       const all = await settings();
       if (Object.prototype.hasOwnProperty.call(all, key)) return all[key];
       return WEB_DEFAULTS[key];
@@ -298,7 +301,7 @@
     removeAllListeners: (channel) => listeners.delete(channel)
   };
 
-  // Telemetry checks can never be Off in Sentry Manager (insurance requirement;
+  // Telemetry checks can never be Off in Sentry Six Manager (insurance requirement;
   // the server upgrades Off to Quick as well), so the choice is removed.
   window.addEventListener('DOMContentLoaded', () => {
     const select = document.getElementById('converterVerifyMode');
@@ -308,11 +311,26 @@
 
   // Encoder tab: open the Converter panel as soon as the Studio UI is built.
   if (embed === 'encoder') {
+    // "Review conversion" in Footage hands over that vehicle's folder as the source.
+    const useSource = (folder) => {
+      const input = document.getElementById('converterSourcePath');
+      const busy = document.getElementById('converterChooseSource')?.hidden;
+      if (!input || !folder || busy) return;
+      input.value = folder;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    };
     const open = () => {
       const tab = document.querySelector('[data-panel="converter"]');
-      if (tab) tab.click();
-      else setTimeout(open, 100);
+      if (!tab) return setTimeout(open, 100);
+      tab.click();
+      // after the converter has shown its last job's folders
+      if (params.get('source')) setTimeout(() => useSource(params.get('source')), 1500);
+      return undefined;
     };
     window.addEventListener('DOMContentLoaded', () => setTimeout(open, 0));
+    window.addEventListener('message', (e) => {
+      if (e.origin === location.origin && e.source === window.parent && e.data?.type === 'use-source') useSource(e.data.folder);
+    });
   }
 })();

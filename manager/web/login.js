@@ -20,7 +20,7 @@
   const setup = me.needsSetup;
   if (setup) {
     $('title').textContent = 'Create your account';
-    $('lead').textContent = 'This is the first start. Enter the setup code from the container log, then choose the user name and password that protect this Sentry Manager.';
+    $('lead').textContent = 'This is the first start. Enter the setup code from the container log, then choose the user name and password that protect this Sentry Six Manager.';
     $('confirm-row').hidden = false;
     $('code-row').hidden = false;
     $('submit').textContent = 'Create account';
@@ -38,12 +38,12 @@
     $('submit').disabled = true;
     const res = await fetch(setup ? '/api/auth/setup' : '/api/auth/login', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-manager' },
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-six-manager' },
       body: JSON.stringify({ username: f.get('username'), password: f.get('password'), ...(setup ? { code: f.get('code') } : {}) })
     }).catch(() => null);
     $('submit').disabled = false;
     if (res && res.ok) return location.replace(safeNext);
     const data = res ? await res.json().catch(() => ({})) : {};
-    $('err').textContent = data.error || 'Could not reach Sentry Manager.';
+    $('err').textContent = data.error || 'Could not reach Sentry Six Manager.';
   });
 })();

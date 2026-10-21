@@ -111,7 +111,7 @@ class Updater {
     const res = await this.fetch(`${this.apiBase}${pathname}`, {
       headers: {
         Accept: 'application/vnd.github+json',
-        'User-Agent': 'sentry-manager',
+        'User-Agent': 'sentry-six-manager',
         ...(token ? { Authorization: `Bearer ${token}` } : {})
       },
       redirect: 'follow'
@@ -178,7 +178,7 @@ class Updater {
       this.state.progress = 'checking';
       this.log.info('Checking the new version (required files, syntax)');
       for (const must of ['manager/server/index.js', 'manager/server/supervisor.js', 'src/main/converter/runtime.js', 'src/renderer/index.html']) {
-        if (!fs.existsSync(path.join(tmpDir, must))) throw new Error(`This branch has no ${must}; it is not a Sentry Manager version.`);
+        if (!fs.existsSync(path.join(tmpDir, must))) throw new Error(`This branch has no ${must}; it is not a Sentry Six Manager version.`);
       }
       const syntax = await run(process.execPath, ['--check', path.join(tmpDir, 'manager/server/index.js')], { timeoutMs: 60000 });
       if (syntax.code !== 0) throw new Error(`The new version does not start: ${tail(syntax.stderr, 2)}`);

@@ -3,7 +3,7 @@
 // HTTPS for the web UI, so nobody on the network can read the password or
 // the session cookie, or change the page on its way to the browser.
 //
-// By default Sentry Manager is its own small certificate authority (CA):
+// By default Sentry Six Manager is its own small certificate authority (CA):
 //   /data/tls/ca.crt + ca.key       the CA, created once (10 years)
 //   /data/tls/server.crt + .key     the web server's certificate, signed by
 //                                   the CA, renewed before it expires
@@ -186,7 +186,7 @@ class TlsManager {
     await openssl(['genpkey', '-algorithm', 'EC', '-pkeyopt', 'ec_paramgen_curve:P-256', '-out', tmpKey]);
     await fsp.chmod(tmpKey, 0o600);
     await openssl(['req', '-x509', '-new', '-key', tmpKey, '-sha256', '-days', '3650',
-      '-subj', `/O=Sentry Manager/CN=Sentry Manager local CA ${id}`,
+      '-subj', `/O=Sentry Six Manager/CN=Sentry Six Manager local CA ${id}`,
       '-addext', 'basicConstraints=critical,CA:TRUE,pathlen:0',
       '-addext', 'keyUsage=critical,keyCertSign,cRLSign',
       '-addext', `nameConstraints=critical,${constraints}`,
@@ -211,7 +211,7 @@ class TlsManager {
     const csr = path.join(this.dir, 'server.csr');
     await openssl(['genpkey', '-algorithm', 'EC', '-pkeyopt', 'ec_paramgen_curve:P-256', '-out', tmpKey]);
     await fsp.chmod(tmpKey, 0o600);
-    await openssl(['req', '-new', '-key', tmpKey, '-subj', `/O=Sentry Manager/CN=${names.find((n) => !net.isIP(n)) || 'localhost'}`, '-out', csr]);
+    await openssl(['req', '-new', '-key', tmpKey, '-subj', `/O=Sentry Six Manager/CN=${names.find((n) => !net.isIP(n)) || 'localhost'}`, '-out', csr]);
     await openssl(['x509', '-req', '-in', csr, '-CA', this.files.caCrt, '-CAkey', this.files.caKey,
       '-set_serial', `0x${crypto.randomBytes(16).toString('hex')}`, '-days', String(LEAF_DAYS), '-sha256',
       '-extfile', ext, '-out', `${this.files.crt}.tmp`]);

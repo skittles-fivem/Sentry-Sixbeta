@@ -1,6 +1,6 @@
 'use strict';
 
-// Sentry Manager server: the Sentry Studio viewer and converter as a web app,
+// Sentry Six Manager server: the Sentry Studio viewer and converter as a web app,
 // plus file management (vehicles, footage, Recycle Bin, policies, jobs,
 // notifications, settings, sign-in, GitHub updates).
 //
@@ -50,7 +50,7 @@ const APP_ROOT = path.resolve(process.env.APP_ROOT || path.join(__dirname, '..',
 const SRC = path.join(APP_ROOT, 'src');
 const WEB = path.join(APP_ROOT, 'manager', 'web');
 const DATA = path.resolve(process.env.DATA_PATH || '/data');
-const RUN_DIR = path.resolve(process.env.RUN_DIR || '/run/sentry-manager');
+const RUN_DIR = path.resolve(process.env.RUN_DIR || '/run/sentry-six-manager');
 const FOOTAGE_ROOT = path.resolve(process.env.FOOTAGE_ROOT || '/footage');
 const PORT = Number(process.env.PORT || 9000);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -371,7 +371,7 @@ async function main() {
   r.add('GET', '/api/security/ca.crt', (req, res) => {
     const pem = tlsSource?.caPem();
     if (!pem) throw new HttpError(404, 'This server uses its own certificate; there is no local certificate authority.');
-    res.writeHead(200, { 'Content-Type': 'application/x-x509-ca-cert', 'Content-Disposition': 'attachment; filename="sentry-manager-ca.crt"', 'Cache-Control': 'no-store' });
+    res.writeHead(200, { 'Content-Type': 'application/x-x509-ca-cert', 'Content-Disposition': 'attachment; filename="sentry-six-manager-ca.crt"', 'Cache-Control': 'no-store' });
     res.end(pem);
     return undefined;
   });
@@ -678,7 +678,7 @@ async function main() {
         if (!m && p !== '/api/events' && p !== '/api/converter/events' && p !== '/api/media') return sendJson(res, 404, { error: 'Not found' });
         if (!user && !(m && m.route.opts.public)) return sendJson(res, 401, { error: 'Sign in first.' });
         if (req.method !== 'GET' && req.method !== 'HEAD') {
-          if (req.headers['x-requested-with'] !== 'sentry-manager') return sendJson(res, 403, { error: 'Missing X-Requested-With header.' });
+          if (req.headers['x-requested-with'] !== 'sentry-six-manager') return sendJson(res, 403, { error: 'Missing X-Requested-With header.' });
           const origin = req.headers.origin;
           if (origin && origin !== 'null') {
             let originHost = null;
@@ -758,7 +758,7 @@ async function main() {
   if (!tlsSource) {
     const server = http.createServer(handler);
     servers.push(server);
-    server.listen(PORT, HOST, () => log.warn(`Sentry Manager on http://${HOST}:${PORT} WITHOUT HTTPS (TLS_MODE=off): only use this behind a reverse proxy that does HTTPS.`));
+    server.listen(PORT, HOST, () => log.warn(`Sentry Six Manager on http://${HOST}:${PORT} WITHOUT HTTPS (TLS_MODE=off): only use this behind a reverse proxy that does HTTPS.`));
   } else {
     const material = await tlsSource.load();
     httpsServer = https.createServer({ key: material.key, cert: material.cert, minVersion: 'TLSv1.2' }, handler);
@@ -791,7 +791,7 @@ async function main() {
       });
     });
     servers.push(front, httpsServer, redirect);
-    front.listen(PORT, HOST, () => log.info(`Sentry Manager on https://${HOST}:${PORT} (${buildInfo.sha ? buildInfo.sha.slice(0, 7) : 'dev'})`));
+    front.listen(PORT, HOST, () => log.info(`Sentry Six Manager on https://${HOST}:${PORT} (${buildInfo.sha ? buildInfo.sha.slice(0, 7) : 'dev'})`));
   }
   vehicles.startAll();
 

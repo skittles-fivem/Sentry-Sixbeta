@@ -1,6 +1,6 @@
 'use strict';
 
-// Container entrypoint, and the only part of Sentry Manager that runs as root.
+// Container entrypoint, and the only part of Sentry Six Manager that runs as root.
 //
 // It runs the installed version of the app (the update in /data/app/current.json
 // if there is one, else the copy built into the image) as an unprivileged user
@@ -35,7 +35,7 @@ const DATA = path.resolve(process.env.DATA_PATH || '/data');
 const APP_DIR = path.join(DATA, 'app');
 const IMAGE_ROOT = path.resolve(__dirname, '..', '..');
 const FOOTAGE_ROOT = path.resolve(process.env.FOOTAGE_ROOT || '/footage');
-const ROOT_RUN = path.resolve(process.env.RUN_DIR || '/run/sentry-manager'); // root only: SMB credentials
+const ROOT_RUN = path.resolve(process.env.RUN_DIR || '/run/sentry-six-manager'); // root only: SMB credentials
 const ROOT_STATE = path.join(DATA, '.supervisor'); // root only: releases that failed to start
 const APP_TLS = path.resolve(process.env.SENTRY_APP_TLS_DIR || '/run/sentry-app/tls'); // root-owned, readable by the app group
 const RESTART_CODE = 75;

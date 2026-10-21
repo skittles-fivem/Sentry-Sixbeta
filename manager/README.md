@@ -1,4 +1,4 @@
-# Sentry Manager
+# Sentry Six Manager
 
 Sentry Studio as a self-hosted web app, plus a manager for your TeslaCam
 archive. It runs in Docker and serves a web UI on port **9000**.
@@ -24,10 +24,10 @@ archive. It runs in Docker and serves a web UI on port **9000**.
 ## Quick start
 
 ```bash
-git clone -b claude/sentry-manager-docker-ui-q31i6f https://github.com/skittles-fivem/Sentry-Sixbeta
+git clone -b sentry-six-manager https://github.com/skittles-fivem/Sentry-Sixbeta
 cd Sentry-Sixbeta/manager
 SENTRY_COMMIT=$(git rev-parse HEAD) docker compose up -d --build
-docker logs sentry-manager
+docker logs sentry-six-manager
 ```
 
 (`SENTRY_COMMIT` tells the image which commit it was built from, so Settings
@@ -38,7 +38,7 @@ The log shows two things you need once:
 - the **setup code**. Open `https://<docker-host>:9000`, enter the code and
   choose the account's user name and password. Without the code nobody, not
   even someone who reaches the page before you, can create the account.
-- the **HTTPS fingerprint** of Sentry Manager's certificate authority. See
+- the **HTTPS fingerprint** of Sentry Six Manager's certificate authority. See
   [Security](#security) for installing it on your devices, so browsers trust
   the page and nobody can pose as it.
 
@@ -213,13 +213,13 @@ What protects what, if someone is on your network (a man in the middle) or
 gets into the web UI:
 
 **The page (HTTPS).** Port 9000 speaks HTTPS; plain HTTP there only redirects
-to it. Sentry Manager is its own small certificate authority (CA): install
+to it. Sentry Six Manager is its own small certificate authority (CA): install
 it once on each phone and computer and browsers trust the page, so nobody
 can read your password or session, change the page, or pose as the server.
 
 1. Download it in *Settings > Security* (or copy `/data/tls/ca.crt` from the
    host).
-2. Compare its SHA-256 fingerprint with the one in `docker logs sentry-manager`
+2. Compare its SHA-256 fingerprint with the one in `docker logs sentry-six-manager`
    before you trust it.
 3. Install it (the steps for iPhone, Android, Windows, macOS and Firefox are
    on that page).
@@ -266,7 +266,7 @@ and from which address, never with a password: account setup, sign-ins
 (including failed ones), password confirmations, vehicles added, changed or
 removed (including where their footage comes from), update settings and
 installs, certificate names, and permanent deletions. Look for `[audit]` in
-`docker logs sentry-manager`.
+`docker logs sentry-six-manager`.
 
 **Files on a share are not trusted.** Symlinks are never followed out of a
 share, folder vehicles cannot point at `/`, `/data`, the app or system

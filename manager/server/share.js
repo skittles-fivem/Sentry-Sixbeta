@@ -274,8 +274,8 @@ class ShareManager extends EventEmitter {
    */
   async writeCheck() {
     const st = this.state;
-    const a = path.join(this.root, '.sentry-manager-check-a');
-    const b = path.join(this.root, '.sentry-manager-check-b');
+    const a = path.join(this.root, '.sentry-six-manager-check-a');
+    const b = path.join(this.root, '.sentry-six-manager-check-b');
     st.writeCheckedAt = Date.now();
     try {
       await withTimeout((async () => {

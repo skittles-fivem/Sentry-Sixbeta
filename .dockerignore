@@ -6,7 +6,6 @@ release
 coverage
 tests
 manager/build
-manager/notes
 manager/test
 manager/data
 manager/.env

@@ -99,7 +99,7 @@ class Auth {
     const given = String(code || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
     const want = String(this.code || '').replace(/-/g, '');
     if (!want || given.length !== want.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(want))) {
-      throw Object.assign(new Error('That setup code is not right. It is printed in the container log (docker logs sentry-manager).'), { status: 403 });
+      throw Object.assign(new Error('That setup code is not right. It is printed in the container log (docker logs sentry-six-manager).'), { status: 403 });
     }
     this.setPassword(username, password);
     this.code = null;

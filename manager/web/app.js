@@ -30,7 +30,7 @@
   const humanize = (s) => String(s || '').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
 
   async function api(path, opts = {}, retried = false) {
-    const init = { credentials: 'same-origin', headers: { 'X-Requested-With': 'sentry-manager' } };
+    const init = { credentials: 'same-origin', headers: { 'X-Requested-With': 'sentry-six-manager' } };
     if (opts.method) init.method = opts.method;
     if (opts.body !== undefined) {
       init.method = init.method || 'POST';
@@ -55,7 +55,7 @@
   /** Ask for the password and confirm it with the server; throws if cancelled. */
   async function confirmPassword() {
     for (let attempt = 0; attempt < 3; attempt++) {
-      const password = await passwordDialog(attempt ? 'That password was not right. Try again.' : 'This change affects where footage comes from or what code runs, so Sentry Manager asks for your password again.');
+      const password = await passwordDialog(attempt ? 'That password was not right. Try again.' : 'This change affects where footage comes from or what code runs, so Sentry Six Manager asks for your password again.');
       if (password === null) throw new Error('Not changed: the password was not confirmed.');
       try {
         await api('/api/auth/confirm', { body: { password } }, true);
@@ -120,7 +120,9 @@
   if (store.get('collapsed', false)) app.classList.add('collapsed');
   $('collapse').addEventListener('click', () => {
     app.classList.toggle('collapsed');
+    app.classList.remove('auto-collapsed');
     store.set('collapsed', app.classList.contains('collapsed'));
+    setTimeout(() => fitFrames(), 50);
   });
   $('reduce-effects').addEventListener('change', (e) => {
     document.documentElement.classList.toggle('reduce-effects', e.target.checked);
@@ -164,7 +166,7 @@
 
   function head(eyebrow, title, extra = '') {
     return `<div class="page-head"><div><p class="eyebrow">${esc(eyebrow)}</p><h1>${esc(title)}</h1></div>
-      <div style="display:flex;gap:12px">${extra}<button class="btn" data-action="signout">Sign out</button></div></div>`;
+      <div class="head-actions">${extra}<button class="btn" data-action="signout">Sign out</button></div></div>`;
   }
 
   const page = $('page');
@@ -258,7 +260,7 @@
         <button class="btn" id="sel-trash"${sel.length ? '' : ' disabled'}>Move to trash</button>
         <button class="btn green" id="sel-protect"${sel.length ? '' : ' disabled'}>Protect</button>
         <button class="btn" id="sel-unprotect"${selRecs.some((r) => r.protected) ? '' : ' disabled'}>Unprotect</button>
-        <a class="btn green" href="#/encoder">Review conversion</a>
+        <button class="btn green" id="sel-review" type="button">Review conversion</button>
       </div>
       <details class="more"><summary>Conversion options</summary>
         <p>Conversion runs folder by folder in the Encoder tab: choose this vehicle's folder there, pick H.265 or AV1 and the profile, and keep originals or replace them. Tesla telemetry is copied byte-for-byte into every frame and checked (Quick or Full verification) before anything is replaced. Protected recordings can still be converted; they are only protected from the Recycle Bin and policies.</p>
@@ -287,6 +289,7 @@
     $('sel-trash').onclick = () => trash(v, [...f.selected]);
     $('sel-protect').onclick = () => protect(v, [...f.selected], true);
     $('sel-unprotect').onclick = () => protect(v, [...f.selected], false);
+    $('sel-review').onclick = () => reviewConversion(v);
     page.querySelectorAll('.rec').forEach((el) => {
       const id = el.dataset.id;
       el.querySelector('input[type=checkbox]').onchange = (e) => { if (e.target.checked) f.selected.add(id); else f.selected.delete(id); render(); };
@@ -383,6 +386,15 @@
     else location.hash = `#/${kind}`;
   }
   const pendingFrame = {};
+  /** Open the Encoder with this vehicle's footage folder as the source. */
+  function reviewConversion(v) {
+    const folder = v.studioRoot || v.root;
+    const frame = frames.encoder?.querySelector('iframe');
+    if (!frame) return openStudio('encoder', { source: folder });
+    location.hash = '#/encoder';
+    frame.contentWindow?.postMessage({ type: 'use-source', folder }, location.origin);
+    return undefined;
+  }
   function showFrame(kind) {
     const url = pendingFrame[kind] || frames[kind]?.dataset.src || studioUrl(kind);
     delete pendingFrame[kind];
@@ -396,7 +408,25 @@
       frames[kind] = wrap;
     }
     for (const [k, el] of Object.entries(frames)) el.hidden = k !== kind;
+    fitFrames();
   }
+
+  // Studio's viewer needs about 900px; on narrower screens (phones) it is
+  // drawn at that width and scaled down to fit, instead of overlapping itself.
+  const VIEWER_MIN_WIDTH = 900;
+  function fitFrames() {
+    const wrap = frames.viewer;
+    const iframe = wrap?.querySelector('iframe');
+    if (!iframe || wrap.hidden) return;
+    const width = wrap.clientWidth;
+    if (width && width < VIEWER_MIN_WIDTH) {
+      const s = width / VIEWER_MIN_WIDTH;
+      Object.assign(iframe.style, { width: `${VIEWER_MIN_WIDTH}px`, height: `${wrap.clientHeight / s}px`, transform: `scale(${s})`, transformOrigin: '0 0' });
+    } else {
+      Object.assign(iframe.style, { width: '', height: '', transform: '', transformOrigin: '' });
+    }
+  }
+  window.addEventListener('resize', () => fitFrames());
   pages.viewer = () => {
     page.innerHTML = '';
     showFrame('viewer');
@@ -555,7 +585,7 @@
         <td class="actions"><a class="btn sm" href="#/settings/vehicle/${esc(v.id)}">Edit</a></td></tr>`).join('')}</tbody></table>` : '<p style="margin-top:12px">No vehicles yet.</p>'}
       ${editing ? vehicleForm(editing === 'new' ? null : state.vehicles.find((v) => v.id === editing)) : ''}</div>`;
 
-    html += `<div class="card"><h2>Updates</h2><p>Sentry Manager can update itself from GitHub. Pick the branch to follow.</p>
+    html += `<div class="card"><h2>Updates</h2><p>Sentry Six Manager can update itself from GitHub. Pick the branch to follow.</p>
       <form id="upd" class="form" style="margin-top:18px">
         <label class="field">Repository<input class="input" name="repo" value="${esc(upd.settings.repo)}" placeholder="owner/name"${upd.settings.repoLocked ? ' readonly' : ''}>${upd.settings.repoLocked ? '<span class="muted small">Locked: updates only come from this repository (set by UPDATE_REPO in the container).</span>' : ''}</label>
         <label class="field">Branch<select class="input" name="branch" id="upd-branch"><option>${esc(upd.settings.branch)}</option></select></label>
@@ -611,11 +641,11 @@
     } else if (tls.error) {
       body += `<dt>Certificate</dt><dd>${esc(tls.error)}</dd></dl>`;
     } else {
-      body += `<dt>Certificate authority</dt><dd>Sentry Manager's own · valid until ${esc(ca?.validTo || '?')}</dd>
+      body += `<dt>Certificate authority</dt><dd>Sentry Six Manager's own · valid until ${esc(ca?.validTo || '?')}</dd>
         <dt>CA fingerprint (SHA-256)</dt><dd class="mono small" style="word-break:break-all">${esc(ca?.fingerprint || '?')}</dd>
         <dt>Certificate covers</dt><dd>${esc((tls.hostnames || []).join(', '))} · renews by itself before ${esc(tls.certificate?.validTo || '?')}</dd></dl>
         ${covered ? '' : `<div class="note amber">You opened this page as <b>${esc(host)}</b>, which the certificate does not cover yet, so browsers warn even when they trust the CA. <button class="btn sm" type="button" id="sec-add-host" data-host="${esc(host)}">Add ${esc(host)}</button></div>`}
-        <p style="margin-top:14px">To stop browser warnings, and so nobody can pose as this server, install the certificate authority on each phone and computer you use: download it, then compare the fingerprint above with the one in the container log (<code>docker logs sentry-manager</code>) before trusting it. It can only vouch for local names and private IP addresses.</p>
+        <p style="margin-top:14px">To stop browser warnings, and so nobody can pose as this server, install the certificate authority on each phone and computer you use: download it, then compare the fingerprint above with the one in the container log (<code>docker logs sentry-six-manager</code>) before trusting it. It can only vouch for local names and private IP addresses.</p>
         <details class="more" style="margin-top:10px"><summary>How to install it</summary>
           <ul class="small" style="margin:10px 0 0 18px;display:grid;gap:6px">
             <li><b>iPhone / iPad:</b> open the download in Safari, then Settings &gt; General &gt; VPN &amp; Device Management to install it, and Settings &gt; General &gt; About &gt; Certificate Trust Settings to turn on full trust.</li>
@@ -719,7 +749,7 @@
       };
       if ($('veh-del')) {
         $('veh-del').onclick = async () => {
-          if (!(await confirmDialog({ title: 'Remove this vehicle?', body: '<p>Sentry Manager forgets the vehicle and unmounts its share. No footage is deleted.</p>', ok: 'Remove', danger: true }))) return;
+          if (!(await confirmDialog({ title: 'Remove this vehicle?', body: '<p>Sentry Six Manager forgets the vehicle and unmounts its share. No footage is deleted.</p>', ok: 'Remove', danger: true }))) return;
           await api(`/api/vehicles/${encodeURIComponent(editing)}`, { method: 'DELETE' }).catch((err) => toast(err.message, true));
           await loadVehicles();
           location.hash = '#/settings';
@@ -750,7 +780,7 @@
       render();
     };
     $('upd-install').onclick = async () => {
-      if (!(await confirmDialog({ title: 'Install the latest version?', body: `<p>Sentry Manager downloads <b>${esc(updBody().branch)}</b>, checks it and restarts. Conversions in progress resume after the restart. If the new version does not start, the previous one comes back.</p>`, ok: 'Install and restart' }))) return;
+      if (!(await confirmDialog({ title: 'Install the latest version?', body: `<p>Sentry Six Manager downloads <b>${esc(updBody().branch)}</b>, checks it and restarts. Conversions in progress resume after the restart. If the new version does not start, the previous one comes back.</p>`, ok: 'Install and restart' }))) return;
       try {
         await api('/api/updater/settings', { method: 'PUT', body: updBody() });
         await api('/api/updater/install', { body: {} });
@@ -790,10 +820,13 @@
     state.route = pages[route] ? route : 'overview';
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === state.route));
     const label = document.querySelector(`#nav a[data-route="${state.route}"] span`)?.textContent || '';
-    $('crumb').textContent = `SentryManager${label ? ` / ${label}` : ''}`;
-    document.title = `${label || 'Overview'} · Sentry Manager`;
+    $('crumb').textContent = `Sentry Six Manager${label ? ` / ${label}` : ''}`;
+    document.title = `${label || 'Overview'} · Sentry Six Manager`;
     const embedded = state.route === 'viewer' || state.route === 'encoder';
     $('topbar').hidden = embedded;
+    // give Studio the room it needs on smaller windows; the sidebar comes back after
+    if (embedded && innerWidth < 1200 && !app.classList.contains('collapsed')) app.classList.add('collapsed', 'auto-collapsed');
+    if (!embedded && app.classList.contains('auto-collapsed')) app.classList.remove('collapsed', 'auto-collapsed');
     if (!embedded) for (const el of Object.values(frames)) el.hidden = true;
     try {
       await pages[state.route](rest.join('/'));

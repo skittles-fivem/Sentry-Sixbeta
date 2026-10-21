@@ -52,7 +52,7 @@ p { margin: 0; }
 .brand { display: flex; align-items: center; gap: 12px; padding: 0 12px 24px; }
 .brand svg { width: 30px; height: 30px; color: var(--accent); stroke-width: 2; }
 .brand-name { display: flex; flex-direction: column; line-height: 1.15; }
-.brand-name b { font-size: 21px; font-weight: 700; letter-spacing: -0.02em; }
+.brand-name b { font-size: 21px; font-weight: 700; letter-spacing: -0.02em; white-space: nowrap; }
 .brand-name span { color: var(--text-2); font-size: 14px; font-weight: 500; }
 .nav { display: flex; flex-direction: column; gap: 4px; }
 .nav a {
@@ -79,6 +79,7 @@ p { margin: 0; }
 .check { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
 .check input { width: 17px; height: 17px; accent-color: var(--accent); margin: 0; }
 .page-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 26px; }
+.head-actions { display: flex; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
 .eyebrow { color: var(--text-2); font-size: 13px; margin-bottom: 4px; }
 
 /* buttons, chips */
@@ -197,6 +198,7 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 
 /* embedded Studio */
 .frame-wrap { position: relative; margin: -22px -32px -64px -48px; height: 100vh; }
+.frame-wrap { overflow: hidden; }
 .frame-wrap iframe { border: 0; width: 100%; height: 100%; display: block; background: #07090c; }
 .frame-bar { position: absolute; top: 10px; right: 16px; z-index: 2; display: flex; gap: 8px; }
 
@@ -223,6 +225,7 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .side { position: static; height: auto; padding: 12px 12px 0; }
   .side-card { flex-direction: row; align-items: center; padding: 10px; border-radius: 16px; overflow-x: auto; }
   .brand { padding: 0 8px 0 4px; }
+  .page-head { flex-wrap: wrap; }
   .brand-name span, .collapse { display: none; }
   .nav { flex-direction: row; }
   .nav a { padding: 9px 11px; }

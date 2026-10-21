@@ -22,7 +22,7 @@ function checkId(id) {
   return String(id);
 }
 
-function createLocalMounter({ footageRoot = '/footage', credDir = '/run/sentry-manager', uid = 0, gid = 0, runCmd = run } = {}) {
+function createLocalMounter({ footageRoot = '/footage', credDir = '/run/sentry-six-manager', uid = 0, gid = 0, runCmd = run } = {}) {
   const target = (id) => path.join(footageRoot, checkId(id));
   const credFile = (id) => path.join(credDir, `${checkId(id)}.cred`);
 

@@ -1,8 +1,8 @@
-# Sentry Manager: the Sentry Studio viewer and converter as a web app, plus
+# Sentry Six Manager: the Sentry Studio viewer and converter as a web app, plus
 # footage management, on port 9000.
 #
 # Build from the repository root (the image ships the same src/ as the
-# desktop app):   docker build -f manager/Dockerfile -t sentry-manager .
+# desktop app):   docker build -f manager/Dockerfile -t sentry-six-manager .
 
 # Official Node 24 build (made against an old glibc, so it runs on Ubuntu).
 FROM node:24-trixie-slim AS node

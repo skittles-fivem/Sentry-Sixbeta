@@ -79,7 +79,7 @@ async function startServer(dir, env = {}) {
   const call = async (method, p, body, { raw = false, headers = {} } = {}) => {
     const res = await fetch(base + p, {
       method,
-      headers: { 'X-Requested-With': 'sentry-manager', ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}), ...headers },
+      headers: { 'X-Requested-With': 'sentry-six-manager', ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}), ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
       redirect: 'manual'
     });
