@@ -1,0 +1,46 @@
+{
+	"Name": "Sentry Manager Downloads",
+	"Version": "1.0.0.0",
+	"Author": "Sentry Six",
+	"Actions": [
+		{
+			"Name": "Download count",
+			"UUID": "com.sentrysix.manager-downloads.count",
+			"Icon": "imgs/actions/count/icon",
+			"Tooltip": "Sentry Six Manager's download count, checked every 30 seconds. Press to check now; hold for a second to open the package page.",
+			"Controllers": [
+				"Keypad"
+			],
+			"States": [
+				{
+					"Image": "imgs/actions/count/key",
+					"ShowTitle": false
+				}
+			],
+			"UserTitleEnabled": false
+		}
+	],
+	"Category": "Sentry Manager Downloads",
+	"CategoryIcon": "imgs/plugin/category-icon",
+	"CodePath": "bin/plugin.js",
+	"Description": "Shows how many times Sentry Six Manager's Docker image has been downloaded, checked every 30 seconds.",
+	"Icon": "imgs/plugin/marketplace",
+	"SDKVersion": 3,
+	"Software": {
+		"MinimumVersion": "7.1"
+	},
+	"OS": [
+		{
+			"Platform": "mac",
+			"MinimumVersion": "12"
+		},
+		{
+			"Platform": "windows",
+			"MinimumVersion": "10"
+		}
+	],
+	"Nodejs": {
+		"Version": "24"
+	},
+	"UUID": "com.sentrysix.manager-downloads"
+}

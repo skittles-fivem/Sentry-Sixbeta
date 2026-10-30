@@ -1,0 +1,23 @@
+{
+  "name": "sentry-manager-streamdeck",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Stream Deck plugin: Sentry Six Manager download count, checked every 30 seconds",
+  "type": "module",
+  "scripts": {
+    "build": "rollup -c",
+    "test": "node --test test/*.test.js",
+    "validate": "streamdeck validate com.sentrysix.manager-downloads.sdPlugin",
+    "pack": "npm run build && streamdeck pack com.sentrysix.manager-downloads.sdPlugin --force"
+  },
+  "dependencies": {
+    "@elgato/streamdeck": "^3.0.4"
+  },
+  "devDependencies": {
+    "@elgato/cli": "^1.10.4",
+    "@rollup/plugin-commonjs": "^29.0.3",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "rollup": "^4.66.0"
+  },
+  "license": "MIT"
+}
